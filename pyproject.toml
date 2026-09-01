@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "msdial-spectrum-catalog"
+version = "0.1.0"
+description = "Traceable repository-to-spectrum catalog for MS-DIAL reanalysis outputs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "LGPL-3.0-or-later" }
+authors = [{ name = "Systems Omics Lab" }]
+dependencies = []
+
+[project.scripts]
+msdial-spectrum-catalog = "msdial_spectrum_catalog.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
