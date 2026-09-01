@@ -15,16 +15,17 @@ different volume, update, retention, and release policies.
 An MS-DIAL run is immutable and identified by a hash of its registered text
 artifacts. Re-running with different parameters creates another run. Sample
 features link to `.mdpeak` rows; deconvoluted spectra link to individual `.mdmsp`
-records; alignment features link to `.mdalign` rows; alignment members link to
-`.mdprovenance.tsv` rows; consensus spectra link to alignment `.mdmsp` records.
+records; alignment features link to `.mdalign` rows; alignment members primarily
+link through the compact `.mdpeakid.tsv` matrix; consensus spectra link to
+alignment `.mdmsp` records. Optional `.mdprovenance.tsv` rows add detailed audit
+properties without changing the compact source-feature link.
 
-For gap-filled cells, `has_source_peak=false` and `feature_id` is null. The
-corrected RT, m/z, and intensity remain recorded as an alignment member without
-inventing a source peak.
+For gap-filled cells, the matrix stores `-1`, `has_source_peak=false`, and
+`feature_id` is null. When the detailed audit sidecar is present, corrected RT,
+m/z, and intensity remain recorded without inventing a source peak.
 
 ## Scale path
 
 SQLite stores searchable metadata and compressed spectrum payloads in v0.1.
 When corpus size warrants it, `spectrum_blob` can move to repository/run shards
 or Parquet without changing any logical identifier or provenance table.
-

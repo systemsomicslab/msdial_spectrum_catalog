@@ -17,10 +17,14 @@ repository -> accession -> analysis unit -> MS-DIAL run
 Every imported artifact is recorded with SHA-256, byte size, path, and record
 location. Spectrum peak arrays are zlib-compressed and deduplicated by content hash.
 
-MS-DIAL Console additionally exports `AlignResult-*.mdprovenance.tsv`. This sidecar
-is the authoritative mapping from every alignment spot and file to the original
-`MasterPeakID`, raw spectrum indices, and representative feature. Existing
-`.mdalign`, `.mdmsp`, `.mdpeak`, and mzTab-M formats remain unchanged.
+MS-DIAL Console additionally exports `AlignResult-*.mdpeakid.tsv`. This compact
+matrix is the authoritative mapping from each alignment `MasterAlignmentID` and
+sample to the original mdpeak `MasterPeakID`; `-1` represents a gap-filled or
+missing source peak. `AlignResult-*.mdprovenance.tsv` is an optional audit export
+that supplements the matrix with raw spectrum indices, RT, m/z, and intensity.
+Existing `.mdalign`, `.mdmsp`, `.mdpeak`, and mzTab-M formats remain unchanged.
+The detailed audit file is disabled by default and can be requested in an
+MS-DIAL Console parameter file with `Detailed alignment provenance: True`.
 
 ## Quick start
 
@@ -34,8 +38,9 @@ msdial-spectrum-catalog ingest-run catalog.sqlite D:\analysis\output `
   --parameter-file D:\analysis\method.txt
 ```
 
-The command exits with code 2 when an alignment exists without its provenance
-sidecar or when an MSP record references a missing feature.
+The command exits with code 2 when an alignment has neither a compact Peak ID
+matrix nor a detailed provenance sidecar, or when an MSP record references a
+missing feature.
 
 Re-check a stored run at any time:
 

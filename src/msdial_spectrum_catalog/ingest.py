@@ -29,6 +29,8 @@ class IngestReport:
 
 def _artifact_type(path: Path) -> str:
     lower = path.name.lower()
+    if lower.endswith(".mdpeakid.tsv"):
+        return "alignment_peak_id_matrix"
     if lower.endswith(".mdprovenance.tsv"):
         return "alignment_provenance"
     if lower.endswith(".mdalign"):
@@ -194,6 +196,7 @@ def ingest_run(
                 )
 
         alignments: dict[int, str] = {}
+        representative_sample_names: dict[int, str] = {}
         for alignment_path in (path for path in relevant if path.suffix.lower() == ".mdalign"):
             for row_number, row in read_tsv(alignment_path, "Alignment ID\t"):
                 alignment_id = parse_number(row.get("Alignment ID"), int)
@@ -201,6 +204,9 @@ def ingest_run(
                     continue
                 alignment_feature_id = make_id("alignment", run_id, alignment_id)
                 alignments[alignment_id] = alignment_feature_id
+                representative_name = row.get("Spectrum reference file name", "").strip()
+                if representative_name and representative_name.lower() != "null":
+                    representative_sample_names[alignment_id] = representative_name
                 connection.execute(
                     """INSERT OR IGNORE INTO alignment_feature(
                         alignment_feature_id, run_id, alignment_master_id, alignment_local_id,
@@ -240,9 +246,67 @@ def ingest_run(
                     ),
                 )
 
+        peak_id_paths = [path for path in relevant if path.name.lower().endswith(".mdpeakid.tsv")]
         provenance_paths = [path for path in relevant if path.name.lower().endswith(".mdprovenance.tsv")]
-        if alignments and not provenance_paths:
-            report.errors.append("Alignment output exists but .mdprovenance.tsv is missing")
+        if alignments and not peak_id_paths and not provenance_paths:
+            report.errors.append(
+                "Alignment output exists but neither .mdpeakid.tsv nor .mdprovenance.tsv is present"
+            )
+
+        unknown_matrix_samples: set[str] = set()
+        for peak_id_path in peak_id_paths:
+            for row_number, row in read_tsv(peak_id_path):
+                alignment_id = parse_number(row.get("alignment_master_id"), int)
+                alignment_feature_id = alignments.get(alignment_id) if alignment_id is not None else None
+                if alignment_feature_id is None:
+                    report.errors.append(f"Unknown alignment ID {alignment_id} in {peak_id_path.name}")
+                    continue
+                representative_name = representative_sample_names.get(alignment_id)
+                for file_id, (sample_name, raw_peak_id) in enumerate(
+                    (item for item in row.items() if item[0] != "alignment_master_id")
+                ):
+                    sample_id = samples.get(sample_name)
+                    if sample_id is None:
+                        if sample_name not in unknown_matrix_samples:
+                            report.errors.append(f"Unknown sample {sample_name!r} in {peak_id_path.name}")
+                            unknown_matrix_samples.add(sample_name)
+                        continue
+                    source_peak_id = parse_number(raw_peak_id, int)
+                    has_source_peak = source_peak_id is not None and source_peak_id >= 0
+                    feature_id = features.get((sample_name, source_peak_id)) if has_source_peak else None
+                    if has_source_peak and feature_id is None:
+                        report.errors.append(
+                            f"Alignment {alignment_id}, {sample_name} references missing peak {source_peak_id}"
+                        )
+                    is_representative = sample_name == representative_name
+                    member_id = make_id("alignment-member", run_id, alignment_id, sample_name)
+                    connection.execute(
+                        """INSERT INTO alignment_member(
+                            alignment_member_id, alignment_feature_id, sample_id, feature_id, file_id,
+                            is_representative, has_source_peak, source_master_peak_id,
+                            source_artifact_id, source_row
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(alignment_feature_id, sample_id) DO UPDATE SET
+                            feature_id = excluded.feature_id,
+                            file_id = excluded.file_id,
+                            is_representative = excluded.is_representative,
+                            has_source_peak = excluded.has_source_peak,
+                            source_master_peak_id = excluded.source_master_peak_id,
+                            source_artifact_id = excluded.source_artifact_id,
+                            source_row = excluded.source_row""",
+                        (
+                            member_id, alignment_feature_id, sample_id, feature_id, file_id,
+                            int(is_representative), int(has_source_peak),
+                            source_peak_id if has_source_peak else None,
+                            artifact_ids[peak_id_path], row_number,
+                        ),
+                    )
+                    if is_representative:
+                        connection.execute(
+                            "UPDATE alignment_feature SET representative_sample_id = ?, representative_feature_id = ? WHERE alignment_feature_id = ?",
+                            (sample_id, feature_id, alignment_feature_id),
+                        )
+
         for provenance_path in provenance_paths:
             for row_number, row in read_tsv(provenance_path):
                 alignment_id = parse_number(row.get("alignment_master_id"), int)
@@ -262,12 +326,38 @@ def ingest_run(
                 if has_source_peak and feature_id is None:
                     report.errors.append(f"Alignment {alignment_id}, {sample_name} references missing peak {source_peak_id}")
                 member_id = make_id("alignment-member", run_id, alignment_id, sample_name)
+                existing_member = connection.execute(
+                    "SELECT source_master_peak_id FROM alignment_member WHERE alignment_feature_id = ? AND sample_id = ?",
+                    (alignment_feature_id, sample_id),
+                ).fetchone()
+                if (
+                    existing_member is not None
+                    and existing_member["source_master_peak_id"] is not None
+                    and source_peak_id is not None
+                    and existing_member["source_master_peak_id"] != source_peak_id
+                ):
+                    report.errors.append(
+                        f"Peak ID matrix/provenance mismatch for alignment {alignment_id}, {sample_name}: "
+                        f"{existing_member['source_master_peak_id']} vs {source_peak_id}"
+                    )
                 connection.execute(
-                    """INSERT OR IGNORE INTO alignment_member(
+                    """INSERT INTO alignment_member(
                         alignment_member_id, alignment_feature_id, sample_id, feature_id, file_id,
                         is_representative, has_source_peak, source_master_peak_id, source_local_peak_id,
                         ms1_scan_index, ms2_scan_index, rt_min, mz, height, source_artifact_id, source_row
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(alignment_feature_id, sample_id) DO UPDATE SET
+                        feature_id = excluded.feature_id,
+                        file_id = excluded.file_id,
+                        is_representative = excluded.is_representative,
+                        has_source_peak = excluded.has_source_peak,
+                        source_master_peak_id = excluded.source_master_peak_id,
+                        source_local_peak_id = excluded.source_local_peak_id,
+                        ms1_scan_index = excluded.ms1_scan_index,
+                        ms2_scan_index = excluded.ms2_scan_index,
+                        rt_min = excluded.rt_min,
+                        mz = excluded.mz,
+                        height = excluded.height""",
                     (
                         member_id, alignment_feature_id, sample_id, feature_id, file_id,
                         int(row.get("is_representative", "").lower() == "true"), int(has_source_peak),
