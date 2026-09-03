@@ -19,8 +19,9 @@ code: one JSON file per version under `src/msdial_spectrum_catalog/vocabulary/re
 
 | Version | Status | Claim tokens | Source |
 | --- | --- | --- | --- |
-| `smb-v2-consensus` | active, default | `SP` `SC` `SI` `CP` | V2 document sections 2 and 4, agreed internationally |
+| `smb-v2-consensus` | accepted, **default** | `SP` `SC` `SI` `CP` | V2 document sections 2 and 4, agreed internationally |
 | `smb-v1-draft` | superseded | `SP` `CP` `MO` `CL` | earlier document sections 3/6/8, Table S9, and the slide deck |
+| `smb-v2.1-proposal` | draft | same as the consensus | a strict extension adding one proposed evidence tag, `SM` |
 
 `smb-v2-consensus` is the default because the V2 document's sections 1 to 4 are the agreed consensus.
 Sections 3, 5, 6 and 8 of that same document were not updated and still print the superseded tokens, which
@@ -69,11 +70,41 @@ warns rather than raising, because the combination rules are guidance and the wo
 `RT` retention, `IM` ion mobility, `IS` in silico, `MN` molecular network, `HO` homologue,
 `CO` contextual, `UN` unclassified additional, `OS` other spectroscopy.
 
-Emitted in that order, which is the order printed in the source table. Two changes from the earlier draft
-are worth noting: contextual evidence is `CO`, not `CX`; and `SM` (spectral similarity) is absent from the
-consensus set, so a learned-embedding similarity such as DreaMS has no settled home among these twelve.
-`OS` and `UN` overlap in the agreed text — `UN`'s definition also names UV and IR, and use case 12 tags UV
-evidence as `UN` — so curators need an explicit rule for choosing between them.
+Emitted in that order, which is the order printed in the source table. Contextual evidence is `CO`, not the
+earlier draft's `CX`.
+
+`OS` and `UN` overlap in the printed text: `UN`'s definition also names UV and IR, and section 6 use case 12
+tags UV evidence as `UN`. Ruled on 2026-09-03: **UV, IR and ECD evidence is `OS`**, and the use-case map is
+outdated rather than the section 4 definitions. `UN` stays the fallback for evidence that fits no other tag,
+such as 2D chromatography.
+
+### `SM`, proposed: similarity without peak correspondence
+
+`SM` was dropped when spectral similarity was folded into `SL`, which leaves representation-based
+similarity — a DreaMS embedding cosine, for instance — with no home among the twelve consensus tags.
+Folding it into `IS` instead would stretch that tag to cover both computation-from-structure and
+comparison-of-two-measurements. `smb-v2.1-proposal` therefore adds `SM` with status `proposed` and the
+concept `smb:evidence/model_spectral_similarity`, distinguished from its neighbours by what is compared and
+whether any fragment can be pointed at:
+
+| Tag | Compares | Claims | Peak correspondence |
+| --- | --- | --- | --- |
+| `SL` | query against a reference spectrum of a known compound | the reference's identity | yes, peak by peak |
+| `MN` | query against another observed spectrum | a relationship: an edge plus an interpretable mass shift | yes, shared peaks |
+| `IS` | a structure, computationally | a ranking from prediction | via the prediction |
+| `SM` | two spectra in a learned representation | resemblance only | **none** |
+
+That absence is the point: no fragment can be named as the reason for the similarity, which is why the
+evidence cannot be reported as `SL` or `DF`. Two constraints come with the tag. A subtype qualifier is
+mandatory — `SM:dreams-emb-cos`, say — because a learned-embedding 0.8 is not comparable to a peak-matching
+cosine 0.8 and must never be read against a cosine threshold; and the record must carry the model identity,
+since embeddings from different checkpoints are not interchangeable. Contrastive spectrum models are
+typically optimized for analog retrieval, so a high value supports a class or substructure claim far more
+often than a proposed structure: `SM`-only evidence should not carry an `L3-SP` claim.
+
+Because `SM` is `proposed`, strict mode rejects it and only permissive mode resolves it. Migrating a reading
+back to `smb-v2-consensus` drops the tag and marks the reading unresolved, rather than silently recoding it
+as `SL` or `IS`.
 
 ## Notation
 
@@ -101,10 +132,25 @@ evidence can be re-tagged when the criteria change without re-running annotation
 were authored against. `annotation_tool_run` records which tool, version and parameters produced a
 candidate.
 
-Scores always travel with their convention. MS-DIAL reports dot products as **squared** cosines — its C#
-cutoffs are literally `.6F * .6F` and `.8F * .8F`, and `WeightedDotProductCutOff` is a computed property
-returning `sqrt` of the stored value. A cosine of 0.9 is 0.81 in MS-DIAL's own numbers, which is precisely
-the range where a merge decision lives, so `score_convention` is stored explicitly and never inferred.
+Scores always travel with their convention, because MS-DIAL squares internally and un-squares on the way
+out. The chain, verified in source:
+
+| Layer | Value | Where |
+| --- | --- | --- |
+| `GetSimpleDotProduct` return | cos-squared of the sqrt-intensity vectors | `Math.Pow(covariance,2)/scalarM/scalarR` |
+| `GetWeightedDotProduct` return | cos-squared of sqrt(intensity x m/z) vectors, times a peak-count penalty of 0.75 / 0.88 / 0.94 / 0.97 for 1 to 4 matched peaks | same function; its own doc comment says "the square of a typical dot product" |
+| `MsScanMatchResult.Squared*` | stores those values as-is | `MsScanMatching.cs:657`, `MassAnnotator.cs:103` |
+| threshold comparison | `Squared* >= Squared*CutOff`, i.e. 0.36 and 0.64 | `MsScanMatching.cs:442`, `MassAnnotator.cs:192` — no exporter reads these fields |
+| parameter file and UI cutoffs | non-squared, 0.6 and 0.8; `WeightedDotProductCutOff` is a `sqrt` getter | `MsRefSearchParameterBase.cs:33-45` |
+| **`.mdpeak` and `.mdalign` columns** | **plain cosine** | `IAnalysisMetadataAccessor.cs:123-125` and `IMetadataAccessor.cs:114-116` write the non-squared computed properties |
+
+So everything user-facing is already consistent in cosine terms and the squaring never leaks; ingested
+rows are therefore recorded as `score_convention = 'cosine'`. Two consequences matter for anything that
+calls the scoring kernel directly rather than reading a text export: `GetWeightedDotProduct` and friends
+return cos-squared, so a 0.9 cosine threshold must be compared against 0.81 or the value must be
+square-rooted first; and `GetBatchSimpleDotProduct` returns a dense matrix pre-filled with `-1` for pairs
+it did not compute (`IsAvailableSpectrum` failed), where `-1` is a not-computed sentinel and not a
+similarity of minus one.
 
 ## What MS-DIAL already asserts, and what it does not
 

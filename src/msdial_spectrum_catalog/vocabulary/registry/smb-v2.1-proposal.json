@@ -1,25 +1,16 @@
 {
   "schema_version": 1,
-  "vocabulary_id": "urn:msdial:vocabulary:shin-massbank-annotation:smb-v2-consensus",
+  "vocabulary_id": "urn:msdial:vocabulary:shin-massbank-annotation:smb-v2.1-proposal",
   "vocabulary_family": "shin-massbank-annotation",
-  "version": "smb-v2-consensus",
-  "status": "accepted",
+  "version": "smb-v2.1-proposal",
+  "status": "draft",
   "provenance": {
-    "source_file": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx",
-    "source_files": [
-      "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx",
-      "TableS9_Evidence_Inventory_Concrete_Examples.xlsx"
-    ],
+    "source_file": "derived from smb-v2-consensus",
     "source_date": "2026-09-03",
     "sections": [
-      "1. Purpose",
-      "2. Level 3 annotation claim tags",
-      "3. Decision rule and combination rule (stale text, translated)",
-      "4. Evidence inventory tags",
-      "5. Study-level criteria table (stale tokens, used only for criteria_required)",
-      "Reference (Schymanski et al. 2014)"
+      "extends V2 sections 2 and 4 without altering them"
     ],
-    "notes": "Sections 1-4 are the internationally agreed consensus, confirmed by Hiroshi Tsugawa on 2026-09-03. Claim terms are transcribed verbatim from section 2 and evidence terms verbatim from section 4. decision_rules and combination_rules are TRANSLATED from the section 3 text, which was never updated and still uses the superseded tokens CP(component), MO and CL; the untranslated sentence is retained per rule as source_text_verbatim. criteria_required records whether the tag has a row in the section 5 study-level criteria table. value_fields are not stated in V2 section 4; they are carried over from the TableS9 'Optional per-annotation values' column (2026-08-19) as a storage hint only, with score_convention added because a score is uninterpretable without the convention it is expressed in. The evidence axis is ordered RS,FM,SL,DF,RT,IM,IS,MN,HO,CO,UN,OS, which is the order printed in the section 4 table; CANONICAL_EVIDENCE_ORDER is derived from this axis."
+    "notes": "A strict extension of smb-v2-consensus: every consensus term is carried over unchanged, and one additional evidence term SM is added with status 'proposed'. Nothing is renamed, removed or re-bound, so a reading migrates between the two versions by identity for every consensus concept. The proposal exists because model-based spectral similarity has no home among the twelve consensus tags: SM was present in the earlier draft and was dropped when spectral similarity was folded into SL. Raised by Hiroshi Tsugawa on 2026-09-03, who noted that folding it into IS instead would make the scope of IS too broad. This version is NOT consensus and is not the default; strict mode rejects SM because its status is 'proposed'."
   },
   "axes": {
     "annotation_level": [
@@ -197,6 +188,29 @@
           "adduct"
         ],
         "notes": "score_convention is mandatory for stored scores because MS-DIAL reports squared cosines while the section 5 criteria are written as dot products."
+      },
+      {
+        "token": "SM",
+        "concept_id": "smb:evidence/model_spectral_similarity",
+        "label": "Model-based spectral similarity",
+        "definition": "Similarity between two spectra computed in a learned representation or by a similarity model, without peak-level correspondence. Distinct from SL, which matches a query against a reference spectrum peak by peak and claims the reference's identity; from MN, which relates two observed spectra through shared peaks and an interpretable mass shift; and from IS, which computes from a structure rather than comparing two measurements.",
+        "definition_source": "Proposed 2026-09-03. Extends the earlier draft's SM ('Spectral Similarity to related molecule, e.g. between Molecular Network neighbours'), narrowed to representation-based similarity.",
+        "status": "proposed",
+        "specificity_rank": null,
+        "criteria_required": true,
+        "value_fields": [
+          "model_name",
+          "model_version",
+          "checkpoint_identity",
+          "embedding_dim",
+          "similarity_metric",
+          "similarity_value",
+          "score_convention",
+          "preprocessing",
+          "out_of_distribution",
+          "ood_reason"
+        ],
+        "notes": "The defining property is the ABSENCE of peak correspondence: no fragment can be pointed at as the reason for the similarity, which is why it must not be folded into SL or DF. A subtype qualifier is mandatory (for example SM:dreams-emb-cos) because a learned-embedding value of 0.8 is not comparable to a peak-matching cosine of 0.8 and must never be read against a cosine threshold. Contrastive spectrum models are typically optimized for ANALOG retrieval, so a high value supports a class or substructure claim far more often than a proposed structure: SM-only evidence should not carry an L3-SP claim. The evidence record must state the model identity, because embeddings from different checkpoints are not interchangeable and their values are not comparable."
       },
       {
         "token": "DF",
@@ -497,7 +511,7 @@
     },
     {
       "issue_id": "ISSUE-SM-DROPPED",
-      "status": "open",
+      "status": "proposal_drafted",
       "title": "Spectral similarity has no home in the consensus set",
       "detail": "SM (spectral similarity) appears in the earlier draft but not in the consensus set, while DreaMS-style learned-embedding similarity has no home among the 12 consensus tags. Such evidence currently falls to MN or UN, neither of which describes an embedding distance.",
       "sources": [
@@ -506,7 +520,8 @@
       ],
       "affects": [
         "evidence"
-      ]
+      ],
+      "resolution": "smb-v2.1-proposal adds SM as a 'proposed' term with the concept smb:evidence/model_spectral_similarity, narrowed to representation-based similarity without peak correspondence. Awaiting a workshop decision."
     },
     {
       "issue_id": "ISSUE-LEVEL-NOT-DERIVABLE",

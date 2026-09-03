@@ -38,12 +38,16 @@ FORMULA_MASS = "smb:evidence/formula_mass"
 SPECTRAL_SIMILARITY = "smb:evidence/spectral_similarity"
 
 
+PROPOSAL = "smb-v2.1-proposal"
+
 class RegistryTests(unittest.TestCase):
-    def test_both_versions_are_registered_and_default_is_the_consensus(self):
-        self.assertEqual(available_versions(), (V1, V2))
+    def test_registered_versions_and_their_statuses(self):
+        self.assertEqual(set(available_versions()), {V1, V2, PROPOSAL})
         self.assertEqual(DEFAULT_VOCABULARY, V2)
         self.assertEqual(load_vocabulary(V2).status, "accepted")
         self.assertEqual(load_vocabulary(V1).status, "superseded")
+        # Only the consensus is the default; a draft proposal must never become one by being added.
+        self.assertEqual(load_vocabulary(PROPOSAL).status, "draft")
 
     def test_registry_files_are_data_and_carry_the_required_keys(self):
         for version in available_versions():
@@ -108,18 +112,24 @@ class RegistryTests(unittest.TestCase):
         self.assertTrue(any("not a confidence ranking" in rule["rule"] for rule in v2.decision_rules))
 
     def test_open_issues_are_machine_visible(self):
-        issues = {issue["issue_id"] for issue in load_vocabulary(V2).open_issues}
+        issues = {issue["issue_id"]: issue for issue in load_vocabulary(V2).open_issues}
         self.assertEqual(
-            issues,
+            set(issues),
             {
                 "ISSUE-SECTIONS-5-8-STALE",
                 "ISSUE-CP-COLLISION",
                 "ISSUE-SM-DROPPED",
                 "ISSUE-LEVEL-NOT-DERIVABLE",
                 "ISSUE-EVIDENCE-DELIMITER",
+                "ISSUE-OS-UN-OVERLAP",
             },
         )
-        self.assertTrue(all(issue["status"] == "open" for issue in load_vocabulary(V2).open_issues))
+        # Every issue carries a status, and a resolved one carries how it was resolved.
+        for issue in issues.values():
+            self.assertIn(issue["status"], {"open", "resolved", "proposal_drafted"})
+            if issue["status"] != "open":
+                self.assertTrue(issue["resolution"])
+        self.assertEqual(issues["ISSUE-OS-UN-OVERLAP"]["status"], "resolved")
 
     def test_unknown_version_is_refused(self):
         with self.assertRaises(ValueError):
@@ -200,11 +210,10 @@ class CollisionTests(unittest.TestCase):
 
     def test_parse_notation_any_returns_one_reading_per_version(self):
         readings = parse_notation_any("L3-CP[FM]")
-        self.assertEqual(len(readings), 2)
-        self.assertEqual({reading.vocab_version for reading in readings}, {V1, V2})
+        self.assertEqual({reading.vocab_version for reading in readings}, {V1, V2, PROPOSAL})
         self.assertEqual(
             {reading.vocab_version: reading.claim_concept_ids for reading in readings},
-            {V1: (SUBSTRUCTURE_COMPLETE,), V2: (CLASS,)},
+            {V1: (SUBSTRUCTURE_COMPLETE,), V2: (CLASS,), PROPOSAL: (CLASS,)},
         )
 
     def test_resolving_a_rebound_token_without_a_version_is_an_error(self):
@@ -212,7 +221,8 @@ class CollisionTests(unittest.TestCase):
             resolve_claim_token("CP")
         self.assertEqual(caught.exception.token, "CP")
         self.assertEqual(
-            set(caught.exception.candidates), {(V1, SUBSTRUCTURE_COMPLETE), (V2, CLASS)}
+            set(caught.exception.candidates),
+            {(V1, SUBSTRUCTURE_COMPLETE), (V2, CLASS), (PROPOSAL, CLASS)},
         )
 
     def test_a_stable_token_resolves_without_a_version(self):
@@ -419,3 +429,68 @@ class UseCaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModelSpectralSimilarityProposalTests(unittest.TestCase):
+    """smb-v2.1-proposal adds SM for representation-based similarity without peak correspondence."""
+
+    PROPOSAL = "smb-v2.1-proposal"
+    SM_CONCEPT = "smb:evidence/model_spectral_similarity"
+
+    def test_the_proposal_is_available_but_is_not_the_default(self):
+        self.assertIn(self.PROPOSAL, available_versions())
+        self.assertNotEqual(DEFAULT_VOCABULARY, self.PROPOSAL)
+        self.assertEqual(load_vocabulary(self.PROPOSAL).status, "draft")
+
+    def test_the_proposal_is_a_strict_extension_of_the_consensus(self):
+        consensus = load_vocabulary(DEFAULT_VOCABULARY)
+        proposal = load_vocabulary(self.PROPOSAL)
+        for axis, terms in consensus.axes.items():
+            for term in terms:
+                mirrored = proposal.by_concept(axis, term.concept_id)
+                self.assertIsNotNone(mirrored, f"{axis}/{term.concept_id} missing from the proposal")
+                self.assertEqual(mirrored.token, term.token)
+                self.assertEqual(mirrored.definition, term.definition)
+        added = {t.concept_id for t in proposal.axes[EVIDENCE_AXIS]} - {
+            t.concept_id for t in consensus.axes[EVIDENCE_AXIS]
+        }
+        self.assertEqual(added, {self.SM_CONCEPT})
+
+    def test_sm_is_proposed_not_accepted_so_strict_mode_rejects_it(self):
+        term = load_vocabulary(self.PROPOSAL).term(EVIDENCE_AXIS, "SM")
+        self.assertEqual(term.status, "proposed")
+        with self.assertRaises(NotationError):
+            parse_notation("L3-CP[SM,FM]", self.PROPOSAL, mode="strict")
+
+    def test_permissive_mode_resolves_sm_to_its_own_concept(self):
+        reading = parse_notation("L3-CP[SM,FM]", self.PROPOSAL, mode="permissive")
+        self.assertIn(self.SM_CONCEPT, reading.evidence_concept_ids)
+        self.assertEqual(reading.unknown_tokens, ())
+        self.assertFalse(reading.unresolved)
+
+    def test_downgrading_to_the_consensus_loses_sm_and_says_so(self):
+        # The consensus set has no home for representation-based similarity. Dropping the tag and marking
+        # the reading unresolved is honest; silently recoding it as SL or IS would not be.
+        reading = parse_notation("L3-CP[SM,FM]", self.PROPOSAL, mode="permissive")
+        downgraded = migrate_reading(reading, DEFAULT_VOCABULARY)
+        self.assertNotIn(self.SM_CONCEPT, downgraded.evidence_concept_ids)
+        self.assertIn("SM", downgraded.unknown_tokens)
+        self.assertTrue(downgraded.unresolved)
+
+    def test_sm_carries_the_model_identity_fields_a_reader_needs(self):
+        term = load_vocabulary(self.PROPOSAL).term(EVIDENCE_AXIS, "SM")
+        # An embedding value is uninterpretable without the checkpoint that produced it.
+        for field_name in ("model_name", "model_version", "checkpoint_identity", "similarity_metric"):
+            self.assertIn(field_name, term.value_fields)
+
+
+class OtherSpectroscopyRulingTests(unittest.TestCase):
+    def test_uv_ir_ecd_evidence_belongs_to_os_and_the_overlap_is_recorded_as_resolved(self):
+        consensus = load_vocabulary(DEFAULT_VOCABULARY)
+        issues = {issue["issue_id"]: issue for issue in consensus.open_issues}
+        self.assertIn("ISSUE-OS-UN-OVERLAP", issues)
+        self.assertEqual(issues["ISSUE-OS-UN-OVERLAP"]["status"], "resolved")
+        os_term = consensus.term(EVIDENCE_AXIS, "OS")
+        un_term = consensus.term(EVIDENCE_AXIS, "UN")
+        self.assertIn("OS", os_term.notes)
+        self.assertIn("OS", un_term.notes)

@@ -5,6 +5,33 @@ sample features, deconvoluted spectra, alignment features, and consensus spectra
 It is a companion to `msdial_repository_catalog`: repository metadata remains in
 that catalog, while high-volume analytical results and spectrum provenance live here.
 
+## Purpose
+
+The programme goal this catalog serves is to **redistribute the world's experimental MS/MS spectra with
+their metadata**. A spectrum on its own is of limited use; what makes it reusable is everything attached to
+it. Three kinds of metadata are in scope:
+
+- **chemical** — the molecule or candidate set, the annotation claim, and the evidence inventory behind it
+- **biological** — organism, tissue, disease, intervention, diet, age, sex and the rest of the study context
+- **response** — how the molecule changed, for example an increase under inflammation, tied to an explicit
+  contrast
+
+The reason to insist on all three is empirical: mzmine has a large natural-products user base largely
+because it reaches GNPS, and what users want from GNPS is metadata on their peaks. Spectra without context
+do not get reused.
+
+Licensing follows from the same distinction. A commercial reference library such as NIST cannot be
+redistributed, but an *experimental* spectrum annotated with the help of one can be, provided the record
+cites the library by identifier, version and checksum rather than carrying its content. The evidence model
+is built to make that citation explicit.
+
+Volume is the other constraint. Retaining every raw MS/MS from every study would grow without bound and
+without adding information, so spectra are reduced before publication: within a study, a consensus spectrum
+per alignment feature across samples; and across a reference library, structures whose spectra cannot be
+told apart are reported as a candidate set rather than as separate confident identifications. A learned
+representation such as a DreaMS embedding is a complementary reduction, not a substitute — the two answer
+different questions and can be carried side by side.
+
 ## Traceability model
 
 ```text

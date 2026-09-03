@@ -157,7 +157,7 @@ class MetaboliteNamePredicateTests(unittest.TestCase):
 
 
 class MsdialAnnotationResultTests(unittest.TestCase):
-    def test_annotated_rows_are_promoted_with_squared_cosine_convention(self):
+    def test_annotated_rows_are_promoted_with_cosine_convention(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             _build_run(root)
@@ -188,7 +188,7 @@ class MsdialAnnotationResultTests(unittest.TestCase):
                 self.assertAlmostEqual(feature_row["matched_peaks_percentage"], 2.0)
                 self.assertAlmostEqual(feature_row["total_score"], 2.216)
                 self.assertIsNone(feature_row["ccs_similarity"])
-                self.assertEqual(feature_row["score_convention"], "squared_cosine")
+                self.assertEqual(feature_row["score_convention"], "cosine")
                 self.assertEqual(feature_row["annotation_kind"], "msms_matched")
                 self.assertEqual(feature_row["candidate_name"], "FA 18:3;O2")
                 self.assertEqual(feature_row["candidate_is_named"], 1)
@@ -205,7 +205,7 @@ class MsdialAnnotationResultTests(unittest.TestCase):
                 self.assertEqual(align_row["metabolite_name"], "ST 24:2;O4")
                 self.assertEqual(align_row["annotation_tag"], "430")
                 self.assertAlmostEqual(align_row["reverse_dot_product"], 0.839)
-                self.assertEqual(align_row["score_convention"], "squared_cosine")
+                self.assertEqual(align_row["score_convention"], "cosine")
                 self.assertEqual(align_row["comment"], "Normalized unit: Intensity")
                 self.assertEqual(align_row["subject_id"], align_row["alignment_feature_id"])
                 self.assertIsNone(align_row["feature_id"])

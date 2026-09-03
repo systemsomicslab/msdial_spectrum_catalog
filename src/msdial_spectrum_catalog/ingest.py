@@ -159,11 +159,14 @@ def _annotation_block(row: dict[str, str]) -> dict[str, object] | None:
         for name in _DOT_PRODUCT_FIELDS:
             if block[name] == 0.0:
                 block[name] = None
-    # score_convention describes the three dot-product columns only. MS-DIAL reports them as squared
-    # cosines (its C# cutoffs are literally .6F*.6F and .8F*.8F). Total score is an unnormalized weighted
-    # composite on its own scale -- 2.611 for a real match in the reference demo -- so it is never a cosine.
+    # score_convention describes the three dot-product columns only. The exported columns are plain
+    # cosines: MsScanMatching's GetSimpleDotProduct/GetWeightedDotProduct return cos-squared and are stored
+    # in MsScanMatchResult.Squared*, but those fields are used only for threshold comparison, and both text
+    # exporters write the non-squared computed properties (IMetadataAccessor.cs:114-116,
+    # IAnalysisMetadataAccessor.cs:123-125). Total score is an unnormalized weighted composite on its own
+    # scale -- 2.611 for a real match in the reference demo -- so it is never a cosine.
     has_dot_product = any(block[name] is not None for name in _DOT_PRODUCT_FIELDS)
-    block["score_convention"] = "squared_cosine" if has_dot_product else None
+    block["score_convention"] = "cosine" if has_dot_product else None
     return block
 
 
