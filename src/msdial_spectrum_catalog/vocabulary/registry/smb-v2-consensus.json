@@ -1,0 +1,537 @@
+{
+  "schema_version": 1,
+  "vocabulary_id": "urn:msdial:vocabulary:shin-massbank-annotation:smb-v2-consensus",
+  "vocabulary_family": "shin-massbank-annotation",
+  "version": "smb-v2-consensus",
+  "status": "accepted",
+  "provenance": {
+    "source_file": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx",
+    "source_files": [
+      "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx",
+      "TableS9_Evidence_Inventory_Concrete_Examples.xlsx"
+    ],
+    "source_date": "2026-09-03",
+    "sections": [
+      "1. Purpose",
+      "2. Level 3 annotation claim tags",
+      "3. Decision rule and combination rule (stale text, translated)",
+      "4. Evidence inventory tags",
+      "5. Study-level criteria table (stale tokens, used only for criteria_required)",
+      "Reference (Schymanski et al. 2014)"
+    ],
+    "notes": "Sections 1-4 are the internationally agreed consensus, confirmed by Hiroshi Tsugawa on 2026-09-03. Claim terms are transcribed verbatim from section 2 and evidence terms verbatim from section 4. decision_rules and combination_rules are TRANSLATED from the section 3 text, which was never updated and still uses the superseded tokens CP(component), MO and CL; the untranslated sentence is retained per rule as source_text_verbatim. criteria_required records whether the tag has a row in the section 5 study-level criteria table. value_fields are not stated in V2 section 4; they are carried over from the TableS9 'Optional per-annotation values' column (2026-08-19) as a storage hint only, with score_convention added because MS-DIAL reports squared cosines. The evidence axis is ordered RS,FM,SL,DF,RT,IM,IS,MN,HO,CO,UN,OS, which is the order printed in the section 4 table; CANONICAL_EVIDENCE_ORDER is derived from this axis."
+  },
+  "axes": {
+    "annotation_level": [
+      {
+        "token": "L1",
+        "concept_id": "smb:level/1",
+        "label": "Confirmed structure",
+        "definition": "Confirmed structure.",
+        "definition_source": "Schymanski et al. (2014), Identifying small molecules via high resolution mass spectrometry: communicating confidence. Environmental Science & Technology.",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": false,
+        "value_fields": [],
+        "notes": "The proposal enumerates the level and cites the scale; it does not restate the level criteria, which belong to the study-level criteria set."
+      },
+      {
+        "token": "L2",
+        "concept_id": "smb:level/2",
+        "label": "Probable structure",
+        "definition": "Probable structure.",
+        "definition_source": "Schymanski et al. (2014), Identifying small molecules via high resolution mass spectrometry: communicating confidence. Environmental Science & Technology.",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": false,
+        "value_fields": [],
+        "notes": "The proposal enumerates the level and cites the scale; it does not restate the level criteria, which belong to the study-level criteria set."
+      },
+      {
+        "token": "L3",
+        "concept_id": "smb:level/3",
+        "label": "Tentative candidate",
+        "definition": "Tentative candidate. Level 3 records are further qualified by a level3_claim tag.",
+        "definition_source": "Schymanski et al. (2014), Identifying small molecules via high resolution mass spectrometry: communicating confidence. Environmental Science & Technology.",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": false,
+        "value_fields": [],
+        "notes": "Only this level accepts a claim tag. The proposal enumerates the level and cites the scale; it does not restate the level criteria."
+      },
+      {
+        "token": "L4",
+        "concept_id": "smb:level/4",
+        "label": "Unequivocal molecular formula",
+        "definition": "Unequivocal molecular formula.",
+        "definition_source": "Schymanski et al. (2014), Identifying small molecules via high resolution mass spectrometry: communicating confidence. Environmental Science & Technology.",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": false,
+        "value_fields": [],
+        "notes": "The proposal enumerates the level and cites the scale; it does not restate the level criteria, which belong to the study-level criteria set."
+      },
+      {
+        "token": "L5",
+        "concept_id": "smb:level/5",
+        "label": "Exact mass",
+        "definition": "Exact mass of interest.",
+        "definition_source": "Schymanski et al. (2014), Identifying small molecules via high resolution mass spectrometry: communicating confidence. Environmental Science & Technology.",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": false,
+        "value_fields": [],
+        "notes": "The proposal enumerates the level and cites the scale; it does not restate the level criteria, which belong to the study-level criteria set."
+      }
+    ],
+    "level3_claim": [
+      {
+        "token": "SP",
+        "concept_id": "smb:claim/structure",
+        "label": "Structure(s) proposed",
+        "definition": "(Structures can be proposed by a list) A single two-dimensional constitutional structure is proposed, but not confirmed by a reference standard. Stereochemistry or absolute configuration may remain unresolved unless explicitly claimed.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 2",
+        "status": "accepted",
+        "specificity_rank": 1,
+        "criteria_required": false,
+        "value_fields": [],
+        "notes": "All claim tags use the word proposed because support is described separately by the evidence inventory."
+      },
+      {
+        "token": "SC",
+        "concept_id": "smb:claim/substructure_complete",
+        "label": "Substructure complete",
+        "definition": "Defined molecular components, building blocks, or modifications are proposed, but their positions, connectivities, or arrangements remain unresolved.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 2",
+        "status": "accepted",
+        "specificity_rank": 2,
+        "criteria_required": false,
+        "value_fields": [],
+        "notes": "Renamed from the superseded token CP (component proposed); the definition text is identical in both generations."
+      },
+      {
+        "token": "SI",
+        "concept_id": "smb:claim/substructure_incomplete",
+        "label": "Substructure incomplete",
+        "definition": "A diagnostic substructure or structural motif is proposed, but a component-level representation is not sufficiently defined.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 2",
+        "status": "accepted",
+        "specificity_rank": 3,
+        "criteria_required": false,
+        "value_fields": [],
+        "notes": "Renamed from the superseded token MO (motif proposed); the definition text is identical in both generations."
+      },
+      {
+        "token": "CP",
+        "concept_id": "smb:claim/class",
+        "label": "Class proposed",
+        "definition": "A chemical or metabolite class is proposed, without a stronger structure, component, or motif claim.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 2",
+        "status": "accepted",
+        "specificity_rank": 4,
+        "criteria_required": false,
+        "value_fields": [],
+        "notes": "HAZARD: this token is re-bound. In smb-v1-draft CP means component proposed (smb:claim/substructure_complete). Never resolve CP without a vocabulary version."
+      }
+    ],
+    "evidence": [
+      {
+        "token": "RS",
+        "concept_id": "smb:evidence/reference_standard",
+        "label": "Reference standard",
+        "definition": "Authentic standard measured under comparable conditions.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 4",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": false,
+        "value_fields": [
+          "standard_lot_vendor",
+          "delta_rt_min",
+          "dot_product",
+          "reverse_dot_product",
+          "score_convention",
+          "spectral_entropy",
+          "precursor_delta_mz",
+          "adduct",
+          "collision_energy"
+        ],
+        "notes": "No row in the V2 section 5 study-level criteria table, so criteria_required is false here although TableS9 does state RS criteria."
+      },
+      {
+        "token": "FM",
+        "concept_id": "smb:evidence/formula_mass",
+        "label": "Formula/mass",
+        "definition": "Accurate mass, isotope pattern, adduct consistency, formula plausibility.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 4",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": true,
+        "value_fields": [
+          "measured_mz",
+          "theoretical_mz",
+          "delta_ppm",
+          "formula",
+          "adduct",
+          "isotope_score",
+          "q_like_value"
+        ],
+        "notes": ""
+      },
+      {
+        "token": "SL",
+        "concept_id": "smb:evidence/spectral_library",
+        "label": "Spectral library",
+        "definition": "MS/MS library or literature spectrum match.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 4",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": true,
+        "value_fields": [
+          "library_name_version",
+          "library_id",
+          "score",
+          "reverse_score",
+          "score_convention",
+          "matched_peak_count",
+          "collision_energy",
+          "adduct"
+        ],
+        "notes": "score_convention is mandatory for stored scores because MS-DIAL reports squared cosines while the section 5 criteria are written as dot products."
+      },
+      {
+        "token": "DF",
+        "concept_id": "smb:evidence/diagnostic_fragment",
+        "label": "Diagnostic fragment",
+        "definition": "Diagnostic product ions, neutral losses, or fragmentation rules.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 4",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": true,
+        "value_fields": [
+          "diagnostic_ion_mz",
+          "delta_ppm",
+          "relative_intensity",
+          "neutral_loss",
+          "assigned_fragment_formula",
+          "diagnostic_rule_id"
+        ],
+        "notes": ""
+      },
+      {
+        "token": "RT",
+        "concept_id": "smb:evidence/retention",
+        "label": "Retention information",
+        "definition": "Retention time/index match or retention prediction.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 4",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": true,
+        "value_fields": [
+          "measured_rt_min",
+          "reference_rt_min",
+          "delta_rt_min",
+          "lc_method",
+          "rt_model_version"
+        ],
+        "notes": ""
+      },
+      {
+        "token": "IM",
+        "concept_id": "smb:evidence/ion_mobility",
+        "label": "Ion mobility",
+        "definition": "CCS, drift time, mobility separation, experimental or predicted IM values.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 4",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": true,
+        "value_fields": [
+          "measured_ccs",
+          "reference_ccs",
+          "delta_ccs",
+          "ccs_relative_error_percent",
+          "instrument",
+          "calibration_standard"
+        ],
+        "notes": ""
+      },
+      {
+        "token": "IS",
+        "concept_id": "smb:evidence/in_silico",
+        "label": "In silico",
+        "definition": "SIRIUS, MS-FINDER, MetFrag, ClassyFire, ZBRA, predicted spectra/classes, or cheminformatics.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 4",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": true,
+        "value_fields": [
+          "tool_name_version",
+          "rank",
+          "score",
+          "score_convention",
+          "posterior_odds",
+          "q_like_value",
+          "database_version"
+        ],
+        "notes": ""
+      },
+      {
+        "token": "MN",
+        "concept_id": "smb:evidence/molecular_network",
+        "label": "Molecular network",
+        "definition": "Network edge, known-neighbor relation, or interpretable mass shift.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 4",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": true,
+        "value_fields": [
+          "network_score",
+          "score_convention",
+          "connected_node_id",
+          "connected_node_level",
+          "mass_shift",
+          "shared_peak_count"
+        ],
+        "notes": ""
+      },
+      {
+        "token": "HO",
+        "concept_id": "smb:evidence/homologue",
+        "label": "Homologue evidence",
+        "definition": "Kendrick mass defect, homologue series evidence.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 4",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": false,
+        "value_fields": [
+          "kendrick_mass_defect",
+          "homologue_series_id"
+        ],
+        "notes": "Proposed but not accepted in smb-v1-draft; accepted in the consensus set. No section 5 criteria row."
+      },
+      {
+        "token": "CO",
+        "concept_id": "smb:evidence/contextual",
+        "label": "Contextual",
+        "definition": "Biological, biosynthetic, taxonomic, dietary, microbiome, tissue, or perturbation context.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 4",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": true,
+        "value_fields": [
+          "context_rule_id",
+          "organism",
+          "tissue",
+          "diet",
+          "perturbation",
+          "expected_pathway",
+          "detected_sample_type",
+          "supporting_literature"
+        ],
+        "notes": "Renamed from the superseded token CX. Sections 5 and 6 of the same document still print CX, which is why criteria_required is taken from the CX row."
+      },
+      {
+        "token": "UN",
+        "concept_id": "smb:evidence/unclassified",
+        "label": "Unclassified additional evidence",
+        "definition": "Other evidence - UV detector, IR, fragmentation, 2D chromatography.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 4",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": false,
+        "value_fields": [],
+        "notes": "Proposed but not accepted in smb-v1-draft; accepted in the consensus set. Overlaps OS."
+      },
+      {
+        "token": "OS",
+        "concept_id": "smb:evidence/other_spectroscopy",
+        "label": "Other spectroscopy methods",
+        "definition": "UV, IR, ECD.",
+        "definition_source": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 4",
+        "status": "accepted",
+        "specificity_rank": null,
+        "criteria_required": false,
+        "value_fields": [],
+        "notes": "Listed last in the section 4 table. Its scope overlaps UN, whose definition also names UV and IR, and V2 use case 12 tags UV evidence as UN rather than OS. Curators need an explicit rule for which of the two to use."
+      }
+    ]
+  },
+  "combination_rules": [
+    {
+      "claim_tokens": [
+        "SP"
+      ],
+      "claim_concept_ids": [
+        "smb:claim/structure"
+      ],
+      "status": "recommended",
+      "note": "Default for a single two-dimensional structure. A proposed 2D structure generally determines the corresponding chemical class under the classification system used.",
+      "source_text_verbatim": "SP is normally reported without CL because a proposed 2D structure generally determines the corresponding chemical class under the classification system used.",
+      "translated_from": "smb-v1-draft"
+    },
+    {
+      "claim_tokens": [
+        "SP",
+        "CP"
+      ],
+      "claim_concept_ids": [
+        "smb:claim/structure",
+        "smb:claim/class"
+      ],
+      "status": "discouraged",
+      "note": "Exceptional only, when class assignment depends on stereochemical, configurational or ontology-specific distinctions not represented by the reported structure.",
+      "source_text_verbatim": "SP+CL is reserved for exceptional cases where class assignment depends on stereochemical, configurational, or ontology-specific distinctions that are not fully represented by the reported structure.",
+      "translated_from": "smb-v1-draft"
+    },
+    {
+      "claim_tokens": [
+        "SC",
+        "CP"
+      ],
+      "claim_concept_ids": [
+        "smb:claim/substructure_complete",
+        "smb:claim/class"
+      ],
+      "status": "allowed",
+      "note": "Allowed when component-level and class-level information are both useful.",
+      "source_text_verbatim": "CL may be appended to CP or MO when class-level information provides independent useful metadata.",
+      "translated_from": "smb-v1-draft"
+    },
+    {
+      "claim_tokens": [
+        "SI",
+        "CP"
+      ],
+      "claim_concept_ids": [
+        "smb:claim/substructure_incomplete",
+        "smb:claim/class"
+      ],
+      "status": "allowed",
+      "note": "Allowed when motif evidence and class-level information are independent and useful.",
+      "source_text_verbatim": "CL may be appended to CP or MO when class-level information provides independent useful metadata.",
+      "translated_from": "smb-v1-draft"
+    },
+    {
+      "claim_tokens": [
+        "SC",
+        "SI"
+      ],
+      "claim_concept_ids": [
+        "smb:claim/substructure_complete",
+        "smb:claim/substructure_incomplete"
+      ],
+      "status": "avoid",
+      "note": "SC usually already contains the motif-level statement once components and modification scope are described.",
+      "source_text_verbatim": "CP+MO is generally avoided because CP usually contains the motif-level statement once components and modification scope are explicitly described.",
+      "translated_from": "smb-v1-draft"
+    }
+  ],
+  "decision_rules": [
+    {
+      "order": 1,
+      "claim_token": "SP",
+      "claim_concept_id": "smb:claim/structure",
+      "rule": "Use SP when a single two-dimensional constitutional structure can be proposed.",
+      "source_text_verbatim": "Use L3-SP when a single two-dimensional constitutional structure can be proposed.",
+      "translated_from": "smb-v1-draft"
+    },
+    {
+      "order": 2,
+      "claim_token": "SC",
+      "claim_concept_id": "smb:claim/substructure_complete",
+      "rule": "Use SC when defined molecular components, building blocks or modifications can be proposed but their positions, connectivities or arrangements remain unresolved.",
+      "source_text_verbatim": "Use L3-CP when defined molecular components, building blocks, or modifications can be proposed, but their positions, connectivities, or arrangements remain unresolved.",
+      "translated_from": "smb-v1-draft"
+    },
+    {
+      "order": 3,
+      "claim_token": "SI",
+      "claim_concept_id": "smb:claim/substructure_incomplete",
+      "rule": "Use SI when only a diagnostic substructure or structural motif can be proposed without a sufficiently defined component-level representation.",
+      "source_text_verbatim": "Use L3-MO when only a diagnostic substructure or structural motif can be proposed without a sufficiently defined component-level representation.",
+      "translated_from": "smb-v1-draft"
+    },
+    {
+      "order": 4,
+      "claim_token": "CP",
+      "claim_concept_id": "smb:claim/class",
+      "rule": "Use CP when the annotation is limited to a chemical or metabolite class.",
+      "source_text_verbatim": "Use L3-CL when the annotation is limited to a chemical or metabolite class.",
+      "translated_from": "smb-v1-draft"
+    },
+    {
+      "order": 5,
+      "claim_token": null,
+      "claim_concept_id": null,
+      "rule": "Most-specific-wins is a specificity rule, not a confidence ranking. A claim is never promoted because it carries many evidence tags.",
+      "source_text_verbatim": "",
+      "translated_from": null
+    }
+  ],
+  "open_issues": [
+    {
+      "issue_id": "ISSUE-SECTIONS-5-8-STALE",
+      "status": "open",
+      "title": "The consensus document contradicts its own section 2",
+      "detail": "V2 sections 3, 5, 6 and 8 still use the superseded tokens CP(component), MO, CL and CX, so the same document contradicts its own section 2. Section 7 carries no tags. Consequence: no notation printed in V2 section 6 resolves under a single vocabulary version, because it mixes consensus claim tokens with the superseded evidence token CX.",
+      "sources": [
+        "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx sections 3, 5, 6, 8",
+        "User statement 2026-09-03: '5以降はまだ見れてません' (sections 5 onward not yet reviewed)"
+      ],
+      "affects": [
+        "level3_claim",
+        "evidence"
+      ]
+    },
+    {
+      "issue_id": "ISSUE-CP-COLLISION",
+      "status": "open",
+      "title": "The token CP is re-bound between versions",
+      "detail": "CP means component proposed (smb:claim/substructure_complete) in smb-v1-draft and class proposed (smb:claim/class) in smb-v2-consensus. A flat alias table cannot represent this, so stored data keys on (vocab_version, concept_id) and the two-letter token is produced only at emit time.",
+      "sources": [
+        "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 2",
+        "TableS9_Evidence_Inventory_Concrete_Examples.xlsx"
+      ],
+      "affects": [
+        "level3_claim"
+      ]
+    },
+    {
+      "issue_id": "ISSUE-SM-DROPPED",
+      "status": "open",
+      "title": "Spectral similarity has no home in the consensus set",
+      "detail": "SM (spectral similarity) appears in the earlier draft but not in the consensus set, while DreaMS-style learned-embedding similarity has no home among the 12 consensus tags. Such evidence currently falls to MN or UN, neither of which describes an embedding distance.",
+      "sources": [
+        "Shin_MassBank_Annotation_Metadata_Proposal_EN.docx section 4",
+        "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 4"
+      ],
+      "affects": [
+        "evidence"
+      ]
+    },
+    {
+      "issue_id": "ISSUE-LEVEL-NOT-DERIVABLE",
+      "status": "open",
+      "title": "Annotation level cannot be computed from evidence tags",
+      "detail": "The published use cases assign the same evidence bracket to different levels, so level cannot be computed from tags. Case 7 assigns [SL,FM] to either L2 or L3-SP, and TableS9 case 8 assigns [SL,RT,FM] to L2 or L1. annotation_level is therefore always an explicit curator input.",
+      "sources": [
+        "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 6 cases 7 and 8",
+        "TableS9_Evidence_Inventory_Concrete_Examples.xlsx sheet 2 cases 7 and 8"
+      ],
+      "affects": [
+        "annotation_level"
+      ]
+    },
+    {
+      "issue_id": "ISSUE-EVIDENCE-DELIMITER",
+      "status": "open",
+      "title": "Evidence delimiter is stated two different ways",
+      "detail": "The notation uses ',' inside brackets but section 8's flat field list says 'semicolon-separated'. '|' must never be used because mzTab treats it as a multi-value separator.",
+      "sources": [
+        "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx sections 4 and 8"
+      ],
+      "affects": [
+        "evidence"
+      ]
+    }
+  ]
+}

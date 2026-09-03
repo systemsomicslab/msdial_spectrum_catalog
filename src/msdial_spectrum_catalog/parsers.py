@@ -28,6 +28,30 @@ def parse_number(value: str | None, kind=float):
         return None
 
 
+def fold_headers(row: dict[str, str]) -> dict[str, str]:
+    """Index one table row by case-folded header."""
+    return {str(key).strip().casefold(): (value or "").strip() for key, value in row.items()}
+
+
+def folded_value(folded: dict[str, str], *headers: str) -> str | None:
+    """Return the first header present in a folded row, or None when absent, empty or 'null'."""
+    for header in headers:
+        found = folded.get(header.strip().casefold())
+        if found is None:
+            continue
+        if not found or found.lower() == "null":
+            return None
+        return found
+    return None
+
+
+def split_refs(value: str | None) -> list[str]:
+    """Split an mzTab-M ID reference list, which MS-DIAL writes '|'- or ','-separated."""
+    if not value or value.strip().lower() == "null":
+        return []
+    return [piece.strip() for piece in value.replace("|", ",").split(",") if piece.strip()]
+
+
 def read_tsv(path: Path, header_prefix: str | None = None) -> Iterator[tuple[int, dict[str, str]]]:
     with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
         header_line = 1

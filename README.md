@@ -57,14 +57,32 @@ run name, and an unambiguous native spectrum identifier are available. MS-DIAL
 deconvoluted and alignment consensus spectra are derived records, so a guessed
 USI is never generated from an array index alone.
 
-## Annotation-ready schema
+## Level 3 annotation records
 
-The schema already separates:
+An annotation record separates the claim, the evidence inventory that supports it, and the study-level
+criteria each evidence tag was judged against. See `docs/annotation_evidence_model.md` for the full model.
 
-- annotation level (`L1` to `L5`)
-- Level 3 claim (`SP`, `CP`, `MO`, `CL`)
-- evidence tags (`RS`, `FM`, `SL`, `DF`, `RT`, `IM`, `IS`, `MN`, `CX`)
-- versioned criteria sets and measured evidence values
+- annotation level `L1` to `L5`, always an explicit input and never derived from the evidence tags
+- Level 3 claim `SP` structure, `SC` substructure complete, `SI` substructure incomplete, `CP` class
+- evidence tags `RS FM SL DF RT IM IS MN HO CO UN OS`
+- an ordered candidate list per claim, so an honest "A or B" is representable
+- versioned criteria sets with per-tag thresholds, and measured values stored beside the threshold they
+  were compared against
+- tool-run provenance for every candidate, and first-class reference and in-silico predicted spectra
 
-No automatic Level assignment is implemented yet. That policy will be developed
-after the provenance foundation has been validated.
+The controlled vocabulary is versioned data, not code, because the proposal is still under discussion and
+one token changed meaning between generations: `CP` means "component proposed" in the earlier draft and
+"class proposed" in the agreed consensus. Rows therefore store a concept identifier plus a vocabulary
+version, and the two-letter token is produced only at emit time.
+
+```powershell
+msdial-spectrum-catalog vocabulary
+msdial-spectrum-catalog notation "L3-SC[FM,DF,MN,CO]" --vocabulary smb-v2-consensus
+msdial-spectrum-catalog show-annotations catalog.sqlite "urn:msdial:run:..."
+msdial-spectrum-catalog validate-annotations catalog.sqlite "urn:msdial:run:..."
+```
+
+MS-DIAL's own per-feature annotation block is ingested into `msdial_annotation_result`, with its four
+distinct outcomes kept apart: a real MS/MS match, a low-score match, a precursor-only suggestion with no
+product-ion spectrum at all, and no candidate. Only a named MS/MS match may support spectral-library
+evidence. No automatic Level assignment is implemented; that policy is a curation decision.
