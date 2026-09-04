@@ -196,7 +196,10 @@ published as an applied threshold.
   text exporter reads only `MatchResults.Representative`, and mzTab-M hardcodes `rank = "1"` and
   `SME_ID_REF_ambiguity_code = "null"`. Interoperable "A or B" reporting needs a Console-side
   per-candidate exporter.
-- Reference and in-silico predicted spectra are first-class (`reference_library`, `reference_spectrum`)
-  but nothing populates them yet, so `spectrum_similarity` and `ambiguity_class` have no producer.
+- Ambiguity classes are computed and persisted; see `docs/ambiguity_classes.md`. What is still missing
+  is a ground-truth set of isomer pairs known to be separable by RT, CCS or an authentic standard, so
+  the similarity threshold remains a convention with no error rate attached.
+- In-silico predicted spectra have no producer yet, although `reference_library.library_kind` already
+  distinguishes them so one can never be reported as spectral-library evidence.
 - Concept identifiers are stored as free text with no vocabulary table to constrain them; `vocab_version`
   is the only provenance.

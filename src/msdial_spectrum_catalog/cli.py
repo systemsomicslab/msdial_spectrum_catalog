@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 
+from .ambiguity import ClassDefinition, ambiguity_class_for, compute_ambiguity_classes
 from .annotation import list_assertions, load_assertion, validate_annotations
 from .ingest import ingest_run
+from .reference_library import LIBRARY_KINDS, ingest_reference_library
 from .storage import connect, initialize
 from .validate import load_spectrum, validate_run
 from .vocabulary import (
@@ -109,6 +111,59 @@ def main(argv=None) -> int:
     )
     notation_parser.add_argument("--mode", default="strict", choices=("strict", "permissive", "quarantine"))
 
+    library_parser = subparsers.add_parser(
+        "ingest-reference-library",
+        help="Register a reference or in-silico MSP library and build skeleton consensus spectra",
+    )
+    library_parser.add_argument("database")
+    library_parser.add_argument("msp_path")
+    library_parser.add_argument("--library-name", required=True)
+    library_parser.add_argument("--library-version")
+    library_parser.add_argument("--kind", default=LIBRARY_KINDS[0], choices=LIBRARY_KINDS)
+    library_parser.add_argument("--source-uri")
+    library_parser.add_argument("--license")
+    library_parser.add_argument("--limit", type=int, help="Cap in-scope records, for a bounded pre-test")
+    library_parser.add_argument(
+        "--precursor-mz-range",
+        nargs=2,
+        type=float,
+        metavar=("BEGIN", "END"),
+        help="Restrict ingestion to a precursor m/z window, for a bounded pre-test",
+    )
+    library_parser.add_argument("--no-consensus", action="store_true")
+
+    ambiguity_parser = subparsers.add_parser(
+        "compute-ambiguity",
+        help="Group reference spectra that cannot be told apart, so an annotation can say 'A or B'",
+    )
+    ambiguity_parser.add_argument("database")
+    ambiguity_parser.add_argument("--definition-id", default=ClassDefinition().definition_id)
+    ambiguity_parser.add_argument(
+        "--weighted-cosine",
+        type=float,
+        default=ClassDefinition().weighted_cosine_threshold,
+        help="Threshold on the symmetric weighted cosine. A convention, not a measurement.",
+    )
+    ambiguity_parser.add_argument(
+        "--entropy", type=float, default=ClassDefinition().entropy_similarity_threshold
+    )
+    ambiguity_parser.add_argument(
+        "--tolerance", type=float, default=ClassDefinition().mz_tolerance_da
+    )
+    ambiguity_parser.add_argument("--library-id", action="append", dest="library_ids")
+    ambiguity_parser.add_argument(
+        "--allow-condition-mismatch",
+        action="store_true",
+        help="Compare across instrument classes and collision-energy bins. Weakens every class it "
+             "produces, because an ambiguity class only holds under a stated condition.",
+    )
+
+    show_ambiguity_parser = subparsers.add_parser(
+        "show-ambiguity", help="Show the ambiguity class anchored on one reference spectrum"
+    )
+    show_ambiguity_parser.add_argument("database")
+    show_ambiguity_parser.add_argument("reference_spectrum_id")
+
     args = parser.parse_args(argv)
     if args.command == "init":
         initialize(args.database)
@@ -139,6 +194,63 @@ def main(argv=None) -> int:
         if spectrum is None:
             return 1
         print(json.dumps(spectrum, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "ingest-reference-library":
+        report = ingest_reference_library(
+            args.database,
+            args.msp_path,
+            library_name=args.library_name,
+            library_version=args.library_version,
+            library_kind=args.kind,
+            source_uri=args.source_uri,
+            license=args.license,
+            consensus=not args.no_consensus,
+            limit=args.limit,
+            precursor_mz_range=tuple(args.precursor_mz_range) if args.precursor_mz_range else None,
+        )
+        print(json.dumps({
+            "library_id": report.library_id,
+            "valid": report.valid,
+            "records_read": report.records_read,
+            "records_skipped": report.records_skipped,
+            "consensus_spectra": report.consensus_spectra,
+            "blobs_written": report.blobs_written,
+            "errors": report.errors,
+            "warnings": report.warnings,
+        }, ensure_ascii=False, indent=2))
+        return 0 if report.valid else 2
+    if args.command == "compute-ambiguity":
+        definition = ClassDefinition(
+            definition_id=args.definition_id,
+            weighted_cosine_threshold=args.weighted_cosine,
+            entropy_similarity_threshold=args.entropy,
+            mz_tolerance_da=args.tolerance,
+            require_condition_match=not args.allow_condition_mismatch,
+        )
+        report = compute_ambiguity_classes(
+            args.database, definition=definition, library_ids=args.library_ids
+        )
+        print(json.dumps({
+            "definition_id": report.definition_id,
+            "valid": report.valid,
+            "definition": definition.as_rules(),
+            "blocks": report.blocks,
+            "pairs_compared": report.pairs_compared,
+            "pairs_insufficient_evidence": report.pairs_insufficient_evidence,
+            "pairs_condition_mismatch": report.pairs_condition_mismatch,
+            "pairs_isobaric_not_isomeric": report.pairs_isobaric_not_isomeric,
+            "edges": report.edges,
+            "classes": report.classes,
+            "singletons": report.singletons,
+            "errors": report.errors,
+            "warnings": report.warnings,
+        }, ensure_ascii=False, indent=2))
+        return 0 if report.valid else 2
+    if args.command == "show-ambiguity":
+        ambiguity_class = ambiguity_class_for(args.database, args.reference_spectrum_id)
+        if ambiguity_class is None:
+            return 1
+        print(json.dumps(ambiguity_class, ensure_ascii=False, indent=2))
         return 0
     if args.command == "validate-annotations":
         report = validate_annotations(args.database, args.run_id)

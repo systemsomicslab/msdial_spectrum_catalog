@@ -113,3 +113,21 @@ MS-DIAL's own per-feature annotation block is ingested into `msdial_annotation_r
 distinct outcomes kept apart: a real MS/MS match, a low-score match, a precursor-only suggestion with no
 product-ion spectrum at all, and no candidate. Only a named MS/MS match may support spectral-library
 evidence. No automatic Level assignment is implemented; that policy is a curation decision.
+
+## Ambiguity classes
+
+Different structures often produce MS/MS spectra that cannot be told apart, because a product-ion
+spectrum carries structural information only indirectly. When a query matches library entry A and entry
+B's spectrum is itself indistinguishable from A's, the match did not choose between them, and the honest
+report is "A or B". `docs/ambiguity_classes.md` describes how those classes are computed and reported.
+
+Measured on the public negative VS20 release, 44,353 records in 43 seconds on one core: 1,846 distinct
+groups of mutually indistinguishable entries, of which 438 are genuine constitutional isomers with
+different skeletons and the same formula. Adenosine 3'-monophosphate against adenosine
+5'-monophosphate is one of them.
+
+```powershell
+msdial-spectrum-catalog ingest-reference-library catalog.sqlite library.msp --library-name NAME
+msdial-spectrum-catalog compute-ambiguity catalog.sqlite
+msdial-spectrum-catalog show-ambiguity catalog.sqlite "urn:msdial:reference-spectrum:..."
+```
