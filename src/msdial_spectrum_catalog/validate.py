@@ -56,6 +56,36 @@ def validate_run(database, run_id: str) -> ValidationReport:
         if missing_member_links:
             report.errors.append(f"{missing_member_links} alignment members reference missing sample features")
 
+        # A member with a source peak must carry a usable m/z. This check exists because an earlier
+        # MS-DIAL provenance export read the column from the chromatogram axis instead of the peak mass,
+        # so every member that DID have a source peak stored a sentinel and only the gap-filled ones
+        # stored a real value. That run validated clean while being systematically wrong, which is the
+        # failure this check makes impossible to repeat.
+        unusable_member_mz = connection.execute(
+            """SELECT COUNT(*) FROM alignment_member
+               WHERE has_source_peak = 1 AND (mz IS NULL OR mz <= 0)
+               AND alignment_feature_id IN (SELECT alignment_feature_id FROM alignment_feature WHERE run_id = ?)""",
+            (run_id,),
+        ).fetchone()[0]
+        if unusable_member_mz:
+            report.errors.append(
+                f"{unusable_member_mz} alignment members have a source peak but no usable m/z"
+            )
+
+        # The mirror image: a member with no source peak has no source spectrum either, so a scan index
+        # on such a row points at a spectrum belonging to something else.
+        false_scan_pointers = connection.execute(
+            """SELECT COUNT(*) FROM alignment_member
+               WHERE has_source_peak = 0
+               AND (ms1_scan_index IS NOT NULL OR ms2_scan_index IS NOT NULL)
+               AND alignment_feature_id IN (SELECT alignment_feature_id FROM alignment_feature WHERE run_id = ?)""",
+            (run_id,),
+        ).fetchone()[0]
+        if false_scan_pointers:
+            report.errors.append(
+                f"{false_scan_pointers} alignment members without a source peak carry a raw-spectrum index"
+            )
+
         bad_representatives = connection.execute(
             """SELECT COUNT(*) FROM (
                 SELECT a.alignment_feature_id, SUM(CASE WHEN m.is_representative = 1 THEN 1 ELSE 0 END) AS n

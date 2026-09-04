@@ -526,12 +526,32 @@ def ingest_run(
                         f"Peak ID matrix/provenance mismatch for alignment {alignment_id}, {sample_name}: "
                         f"{existing_member['source_master_peak_id']} vs {source_peak_id}"
                     )
+                # A member with no source peak has no source spectrum, so it must not carry a scan
+                # index. MS-DIAL before the AlignmentProvenanceExporter fix left those fields at 0,
+                # which is a real scan number: stored unguarded it points an auditor at a spectrum
+                # belonging to some other peak entirely. Newer exports write the cell empty, so this
+                # guard is a no-op on them and load-bearing on older ones.
+                ms1_scan_index = parse_number(row.get("ms1_raw_spectrum_id_top"), int)
+                ms2_scan_index = parse_number(row.get("ms2_raw_spectrum_id"), int)
+                if not has_source_peak:
+                    ms1_scan_index = None
+                    ms2_scan_index = None
+                # An m/z cannot be negative. Older exports read the column from the chromatogram axis
+                # rather than the peak mass, which reported the axis sentinel for exactly the members
+                # that did have a source peak.
+                mz = parse_number(row.get("mz"))
+                if mz is not None and mz < 0:
+                    mz = None
+                # peak_origin names why a member has no source peak. Absent from older exports, in
+                # which case the sentinel is all there is.
+                peak_origin = folded_value(fold_headers(row), "peak_origin")
                 connection.execute(
                     """INSERT INTO alignment_member(
                         alignment_member_id, alignment_feature_id, sample_id, feature_id, file_id,
                         is_representative, has_source_peak, source_master_peak_id, source_local_peak_id,
-                        ms1_scan_index, ms2_scan_index, rt_min, mz, height, source_artifact_id, source_row
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        peak_origin, ms1_scan_index, ms2_scan_index, rt_min, mz, height,
+                        source_artifact_id, source_row
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(alignment_feature_id, sample_id) DO UPDATE SET
                         feature_id = excluded.feature_id,
                         file_id = excluded.file_id,
@@ -539,6 +559,7 @@ def ingest_run(
                         has_source_peak = excluded.has_source_peak,
                         source_master_peak_id = excluded.source_master_peak_id,
                         source_local_peak_id = excluded.source_local_peak_id,
+                        peak_origin = excluded.peak_origin,
                         ms1_scan_index = excluded.ms1_scan_index,
                         ms2_scan_index = excluded.ms2_scan_index,
                         rt_min = excluded.rt_min,
@@ -548,9 +569,8 @@ def ingest_run(
                         member_id, alignment_feature_id, sample_id, feature_id, file_id,
                         int(row.get("is_representative", "").lower() == "true"), int(has_source_peak),
                         source_peak_id, parse_number(row.get("source_peak_id"), int),
-                        parse_number(row.get("ms1_raw_spectrum_id_top"), int),
-                        parse_number(row.get("ms2_raw_spectrum_id"), int),
-                        parse_number(row.get("rt_min")), parse_number(row.get("mz")),
+                        peak_origin, ms1_scan_index, ms2_scan_index,
+                        parse_number(row.get("rt_min")), mz,
                         parse_number(row.get("height")), artifact_ids[provenance_path], row_number,
                     ),
                 )

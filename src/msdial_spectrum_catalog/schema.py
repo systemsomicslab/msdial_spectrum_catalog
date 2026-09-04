@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS alignment_member (
     has_source_peak INTEGER NOT NULL,
     source_master_peak_id INTEGER,
     source_local_peak_id INTEGER,
+    peak_origin TEXT,
     ms1_scan_index INTEGER,
     ms2_scan_index INTEGER,
     rt_min REAL,
@@ -484,6 +485,13 @@ MIGRATIONS: tuple[Migration, ...] = (
             AddColumn("msdial_annotation_result", "annotation_kind", "TEXT"),
             AddColumn("msdial_annotation_result", "candidate_name", "TEXT"),
             AddColumn("msdial_annotation_result", "candidate_is_named", "INTEGER"),
+        ),
+    ),
+    Migration(
+        version=6,
+        description="name why an alignment member has no source peak instead of encoding it in a sentinel",
+        steps=(
+            AddColumn("alignment_member", "peak_origin", "TEXT"),
         ),
     ),
 )
