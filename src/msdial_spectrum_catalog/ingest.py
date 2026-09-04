@@ -152,10 +152,14 @@ def _annotation_block(row: dict[str, str]) -> dict[str, object] | None:
     block["candidate_is_named"] = int(is_named)
     if kind == "precursor_only":
         # A precursor-only suggestion had no product-ion spectrum to compare (MS2RawSpectrumID < 0), so
-        # no dot product was ever computed. .mdalign writes null here, but .mdpeak writes 0.000 -- the
-        # unset default of MsScanMatchResult's float fields. Left as 0.0 it reads as "compared, scored
-        # zero", which is a different and stronger statement than "never compared". A non-zero value is
-        # kept, so a future MS-DIAL change shows up as an anomaly instead of being silently discarded.
+        # no dot product was ever computed. MsScanMatching's scoring functions return -1 for "nothing to
+        # compare", that -1 is stored in MsScanMatchResult.Squared*, and the non-squared getters clamp it
+        # with Math.Max(value, 0f) -- so the 0.000 an older .mdpeak carries is a clamped sentinel, not a
+        # measurement and not an unset field. MatchedPeaksCount has no clamping getter, which is why the
+        # raw -1 shows through there on the same row.
+        # Only precursor-only rows are normalized: a low-score row DID have a spectrum compared, so a
+        # zero there is a real result and must survive. A non-zero value is kept either way, so a future
+        # MS-DIAL change shows up as an anomaly instead of being silently discarded.
         for name in _DOT_PRODUCT_FIELDS:
             if block[name] == 0.0:
                 block[name] = None

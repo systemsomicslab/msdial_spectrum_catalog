@@ -170,14 +170,28 @@ outcomes, and collapsing them would overstate the evidence:
 commented out in MS-DIAL 5, but MS-DIAL 4 exports are still ingestable so both are recognized.
 
 Two MS-DIAL export artefacts are normalized on the way in, because leaving them would read as
-measurements:
+measurements. Both trace to one mechanism: `MsScanMatching`'s scoring functions return **-1** when there
+is nothing to compare, that -1 is stored in `MsScanMatchResult.Squared*`, and the non-squared getters
+clamp it with `Math.Max(value, 0f)`.
 
-- `Matched peaks count` and `Matched peaks percentage` of `-1` mean "not applicable". A count cannot be
-  negative, so `-1` becomes `NULL`.
-- For a `precursor_only` row, `.mdalign` writes `null` dot products while `.mdpeak` writes `0.000` — the
-  unset default of `MsScanMatchResult`'s float fields. Left as `0.0` it reads as "compared, scored zero",
-  which is a stronger statement than "never compared", so an exact `0.0` becomes `NULL`. A non-zero value
-  is kept so a future MS-DIAL change surfaces as an anomaly instead of being discarded.
+- `Matched peaks count` and `Matched peaks percentage` have no clamping getter, so the raw `-1` reaches
+  the column. A count cannot be negative, so `-1` becomes `NULL`.
+- The dot-product getters do clamp, so an older `.mdpeak` carries `0.000` on the same row -- a clamped
+  sentinel, neither a measurement nor an unset field. Left as `0.0` it reads as "compared, scored zero",
+  a stronger statement than "never compared", so an exact `0.0` on a `precursor_only` row becomes
+  `NULL`. Only `precursor_only` rows are normalized: a `low_score` row did have a spectrum compared, so
+  a zero there is a real result and survives.
+
+Both were fixed upstream in MsdialWorkbench PR #785, which routes every score column of both exports
+through `AnnotationScoreFormat.Score` and writes `null` when
+`MsScanMatchResult.IsSpectrumComparisonPerformed` is false. New outputs carry `null` directly, so the
+normalization above is a no-op on them; it stays necessary for outputs produced before that change.
+
+One thing cannot be recovered from an older `.mdalign`: its exporter bound a float overload that printed
+`null` for any value within 1e-10 of zero, so a *genuine* cosine of zero -- a real comparison that found
+no overlapping fragment -- was written as `null` too and is indistinguishable from a comparison that
+never happened. The related name convention was fixed in PR #784, which adds
+`CommonStandard/Utility/AnnotationName.cs` and uses it in place of the stale `w/o MS2` literal.
 
 `candidate_name` holds the name with the status prefix stripped, and `candidate_is_named` is `0` when the
 reference record's name is an in-house identifier rather than a compound name. Only a named
