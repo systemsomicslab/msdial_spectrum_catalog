@@ -22,7 +22,21 @@ properties without changing the compact source-feature link.
 
 For gap-filled cells, the matrix stores `-1`, `has_source_peak=false`, and
 `feature_id` is null. When the detailed audit sidecar is present, corrected RT,
-m/z, and intensity remain recorded without inventing a source peak.
+m/z, and intensity remain recorded without inventing a source peak, and
+`peak_origin` names why there is no source peak: `detected`, `gap_filled` or
+`absent`. The sidecar used to distinguish those by sentinel instead, writing `-2`
+for a gap-filled peak id where the matrix wrote `-1`, so the two artifacts
+disagreed about the same cell; naming the state removed the disagreement.
+
+Ingestion refuses to read a sentinel as a measurement, and validation refuses to
+pass one. A member with a source peak must carry a usable m/z, and a member
+without one must carry no raw-spectrum index. Both checks exist because a real
+sidecar once stored the inverse of both — every member that had a source peak
+reported `mz = -1`, and every gap-filled member reported MS1 and MS2 scan 0,
+which is a real scan index pointing at an unrelated spectrum — through a run that
+reported valid with no errors and no warnings. The exporter side is fixed in
+MsdialWorkbench; the guards here also cover sidecars written before that fix, and
+`peak_origin` is read by name so an older file without it still ingests.
 
 ## Scale path
 

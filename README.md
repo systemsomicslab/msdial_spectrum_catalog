@@ -48,10 +48,19 @@ MS-DIAL Console additionally exports `AlignResult-*.mdpeakid.tsv`. This compact
 matrix is the authoritative mapping from each alignment `MasterAlignmentID` and
 sample to the original mdpeak `MasterPeakID`; `-1` represents a gap-filled or
 missing source peak. `AlignResult-*.mdprovenance.tsv` is an optional audit export
-that supplements the matrix with raw spectrum indices, RT, m/z, and intensity.
-Existing `.mdalign`, `.mdmsp`, `.mdpeak`, and mzTab-M formats remain unchanged.
-The detailed audit file is disabled by default and can be requested in an
-MS-DIAL Console parameter file with `Detailed alignment provenance: True`.
+that supplements the matrix with raw spectrum indices, RT, m/z, and intensity,
+plus a `peak_origin` column naming why a member has no source peak (`detected`,
+`gap_filled`, `absent`). Existing `.mdalign`, `.mdmsp`, `.mdpeak`, and mzTab-M
+formats remain unchanged. The detailed audit file is disabled by default and can
+be requested in an MS-DIAL Console parameter file with
+`Detailed alignment provenance: True`.
+
+A sentinel is never stored as a measurement. On ingest, a member without a source
+peak carries no raw-spectrum index and a negative m/z becomes null; on
+validation, a member with a source peak must carry a usable m/z and a member
+without one must carry no scan index. Both are errors rather than warnings,
+because a false provenance pointer is worse than a missing one. See
+`docs/architecture.md` for what made these necessary.
 
 ## Quick start
 
