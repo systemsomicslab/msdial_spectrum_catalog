@@ -457,7 +457,11 @@ class StorageTests(unittest.TestCase):
                 # The relation is symmetric, so the pair is stored once with its ids sorted as strings.
                 self.assertLess(row["subject_id_a"], row["subject_id_b"])
                 self.assertEqual(row["method"], "ambiguity_weighted_cosine")
-                self.assertEqual(row["method_version"], "ambiguity-v1")
+                # The label plus a digest of the rules it stood for. The label alone was the stored
+                # version, and it does not change when a threshold does.
+                self.assertEqual(
+                    row["method_version"], f"ambiguity-v1+{ClassDefinition().rules_sha256}"
+                )
                 self.assertEqual(row["score_convention"], "cosine")
                 self.assertEqual(row["secondary_method"], "entropy_similarity")
                 self.assertGreaterEqual(row["score"], 0.90)
@@ -480,17 +484,36 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(counts(database), before)
             self.assertEqual(before, {"similarity": 2, "classes": 3, "members": 7})
 
-    def test_an_edge_refused_by_a_stricter_definition_does_not_survive(self):
+    def test_a_stricter_definition_does_not_overwrite_the_looser_one(self):
+        # The identity of a class includes the rules it was computed under, so a second run at a
+        # different threshold is a different answer to a different question rather than a replacement
+        # of the first. It used to be a silent replacement: the identifier encoded only definition_id,
+        # which defaults to "ambiguity-v1" whatever thresholds the command line carried, so the same
+        # rows came back holding a different meaning with nothing stored that said so. An annotation
+        # citing a class would have become a claim about rules it never saw.
         with tempfile.TemporaryDirectory() as directory:
             database = build_library(Path(directory), near_identical_pair())
             compute_ambiguity_classes(database)
-            self.assertEqual(counts(database), {"similarity": 1, "classes": 2, "members": 4})
+            before = counts(database)
+            self.assertEqual(before, {"similarity": 1, "classes": 2, "members": 4})
+
             report = compute_ambiguity_classes(
                 database, definition=ClassDefinition(weighted_cosine_threshold=0.999999)
             )
+
             self.assertEqual(report.edges, 0)
             self.assertEqual(report.classes, 0)
-            self.assertEqual(counts(database), {"similarity": 0, "classes": 0, "members": 0})
+            # The stricter run admitted nothing, and the looser run's rows are still exactly as they
+            # were, still resolvable by anything that cited them.
+            self.assertEqual(counts(database), before)
+
+    def test_the_rules_digest_changes_with_any_threshold(self):
+        base = ClassDefinition()
+        self.assertNotEqual(base.rules_sha256, ClassDefinition(weighted_cosine_threshold=0.95).rules_sha256)
+        self.assertNotEqual(base.rules_sha256, ClassDefinition(entropy_similarity_threshold=0.5).rules_sha256)
+        self.assertNotEqual(base.rules_sha256, ClassDefinition(mz_tolerance_da=0.05).rules_sha256)
+        # The same rules under a different label are the same rules.
+        self.assertEqual(base.rules_sha256, ClassDefinition().rules_sha256)
 
     def test_the_tool_run_is_recorded_on_every_row_it_produced(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -487,6 +487,50 @@ def _peaks_from_blob(connection, payload_sha256: str) -> list[tuple[float, float
     return [(float(mz), float(intensity)) for mz, intensity in payload.get("peaks", [])]
 
 
+# How much of a file to look at before deciding it is not MSP text. Large enough to cross the header
+# comments some vendors prepend, small enough that a 700 MB library costs nothing to reject.
+_FORMAT_SNIFF_BYTES = 64 * 1024
+
+# Field names that identify a record as MSP. NAME and Num Peaks are the two an MSP record cannot omit
+# and still be one; finding any of these settles the question.
+_MSP_MARKER_FIELDS = ("name:", "num peaks:", "numpeaks:", "precursormz:")
+
+
+def msp_format_problem(path: Path) -> str | None:
+    """Report why a file is not an MSP text library, or None when it looks like one.
+
+    This ingest is the only door onto the library half of the catalog, and it used to open for
+    anything. Handed a binary MS-DIAL .lbm2 it hashed the file, streamed it through the MSP reader,
+    obtained pseudo-records from the bytes, skipped every one of them, wrote a library row with no
+    records and returned valid with no errors and exit status 0. Verified with 102,400 bytes of random
+    binary: records_read 400, records_skipped 400, errors []. That silence is why the library half of a
+    real catalog can stay empty without anyone noticing.
+    """
+    try:
+        head = path.read_bytes()[:_FORMAT_SNIFF_BYTES]
+    except OSError as error:
+        return f"could not be read: {error}"
+    if not head:
+        return "is empty"
+    if b"\x00" in head:
+        return (
+            "contains NUL bytes in its first 64 KB, so it is a binary file rather than MSP text. "
+            "An MS-DIAL .lbm2 or .msp2 library is binary and cannot be ingested here; export it to "
+            "text MSP first"
+        )
+    try:
+        text = head.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = head.decode("latin-1", errors="replace")
+    lowered = text.casefold()
+    if not any(marker in lowered for marker in _MSP_MARKER_FIELDS):
+        return (
+            "carries none of the MSP record fields (NAME, PRECURSORMZ, Num Peaks) in its first 64 KB, "
+            "so it does not look like an MSP library"
+        )
+    return None
+
+
 def _skip_reason(record: MspRecord) -> str | None:
     """Report why a record cannot be ingested, or None when it can."""
     if parse_number(record.fields.get("NUM PEAKS"), int) is None:
@@ -646,6 +690,12 @@ def ingest_reference_library(
     initialize(database)
     library_id = make_id("reference-library", library_name, library_version or "unversioned")
     report = ReferenceIngestReport(library_id=library_id)
+    # Refused before anything is hashed, written or registered. A library row for a file that could
+    # never yield a record is worse than no row: it makes an empty library look like an ingested one.
+    problem = msp_format_problem(path)
+    if problem is not None:
+        report.errors.append(f"{path.name} {problem}.")
+        return report
     file_sha256 = sha256_file(path)
     byte_size = path.stat().st_size
     written = 0
@@ -768,7 +818,7 @@ def ingest_reference_library(
                 bin_width=CONSENSUS_MZ_BIN_WIDTH,
                 minimum_member_fraction=CONSENSUS_MINIMUM_MEMBER_FRACTION,
             ):
-                _, is_new_blob = _put_blob(
+                payload_sha256, is_new_blob = _put_blob(
                     connection,
                     _consensus_payload(
                         spectrum,
@@ -780,5 +830,68 @@ def ingest_reference_library(
                 )
                 if is_new_blob:
                     report.blobs_written += 1
+                # The payload used to go into the content-addressed store with nothing pointing at it.
+                # It was computed, compressed, counted in the report, and then unreachable: no table
+                # named it and no query could find it. A row makes it retrievable and makes the
+                # reported count mean something.
+                key = spectrum.key
+                connection.execute(
+                    """INSERT INTO reference_consensus_spectrum(
+                           reference_consensus_spectrum_id, library_id, inchikey_skeleton, ion_mode,
+                           precursor_type, instrument_class, collision_energy_bin, member_count,
+                           precursor_mz, formula, ontology, smiles, peak_count, mz_bin_width,
+                           minimum_member_fraction, payload_sha256)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(library_id, inchikey_skeleton, ion_mode, precursor_type,
+                                   instrument_class, collision_energy_bin) DO UPDATE SET
+                           member_count = excluded.member_count,
+                           precursor_mz = excluded.precursor_mz,
+                           formula = excluded.formula,
+                           ontology = excluded.ontology,
+                           smiles = excluded.smiles,
+                           peak_count = excluded.peak_count,
+                           mz_bin_width = excluded.mz_bin_width,
+                           minimum_member_fraction = excluded.minimum_member_fraction,
+                           payload_sha256 = excluded.payload_sha256""",
+                    (
+                        make_id(
+                            "reference-consensus",
+                            library_id,
+                            key.inchikey_skeleton or "",
+                            key.ion_mode or "",
+                            key.precursor_type or "",
+                            key.instrument_class,
+                            key.collision_energy_bin,
+                        ),
+                        library_id,
+                        key.inchikey_skeleton,
+                        key.ion_mode,
+                        key.precursor_type,
+                        key.instrument_class,
+                        key.collision_energy_bin,
+                        spectrum.member_count,
+                        spectrum.precursor_mz,
+                        spectrum.formula,
+                        spectrum.ontology,
+                        spectrum.smiles,
+                        len(spectrum.peaks),
+                        CONSENSUS_MZ_BIN_WIDTH,
+                        CONSENSUS_MINIMUM_MEMBER_FRACTION,
+                        payload_sha256,
+                    ),
+                )
                 report.consensus_spectra += 1
+    # A file that parsed but yielded nothing usable is a failed ingest, not a successful empty one.
+    # The format sniff catches a wholly wrong file; this catches one that is MSP-shaped but whose
+    # records all lack peaks or a precursor m/z, which leaves the same empty library behind.
+    if report.records_read and report.records_read == report.records_skipped:
+        report.errors.append(
+            f"All {report.records_read} records of {path.name} were skipped, so the library is empty. "
+            "Every record lacked peaks, a precursor m/z, or a parseable Num Peaks."
+        )
+    elif report.records_read == 0:
+        report.errors.append(
+            f"No records were read from {path.name}"
+            + (" within the requested precursor m/z window." if precursor_mz_range else ".")
+        )
     return report

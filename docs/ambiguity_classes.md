@@ -36,6 +36,20 @@ reuses it.
 | 7 | Anchored neighbourhood: `N(A) = {A} + {X : sim(A,X) >= threshold}`, plus a flag for whether `N(A)` is a clique | Defined relative to A, so there is no seed and the result is deterministic. Greedy clustering would be seed-dependent. Similarity is not transitive, so no transitive closure is ever taken |
 | 8 | Report the product ions that would separate the members, and which evidence would break the tie | Turns "A or B" into "A or B, separable by m/z X", which is actionable |
 
+> **Step 2 is computed and stored, but it is not what steps 3 to 8 read.**
+> `ingest-reference-library` builds the consensus spectra and, since schema 8, records them in
+> `reference_consensus_spectrum`; `compute-ambiguity` still streams `reference_spectrum`, the raw
+> records. The deduplication this table calls necessary therefore does not happen before
+> classification today, and the counts below were measured over raw records: 5,216 anchored class rows
+> and 1,846 distinct membership groups are inflated by replicate deposits of one compound. The 438
+> constitutional-isomer groups are not, because that figure is filtered on differing InChIKey
+> skeletons with the same formula, which excludes replicates by construction, so the named examples
+> stand. Feeding the consensus spectra into classification changes the scientific result and is a
+> decision to take deliberately, not a refactor.
+>
+> Until schema 8 the consensus payloads went into the content-addressed blob store with nothing
+> pointing at them: computed, compressed, counted in the ingest report, and unreachable by any query.
+
 ### Symmetry is enforced, not assumed
 
 MS-DIAL's weighted dot product is asymmetric in two places: `peakCountPenalty` counts peaks on the

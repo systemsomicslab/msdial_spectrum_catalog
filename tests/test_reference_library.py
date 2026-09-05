@@ -497,6 +497,91 @@ class IngestReferenceLibraryTest(unittest.TestCase):
                     library_kind="guessed",
                 )
 
+    def test_a_binary_library_is_refused_and_registers_nothing(self):
+        # This ingest is the only door onto the library half of the catalog, and it used to open for
+        # anything. Handed a binary MS-DIAL .lbm2 it hashed the file, ran it through the MSP reader,
+        # obtained pseudo-records from the bytes, skipped every one, and returned valid with no errors
+        # and exit status 0 -- which is how a real catalog's library tables stayed empty unnoticed.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "catalog.sqlite"
+            binary = root / "library.lbm2"
+            binary.write_bytes(bytes(range(256)) * 400)
+
+            report = ingest_reference_library(database, binary, library_name="demo")
+
+            self.assertFalse(report.valid)
+            self.assertEqual(report.records_read, 0)
+            self.assertTrue(any("binary file" in error for error in report.errors), report.errors)
+            connection = connect(database)
+            try:
+                self.assertEqual(
+                    0, connection.execute("SELECT COUNT(*) FROM reference_library").fetchone()[0]
+                )
+            finally:
+                connection.close()
+
+    def test_a_text_file_that_is_not_msp_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "notes.txt"
+            path.write_text("this is a plain note about a library\n" * 20, encoding="utf-8")
+
+            report = ingest_reference_library(root / "catalog.sqlite", path, library_name="demo")
+
+            self.assertFalse(report.valid)
+            self.assertTrue(
+                any("MSP record fields" in error for error in report.errors), report.errors
+            )
+
+    def test_an_msp_whose_records_are_all_unusable_is_a_failed_ingest(self):
+        # The format sniff catches a wholly wrong file. This catches one that is MSP-shaped but leaves
+        # the same empty library behind, which used to be reported as a success.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "empty.msp"
+            path.write_text("NAME: nothing\nPRECURSORMZ: 100.0\nNum Peaks: 0\n\n", encoding="utf-8")
+
+            report = ingest_reference_library(root / "catalog.sqlite", path, library_name="demo")
+
+            self.assertFalse(report.valid)
+            self.assertEqual(report.records_read, report.records_skipped)
+            self.assertTrue(any("were skipped" in error for error in report.errors), report.errors)
+
+    def test_consensus_spectra_are_reachable_by_query(self):
+        # They used to go into the content-addressed blob store with nothing pointing at them:
+        # computed, compressed, counted in the ingest report, and unreachable by any query.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "catalog.sqlite"
+            path = self._write(
+                root, _msp(_record("quercetin"), _record("quercetin"), _record("kaempferol"))
+            )
+
+            report = ingest_reference_library(database, path, library_name="demo")
+
+            self.assertTrue(report.valid, report.errors)
+            self.assertGreater(report.consensus_spectra, 0)
+            connection = connect(database)
+            try:
+                rows = connection.execute(
+                    "SELECT * FROM reference_consensus_spectrum WHERE library_id = ?",
+                    (report.library_id,),
+                ).fetchall()
+                self.assertEqual(len(rows), report.consensus_spectra)
+                for row in rows:
+                    self.assertGreater(row["member_count"], 0)
+                    self.assertGreater(row["peak_count"], 0)
+                    blob = connection.execute(
+                        "SELECT payload FROM spectrum_blob WHERE payload_sha256 = ?",
+                        (row["payload_sha256"],),
+                    ).fetchone()
+                    self.assertIsNotNone(blob, "the row must resolve to the payload it names")
+                    payload = json.loads(zlib.decompress(blob[0]).decode("utf-8"))
+                    self.assertEqual("skeleton_consensus", payload["kind"])
+            finally:
+                connection.close()
+
 
 def _consensus_payloads(database: Path) -> list[dict]:
     connection = connect(database)

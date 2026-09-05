@@ -82,6 +82,20 @@ class ClassDefinition:
         """Return every parameter as a plain dict, so `ClassDefinition(**rules)` reconstructs it."""
         return asdict(self)
 
+    @property
+    def rules_sha256(self) -> str:
+        """A digest of every threshold and rule, not of the free-text label they ran under.
+
+        A class asserts that its members could not be told apart *under a stated rule set*. The
+        identifier used to encode only definition_id, which defaults to "ambiguity-v1" and is a label
+        the caller may leave untouched while changing --weighted-cosine, --entropy or --tolerance on
+        the command line. Two runs at different thresholds therefore produced the same identifiers and
+        the upsert replaced the earlier rows in place: same id, different meaning, and nothing stored
+        that said so. Deriving the identifier from the rules makes a recomputation at a different
+        threshold a different class rather than a silent overwrite of the old one.
+        """
+        return short_hash(_canonical(asdict(self)))
+
 
 @dataclass
 class AmbiguityReport:
@@ -556,6 +570,9 @@ def compute_ambiguity_classes(
         ).fetchone()[0]
         report.singletons = total - len(adjacency)
         scope = _library_scope(connection, library_ids)
+        # The label, plus a digest of the rules it stood for. The label alone was the stored version,
+        # and it defaults to "ambiguity-v1" whatever thresholds the caller passed on the command line.
+        method_version = f"{definition.definition_id}+{definition.rules_sha256}"
 
         for (id_a, id_b), edge in sorted(edges.items()):
             connection.execute(
@@ -575,23 +592,29 @@ def compute_ambiguity_classes(
                        mz_tolerance_da = excluded.mz_tolerance_da,
                        tool_run_id = excluded.tool_run_id""",
                 (
-                    make_id("similarity", METHOD, short_hash(f"{id_a}|{id_b}")),
+                    make_id(
+                        "similarity", METHOD, definition.rules_sha256, short_hash(f"{id_a}|{id_b}")
+                    ),
                     SUBJECT_KIND, id_a, SUBJECT_KIND, id_b,
-                    METHOD, definition.definition_id, edge["score"], SCORE_CONVENTION,
+                    METHOD, method_version, edge["score"], SCORE_CONVENTION,
                     SECONDARY_METHOD, edge["secondary_score"], edge["matched_peak_count"],
                     definition.mz_tolerance_da, tool_run_id,
                 ),
             )
-        # An edge admitted by an earlier definition that this run refused must not survive as if it were
-        # still current, so stale edges between records this run actually compared are dropped.
+        # An edge this run refused must not survive as if this run had admitted it, so stale edges
+        # between records it actually compared are dropped -- but only within its own rule set. Rows
+        # produced under a different threshold are a different answer to a different question, and now
+        # that the identity encodes the rules they coexist rather than replacing one another.
         for stale_a, stale_b in connection.execute(
-            "SELECT subject_id_a, subject_id_b FROM spectrum_similarity WHERE method = ?", (METHOD,)
+            "SELECT subject_id_a, subject_id_b FROM spectrum_similarity "
+            "WHERE method = ? AND method_version = ?",
+            (METHOD, method_version),
         ).fetchall():
             if (stale_a, stale_b) not in edges and stale_a in compared_ids and stale_b in compared_ids:
                 connection.execute(
                     "DELETE FROM spectrum_similarity WHERE subject_kind_a = ? AND subject_id_a = ? "
-                    "AND subject_kind_b = ? AND subject_id_b = ? AND method = ?",
-                    (SUBJECT_KIND, stale_a, SUBJECT_KIND, stale_b, METHOD),
+                    "AND subject_kind_b = ? AND subject_id_b = ? AND method = ? AND method_version = ?",
+                    (SUBJECT_KIND, stale_a, SUBJECT_KIND, stale_b, METHOD, method_version),
                 )
 
         unestablished = 0
@@ -667,7 +690,13 @@ def compute_ambiguity_classes(
 
 
 def _class_id(definition: ClassDefinition, anchor_id: str) -> str:
-    return make_id("ambiguity-class", definition.definition_id, short_hash(anchor_id))
+    # The rules digest is part of the identity, not decoration. See ClassDefinition.rules_sha256.
+    return make_id(
+        "ambiguity-class",
+        definition.definition_id,
+        definition.rules_sha256,
+        short_hash(anchor_id),
+    )
 
 
 def _class_record(

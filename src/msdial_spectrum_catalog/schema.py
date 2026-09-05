@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -399,6 +399,26 @@ CREATE TABLE IF NOT EXISTS msdial_annotation_result (
     UNIQUE(run_id, subject_kind, subject_id, rank, annotator_id)
 );
 
+CREATE TABLE IF NOT EXISTS reference_consensus_spectrum (
+    reference_consensus_spectrum_id TEXT PRIMARY KEY,
+    library_id TEXT NOT NULL REFERENCES reference_library(library_id),
+    inchikey_skeleton TEXT,
+    ion_mode TEXT,
+    precursor_type TEXT,
+    instrument_class TEXT,
+    collision_energy_bin TEXT,
+    member_count INTEGER NOT NULL,
+    precursor_mz REAL,
+    formula TEXT,
+    ontology TEXT,
+    smiles TEXT,
+    peak_count INTEGER NOT NULL,
+    mz_bin_width REAL NOT NULL,
+    minimum_member_fraction REAL NOT NULL,
+    payload_sha256 TEXT NOT NULL REFERENCES spectrum_blob(payload_sha256),
+    UNIQUE(library_id, inchikey_skeleton, ion_mode, precursor_type, instrument_class, collision_energy_bin)
+);
+
 CREATE TABLE IF NOT EXISTS msdial_annotation_candidate (
     msdial_annotation_candidate_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES analysis_run(run_id),
@@ -455,6 +475,7 @@ CREATE INDEX IF NOT EXISTS idx_annotation_assertion_spectrum ON annotation_asser
 CREATE INDEX IF NOT EXISTS idx_annotation_evidence_assertion ON annotation_evidence(assertion_id);
 CREATE INDEX IF NOT EXISTS idx_annotation_candidate_assertion ON annotation_candidate(assertion_id);
 CREATE INDEX IF NOT EXISTS idx_reference_spectrum_library ON reference_spectrum(library_id);
+CREATE INDEX IF NOT EXISTS idx_reference_consensus_library ON reference_consensus_spectrum(library_id);
 CREATE INDEX IF NOT EXISTS idx_reference_spectrum_skeleton ON reference_spectrum(inchikey_skeleton);
 CREATE INDEX IF NOT EXISTS idx_ambiguity_member_class ON ambiguity_class_member(ambiguity_class_id);
 CREATE INDEX IF NOT EXISTS idx_msdial_annotation_subject ON msdial_annotation_result(subject_kind, subject_id);
@@ -539,6 +560,33 @@ CREATE INDEX IF NOT EXISTS idx_msdial_candidate_subject ON msdial_annotation_can
 """
 
 
+_REFERENCE_CONSENSUS_SQL = """
+CREATE TABLE IF NOT EXISTS reference_consensus_spectrum (
+    reference_consensus_spectrum_id TEXT PRIMARY KEY,
+    library_id TEXT NOT NULL REFERENCES reference_library(library_id),
+    inchikey_skeleton TEXT,
+    ion_mode TEXT,
+    precursor_type TEXT,
+    instrument_class TEXT,
+    collision_energy_bin TEXT,
+    member_count INTEGER NOT NULL,
+    precursor_mz REAL,
+    formula TEXT,
+    ontology TEXT,
+    smiles TEXT,
+    peak_count INTEGER NOT NULL,
+    mz_bin_width REAL NOT NULL,
+    minimum_member_fraction REAL NOT NULL,
+    payload_sha256 TEXT NOT NULL REFERENCES spectrum_blob(payload_sha256),
+    UNIQUE(library_id, inchikey_skeleton, ion_mode, precursor_type, instrument_class, collision_energy_bin)
+);
+"""
+
+_REFERENCE_CONSENSUS_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_reference_consensus_library ON reference_consensus_spectrum(library_id);
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=3,
@@ -600,6 +648,14 @@ MIGRATIONS: tuple[Migration, ...] = (
         steps=(
             RunSql(_MSDIAL_ANNOTATION_CANDIDATE_SQL),
             RunSql(_MSDIAL_ANNOTATION_CANDIDATE_INDEX_SQL),
+        ),
+    ),
+    Migration(
+        version=8,
+        description="give the library consensus spectra a row, so they stop being unreachable blobs",
+        steps=(
+            RunSql(_REFERENCE_CONSENSUS_SQL),
+            RunSql(_REFERENCE_CONSENSUS_INDEX_SQL),
         ),
     ),
 )
