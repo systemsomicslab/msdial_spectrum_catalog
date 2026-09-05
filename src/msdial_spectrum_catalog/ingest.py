@@ -136,6 +136,15 @@ _CANDIDATE_SPECTRAL_SCORE_COLUMNS = (
     "matched_peaks_count",
     "matched_peaks_percentage",
 )
+# The four terms MS-DIAL computes with GetGaussianSimilarity, which is positive whenever it ran.
+_CANDIDATE_GAUSSIAN_SCORE_COLUMNS = (
+    "mz_similarity",
+    "rt_similarity",
+    "ri_similarity",
+    "ccs_similarity",
+)
+# GetIsotopeRatioSimilarity's "nothing to compare" return value.
+_ISOTOPE_NOT_COMPARED = -1.0
 _CANDIDATE_INTEGER_COLUMNS = ("priority", "library_id")
 
 _CANDIDATE_FIELDS = (
@@ -190,6 +199,26 @@ def _candidate_block(row: dict[str, str]) -> tuple[dict[str, object], list[str]]
             )
         for name in _CANDIDATE_SPECTRAL_SCORE_COLUMNS:
             block[name] = None
+    # The other five terms carry sentinels too, and two different ones, because two different MS-DIAL
+    # functions produce them. A current export writes those cells empty; these guards are what keeps a
+    # sidecar written before that fix from storing a sentinel as a measurement.
+    #
+    # GetGaussianSimilarity produces the m/z, RT, RI and CCS terms as
+    # exp(-0.5 * ((actual - reference) / tolerance)^2). It is strictly positive whenever it ran, returns
+    # -1 when a value was missing, and leaves the field at its default 0 when the run never enabled the
+    # term. Only a positive value is a measurement, which is also the test MS-DIAL's own GetTotalScore
+    # applies before adding a term to the total.
+    for name in _CANDIDATE_GAUSSIAN_SCORE_COLUMNS:
+        value = block[name]
+        if value is not None and value <= 0:
+            block[name] = None
+    # GetIsotopeRatioSimilarity is 1 minus an accumulated ratio difference, so it is genuinely signed and
+    # a negative value is a measurement saying the isotope patterns disagree. Only exactly -1 is its
+    # sentinel, and discarding every negative here would throw away the strongest evidence the term
+    # produces. Measured on one real export: 495 rows at exactly -1, all of them in-house records with no
+    # isotopic pattern deposited, against 19 rows carrying a genuine negative.
+    if block["isotope_similarity"] == _ISOTOPE_NOT_COMPARED:
+        block["isotope_similarity"] = None
     block["candidate_is_named"] = int(is_named_reference(block["name"]))
     # Same convention as the representative row: the exported dot products are plain cosines.
     has_dot_product = any(

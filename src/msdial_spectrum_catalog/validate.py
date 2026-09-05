@@ -165,6 +165,22 @@ def validate_run(database, run_id: str) -> ValidationReport:
             report.errors.append(
                 f"{unearned_scores} annotation candidates carry a spectral score without a spectrum comparison"
             )
+        # A stored non-spectral similarity term must be a measurement. Both sentinels are checked, each
+        # under its own rule: a Gaussian term is positive whenever it ran, so 0 and -1 are both
+        # "not established"; the isotope term is signed by construction, so only exactly -1 is its
+        # sentinel. Rows stored before those guards existed are what this catches.
+        stored_sentinels = connection.execute(
+            """SELECT COUNT(*) FROM msdial_annotation_candidate
+               WHERE run_id = ?
+                 AND (mz_similarity <= 0 OR rt_similarity <= 0 OR ri_similarity <= 0
+                      OR ccs_similarity <= 0 OR isotope_similarity = -1.0)""",
+            (run_id,),
+        ).fetchone()[0]
+        if stored_sentinels:
+            report.errors.append(
+                f"{stored_sentinels} annotation candidates store a similarity sentinel or an unset "
+                "default as if it were a measured value"
+            )
         # The two artifacts describe the same decision from different sides, so the winner must agree.
         # .mdalign renders the representative with MS-DIAL's "no MS2: " and "low score: " prefixes, which
         # candidate_name has already stripped, and the sidecar publishes the raw reference name.

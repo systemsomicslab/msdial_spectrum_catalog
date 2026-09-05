@@ -182,6 +182,42 @@ class CandidateIngestTests(unittest.TestCase):
             # Refused as evidence, not merely reported: the contradicted columns are still empty.
             self.assertIsNone(_rows(root)[0]["simple_dot_product"])
 
+    def test_a_gaussian_similarity_sentinel_is_not_stored_as_a_measurement(self):
+        # MS-DIAL computes m/z, RT, RI and CCS similarity with a Gaussian that is positive whenever it
+        # ran, returns -1 when a value was missing, and leaves the field at 0 when the run never enabled
+        # the term. A sidecar written before the exporter fix carries those values verbatim.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _build_run(root, _candidate(
+                mz_similarity=0.5, rt_similarity=0, ri_similarity=-1, ccs_similarity=0,
+            ))
+            report = _ingest(root)
+            self.assertTrue(report.valid, report.errors)
+            row = _rows(root)[0]
+            self.assertAlmostEqual(row["mz_similarity"], 0.5)
+            for column in ("rt_similarity", "ri_similarity", "ccs_similarity"):
+                self.assertIsNone(row[column], column)
+            validation = validate_run(root / "catalog.sqlite", report.run_id)
+            self.assertTrue(validation.valid, validation.errors)
+
+    def test_an_unattempted_isotope_comparison_is_not_stored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _build_run(root, _candidate(isotope_similarity=-1))
+            report = _ingest(root)
+            self.assertTrue(report.valid, report.errors)
+            self.assertIsNone(_rows(root)[0]["isotope_similarity"])
+
+    def test_a_disagreeing_isotope_pattern_is_kept(self):
+        # 1 minus an accumulated ratio difference: a negative value other than the sentinel is the
+        # strongest evidence this term produces and must survive.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _build_run(root, _candidate(isotope_similarity=-0.75))
+            report = _ingest(root)
+            self.assertTrue(report.valid, report.errors)
+            self.assertAlmostEqual(_rows(root)[0]["isotope_similarity"], -0.75)
+
     def test_a_rank_gap_fails_validation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
