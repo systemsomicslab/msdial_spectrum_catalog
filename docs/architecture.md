@@ -38,6 +38,31 @@ reported valid with no errors and no warnings. The exporter side is fixed in
 MsdialWorkbench; the guards here also cover sidecars written before that fix, and
 `peak_origin` is read by name so an older file without it still ingests.
 
+## Annotation candidates against the representative
+
+`msdial_annotation_result` records what MS-DIAL's text export said about a feature: one row, the
+representative. `msdial_annotation_candidate` records what the search kept: every threshold-passing
+result, ranked. The two tables describe one decision from different sides and are checked against each
+other rather than merged, because they can disagree only if one of them describes a different run.
+
+Four invariants hold on every candidate set, and each is an error rather than a warning:
+
+- the ranks of one subject are `1..candidate_count`, once each, and every row of the set agrees on the
+  count
+- exactly one row is the representative, and it is rank 1
+- a spectral score exists only where `is_spectrum_comparison_performed` is true
+- the rank 1 name equals the `candidate_name` of the `.mdalign` row for the same feature, after
+  MS-DIAL's `no MS2: ` and `low score: ` prefixes have been stripped
+
+The last one is the cross-artifact check. It held on all 1919 annotated features of the reference demo
+before it was made an error.
+
+No `annotation_kind` is derived for a candidate. The three-way kind comes from a name prefix that only
+the representative carries, and the sidecar states `is_reference_matched`, `is_annotation_suggested` and
+`is_spectrum_comparison_performed` directly, which is more information than the prefix. Deriving a kind
+from those would also mislabel a text-database result, which has no reference spectrum to compare rather
+than no product-ion spectrum to compare with.
+
 ## Scale path
 
 SQLite stores searchable metadata and compressed spectrum payloads in v0.1.

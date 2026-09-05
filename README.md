@@ -55,6 +55,12 @@ formats remain unchanged. The detailed audit file is disabled by default and can
 be requested in an MS-DIAL Console parameter file with
 `Detailed alignment provenance: True`.
 
+`AlignResult-*.mdcandidate.tsv` is a second optional export, requested with
+`Annotation candidates: True`. MS-DIAL keeps up to three threshold-passing
+results per annotator and alignment carries them into the spot, but `.mdalign`
+publishes only the winner. The sidecar publishes all of them, one row per spot
+and candidate, ranked by the same precedence that picks the representative.
+
 A sentinel is never stored as a measurement. On ingest, a member without a source
 peak carries no raw-spectrum index and a negative m/z becomes null; on
 validation, a member with a source peak must carry a usable m/z and a member
@@ -122,6 +128,19 @@ MS-DIAL's own per-feature annotation block is ingested into `msdial_annotation_r
 distinct outcomes kept apart: a real MS/MS match, a low-score match, a precursor-only suggestion with no
 product-ion spectrum at all, and no candidate. Only a named MS/MS match may support spectral-library
 evidence. No automatic Level assignment is implemented; that policy is a curation decision.
+
+`msdial_annotation_candidate` holds what the search actually kept, not only what it published: every
+candidate of every alignment feature, ranked. On the reference FastLC demo, of **1919 annotated
+alignment features only 335 have a single candidate** — 115 have two and 1469 have three. Four fifths of
+the annotations the older catalog stored as one identification were searches that had not chosen. The
+representative is always rank 1, `.mdalign` and the sidecar must name the same winner, and a spectral
+score is stored only where a spectrum comparison actually happened; all three are validation errors when
+they fail, because a reader cannot recover the truth from a stored row that asserts otherwise.
+
+```powershell
+msdial-spectrum-catalog show-candidates catalog.sqlite "urn:msdial:run:..."
+msdial-spectrum-catalog show-candidates catalog.sqlite "urn:msdial:run:..." --alignment-feature "urn:msdial:alignment:..."
+```
 
 ## Ambiguity classes
 

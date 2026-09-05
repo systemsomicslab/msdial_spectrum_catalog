@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -399,6 +399,52 @@ CREATE TABLE IF NOT EXISTS msdial_annotation_result (
     UNIQUE(run_id, subject_kind, subject_id, rank, annotator_id)
 );
 
+CREATE TABLE IF NOT EXISTS msdial_annotation_candidate (
+    msdial_annotation_candidate_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES analysis_run(run_id),
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    alignment_feature_id TEXT REFERENCES alignment_feature(alignment_feature_id),
+    candidate_rank INTEGER NOT NULL,
+    candidate_count INTEGER NOT NULL,
+    is_representative INTEGER NOT NULL,
+    annotator_id TEXT,
+    database_id TEXT,
+    source TEXT,
+    priority INTEGER,
+    library_id INTEGER,
+    name TEXT,
+    candidate_is_named INTEGER,
+    formula TEXT,
+    ontology TEXT,
+    inchikey TEXT,
+    smiles TEXT,
+    reference_mz REAL,
+    reference_rt_min REAL,
+    reference_adduct TEXT,
+    annotation_tag TEXT,
+    is_reference_matched INTEGER,
+    is_annotation_suggested INTEGER,
+    is_precursor_mz_match INTEGER,
+    is_spectrum_match INTEGER,
+    is_spectrum_comparison_performed INTEGER,
+    total_score REAL,
+    mz_similarity REAL,
+    rt_similarity REAL,
+    ri_similarity REAL,
+    ccs_similarity REAL,
+    isotope_similarity REAL,
+    simple_dot_product REAL,
+    weighted_dot_product REAL,
+    reverse_dot_product REAL,
+    matched_peaks_count REAL,
+    matched_peaks_percentage REAL,
+    score_convention TEXT,
+    source_artifact_id INTEGER REFERENCES artifact(artifact_id),
+    source_row INTEGER,
+    UNIQUE(run_id, subject_kind, subject_id, candidate_rank)
+);
+
 CREATE INDEX IF NOT EXISTS idx_feature_sample ON feature(sample_id, master_peak_id);
 CREATE INDEX IF NOT EXISTS idx_spectrum_feature ON spectrum(feature_id);
 CREATE INDEX IF NOT EXISTS idx_spectrum_alignment ON spectrum(alignment_feature_id);
@@ -412,6 +458,7 @@ CREATE INDEX IF NOT EXISTS idx_reference_spectrum_library ON reference_spectrum(
 CREATE INDEX IF NOT EXISTS idx_reference_spectrum_skeleton ON reference_spectrum(inchikey_skeleton);
 CREATE INDEX IF NOT EXISTS idx_ambiguity_member_class ON ambiguity_class_member(ambiguity_class_id);
 CREATE INDEX IF NOT EXISTS idx_msdial_annotation_subject ON msdial_annotation_result(subject_kind, subject_id);
+CREATE INDEX IF NOT EXISTS idx_msdial_candidate_subject ON msdial_annotation_candidate(subject_kind, subject_id);
 CREATE INDEX IF NOT EXISTS idx_criteria_rule_set ON criteria_rule(criteria_set_id);
 """
 
@@ -437,6 +484,59 @@ class Migration:
     version: int
     description: str
     steps: tuple[AddColumn | RunSql, ...]
+
+
+_MSDIAL_ANNOTATION_CANDIDATE_SQL = """
+CREATE TABLE IF NOT EXISTS msdial_annotation_candidate (
+    msdial_annotation_candidate_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES analysis_run(run_id),
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    alignment_feature_id TEXT REFERENCES alignment_feature(alignment_feature_id),
+    candidate_rank INTEGER NOT NULL,
+    candidate_count INTEGER NOT NULL,
+    is_representative INTEGER NOT NULL,
+    annotator_id TEXT,
+    database_id TEXT,
+    source TEXT,
+    priority INTEGER,
+    library_id INTEGER,
+    name TEXT,
+    candidate_is_named INTEGER,
+    formula TEXT,
+    ontology TEXT,
+    inchikey TEXT,
+    smiles TEXT,
+    reference_mz REAL,
+    reference_rt_min REAL,
+    reference_adduct TEXT,
+    annotation_tag TEXT,
+    is_reference_matched INTEGER,
+    is_annotation_suggested INTEGER,
+    is_precursor_mz_match INTEGER,
+    is_spectrum_match INTEGER,
+    is_spectrum_comparison_performed INTEGER,
+    total_score REAL,
+    mz_similarity REAL,
+    rt_similarity REAL,
+    ri_similarity REAL,
+    ccs_similarity REAL,
+    isotope_similarity REAL,
+    simple_dot_product REAL,
+    weighted_dot_product REAL,
+    reverse_dot_product REAL,
+    matched_peaks_count REAL,
+    matched_peaks_percentage REAL,
+    score_convention TEXT,
+    source_artifact_id INTEGER REFERENCES artifact(artifact_id),
+    source_row INTEGER,
+    UNIQUE(run_id, subject_kind, subject_id, candidate_rank)
+);
+"""
+
+_MSDIAL_ANNOTATION_CANDIDATE_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_msdial_candidate_subject ON msdial_annotation_candidate(subject_kind, subject_id);
+"""
 
 
 MIGRATIONS: tuple[Migration, ...] = (
@@ -492,6 +592,14 @@ MIGRATIONS: tuple[Migration, ...] = (
         description="name why an alignment member has no source peak instead of encoding it in a sentinel",
         steps=(
             AddColumn("alignment_member", "peak_origin", "TEXT"),
+        ),
+    ),
+    Migration(
+        version=7,
+        description="keep every annotation candidate MS-DIAL retained, not only the representative",
+        steps=(
+            RunSql(_MSDIAL_ANNOTATION_CANDIDATE_SQL),
+            RunSql(_MSDIAL_ANNOTATION_CANDIDATE_INDEX_SQL),
         ),
     ),
 )

@@ -75,6 +75,18 @@ def main(argv=None) -> int:
     annotations_parser.add_argument("database")
     annotations_parser.add_argument("run_id")
 
+    candidates_parser = subparsers.add_parser(
+        "show-candidates",
+        help="Report how often MS-DIAL kept more than one candidate, and list one alignment feature's set",
+    )
+    candidates_parser.add_argument("database")
+    candidates_parser.add_argument("run_id")
+    candidates_parser.add_argument(
+        "--alignment-feature",
+        default=None,
+        help="List this alignment feature's candidates instead of summarizing the run",
+    )
+
     validate_annotations_parser = subparsers.add_parser(
         "validate-annotations", help="Validate Level-3 annotation claims, candidates and evidence"
     )
@@ -354,6 +366,52 @@ def main(argv=None) -> int:
             ],
         }, ensure_ascii=False, indent=2))
         return 0
+    if args.command == "show-candidates":
+        with connect(args.database) as connection:
+            if args.alignment_feature:
+                rows = connection.execute(
+                    """SELECT candidate_rank, candidate_count, is_representative, name,
+                        candidate_is_named, database_id, library_id, formula, inchikey,
+                        is_reference_matched, is_annotation_suggested,
+                        is_spectrum_comparison_performed, total_score,
+                        simple_dot_product, weighted_dot_product, reverse_dot_product,
+                        matched_peaks_count, matched_peaks_percentage
+                        FROM msdial_annotation_candidate
+                        WHERE run_id = ? AND subject_id = ?
+                        ORDER BY candidate_rank""",
+                    (args.run_id, args.alignment_feature),
+                ).fetchall()
+                if not rows:
+                    return 1
+                print(json.dumps({
+                    "run_id": args.run_id,
+                    "alignment_feature_id": args.alignment_feature,
+                    "candidates": [dict(row) for row in rows],
+                }, ensure_ascii=False, indent=2))
+                return 0
+            distribution = connection.execute(
+                """SELECT candidate_count, COUNT(DISTINCT subject_id) AS alignment_features
+                    FROM msdial_annotation_candidate WHERE run_id = ?
+                    GROUP BY candidate_count ORDER BY candidate_count""",
+                (args.run_id,),
+            ).fetchall()
+            if not distribution:
+                return 1
+            # An annotation with alternatives the search could not separate is not the same claim as one
+            # without them, so the split is reported rather than left for a reader to derive.
+            annotated = sum(row["alignment_features"] for row in distribution)
+            ambiguous = sum(row["alignment_features"] for row in distribution if row["candidate_count"] > 1)
+            print(json.dumps({
+                "run_id": args.run_id,
+                "annotated_alignment_features": annotated,
+                "ambiguous_alignment_features": ambiguous,
+                "candidate_rows": connection.execute(
+                    "SELECT COUNT(*) FROM msdial_annotation_candidate WHERE run_id = ?",
+                    (args.run_id,),
+                ).fetchone()[0],
+                "by_candidate_count": [dict(row) for row in distribution],
+            }, ensure_ascii=False, indent=2))
+            return 0
     if args.command == "show-annotations":
         with connect(args.database) as connection:
             rows = connection.execute(

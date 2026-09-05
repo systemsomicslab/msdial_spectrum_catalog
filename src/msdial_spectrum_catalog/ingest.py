@@ -30,6 +30,7 @@ class IngestReport:
     alignments: int = 0
     alignment_members: int = 0
     msdial_annotation_results: int = 0
+    msdial_annotation_candidates: int = 0
     mztab_sme_linked: int = 0
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -85,8 +86,117 @@ def classify_metabolite_name(name: str | None) -> tuple[str, str | None, bool]:
             text = text[len(prefix):].strip()
             break
     candidate = text or None
-    is_named = bool(candidate) and not candidate.lower().startswith(UNNAMED_REFERENCE_PREFIXES)
-    return kind, candidate, is_named
+    return kind, candidate, is_named_reference(candidate)
+
+
+def is_named_reference(name: str | None) -> bool:
+    """Report whether a reference name is a compound name rather than an in-house identifier."""
+    return bool(name) and not name.lower().startswith(UNNAMED_REFERENCE_PREFIXES)
+
+
+# Columns of the AlignResult-*.mdcandidate.tsv sidecar. The exporter writes an empty cell wherever the
+# run established nothing, so an empty string is absent rather than a value.
+_CANDIDATE_TEXT_COLUMNS = (
+    ("annotator_id", "annotator_id"),
+    ("database_id", "database_id"),
+    ("source", "source"),
+    ("name", "name"),
+    ("formula", "formula"),
+    ("ontology", "ontology"),
+    ("inchikey", "inchikey"),
+    ("smiles", "smiles"),
+    ("reference_adduct", "reference_adduct"),
+    ("annotation_tag", "annotation_tag_vs1"),
+)
+_CANDIDATE_FLAG_COLUMNS = (
+    "is_reference_matched",
+    "is_annotation_suggested",
+    "is_precursor_mz_match",
+    "is_spectrum_match",
+    "is_spectrum_comparison_performed",
+)
+_CANDIDATE_SCORE_COLUMNS = (
+    "total_score",
+    "mz_similarity",
+    "rt_similarity",
+    "ri_similarity",
+    "ccs_similarity",
+    "isotope_similarity",
+    "simple_dot_product",
+    "weighted_dot_product",
+    "reverse_dot_product",
+    "matched_peaks_count",
+    "matched_peaks_percentage",
+)
+# The five terms that only exist when a product-ion spectrum was compared against a reference spectrum.
+_CANDIDATE_SPECTRAL_SCORE_COLUMNS = (
+    "simple_dot_product",
+    "weighted_dot_product",
+    "reverse_dot_product",
+    "matched_peaks_count",
+    "matched_peaks_percentage",
+)
+_CANDIDATE_INTEGER_COLUMNS = ("priority", "library_id")
+
+_CANDIDATE_FIELDS = (
+    tuple(name for name, _ in _CANDIDATE_TEXT_COLUMNS)
+    + _CANDIDATE_FLAG_COLUMNS
+    + _CANDIDATE_INTEGER_COLUMNS
+    + _CANDIDATE_SCORE_COLUMNS
+    + ("reference_mz", "reference_rt_min", "candidate_is_named", "score_convention")
+)
+
+
+def _text_or_none(value: str | None) -> str | None:
+    text = (value or "").strip()
+    return text or None
+
+
+def _flag_or_none(value: str | None) -> int | None:
+    text = (value or "").strip().lower()
+    if text in {"true", "1", "yes"}:
+        return 1
+    if text in {"false", "0", "no"}:
+        return 0
+    return None
+
+
+def _candidate_block(row: dict[str, str]) -> tuple[dict[str, object], list[str]]:
+    """Collect one .mdcandidate.tsv row, and report anything the row asserts twice over."""
+    folded = fold_headers(row)
+    problems: list[str] = []
+    block: dict[str, object] = {
+        name: _text_or_none(folded_value(folded, column))
+        for name, column in _CANDIDATE_TEXT_COLUMNS
+    }
+    for name in _CANDIDATE_FLAG_COLUMNS:
+        block[name] = _flag_or_none(folded_value(folded, name))
+    for name in _CANDIDATE_INTEGER_COLUMNS:
+        block[name] = parse_number(folded_value(folded, name), int)
+    for name in _CANDIDATE_SCORE_COLUMNS:
+        block[name] = parse_number(folded_value(folded, name))
+    block["reference_mz"] = parse_number(folded_value(folded, "reference_mz"))
+    block["reference_rt_min"] = parse_number(folded_value(folded, "reference_rt_min"))
+    # A spectral score is a measurement only when a comparison happened. The exporter leaves those cells
+    # empty otherwise, so a row that reports both states contradicts itself and the score is the part
+    # that cannot be trusted. Dropped rather than stored, and reported rather than dropped silently.
+    if block["is_spectrum_comparison_performed"] == 0:
+        contradicted = [
+            name for name in _CANDIDATE_SPECTRAL_SCORE_COLUMNS if block[name] is not None
+        ]
+        if contradicted:
+            problems.append(
+                "reports " + ", ".join(contradicted) + " although no spectrum comparison was performed"
+            )
+        for name in _CANDIDATE_SPECTRAL_SCORE_COLUMNS:
+            block[name] = None
+    block["candidate_is_named"] = int(is_named_reference(block["name"]))
+    # Same convention as the representative row: the exported dot products are plain cosines.
+    has_dot_product = any(
+        block[name] is not None for name in ("simple_dot_product", "weighted_dot_product", "reverse_dot_product")
+    )
+    block["score_convention"] = "cosine" if has_dot_product else None
+    return block, problems
 
 
 _ANNOTATION_TEXT_COLUMNS = (
@@ -207,6 +317,8 @@ def _artifact_type(path: Path) -> str:
         return "alignment_peak_id_matrix"
     if lower.endswith(".mdprovenance.tsv"):
         return "alignment_provenance"
+    if lower.endswith(".mdcandidate.tsv"):
+        return "alignment_annotation_candidates"
     if lower.endswith(".mdalign"):
         return "alignment_matrix"
     if lower.endswith(".mdpeak"):
@@ -580,6 +692,47 @@ def ingest_run(
                         (sample_id, feature_id, alignment_feature_id),
                     )
 
+        # MS-DIAL keeps up to NUMBER_OF_ANNOTATION_RESULTS threshold-passing results per annotator, and
+        # alignment carries them into the spot; .mdalign publishes only the representative. Without this
+        # sidecar the catalog cannot tell an unambiguous identification from one where the search did not
+        # choose between references whose spectra it could not separate.
+        candidate_paths = [path for path in relevant if path.name.lower().endswith(".mdcandidate.tsv")]
+        for candidate_path in candidate_paths:
+            for row_number, row in read_tsv(candidate_path):
+                alignment_id = parse_number(row.get("alignment_master_id"), int)
+                alignment_feature_id = alignments.get(alignment_id) if alignment_id is not None else None
+                if alignment_feature_id is None:
+                    report.errors.append(f"Unknown alignment ID {alignment_id} in {candidate_path.name}")
+                    continue
+                rank = parse_number(row.get("candidate_rank"), int)
+                count = parse_number(row.get("candidate_count"), int)
+                if rank is None or count is None:
+                    report.errors.append(
+                        f"{candidate_path.name} row {row_number} has no candidate rank or count"
+                    )
+                    continue
+                block, problems = _candidate_block(row)
+                for problem in problems:
+                    report.errors.append(
+                        f"{candidate_path.name} row {row_number} (alignment {alignment_id}, rank {rank}) {problem}"
+                    )
+                columns = ", ".join(_CANDIDATE_FIELDS)
+                placeholders = ", ".join("?" for _ in _CANDIDATE_FIELDS)
+                candidate_id = make_id("msdial-candidate", run_id, "alignment_feature", alignment_feature_id, rank)
+                connection.execute(
+                    f"""INSERT OR IGNORE INTO msdial_annotation_candidate(
+                        msdial_annotation_candidate_id, run_id, subject_kind, subject_id,
+                        alignment_feature_id, candidate_rank, candidate_count, is_representative,
+                        {columns}, source_artifact_id, source_row
+                    ) VALUES (?, ?, 'alignment_feature', ?, ?, ?, ?, ?, {placeholders}, ?, ?)""",
+                    (
+                        candidate_id, run_id, alignment_feature_id, alignment_feature_id, rank, count,
+                        int(row.get("is_representative", "").strip().lower() == "true"),
+                        *(block[name] for name in _CANDIDATE_FIELDS),
+                        artifact_ids[candidate_path], row_number,
+                    ),
+                )
+
         for mztab_path in (path for path in relevant if path.name.lower().endswith(".mztab")):
             smf_to_alignment: dict[str, str] = {}
             sme_to_alignment: dict[str, str] = {}
@@ -650,6 +803,10 @@ def ingest_run(
             ),
             "msdial_annotation_results": (
                 "SELECT COUNT(*) FROM msdial_annotation_result WHERE run_id = ?",
+                run_id,
+            ),
+            "msdial_annotation_candidates": (
+                "SELECT COUNT(*) FROM msdial_annotation_candidate WHERE run_id = ?",
                 run_id,
             ),
             "mztab_sme_linked": (
