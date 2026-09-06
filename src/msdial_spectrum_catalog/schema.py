@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -465,6 +465,29 @@ CREATE TABLE IF NOT EXISTS msdial_annotation_candidate (
     UNIQUE(run_id, subject_kind, subject_id, candidate_rank)
 );
 
+CREATE TABLE IF NOT EXISTS candidate_set_assessment (
+    candidate_set_assessment_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES analysis_run(run_id),
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    definition_label TEXT NOT NULL,
+    rules_sha256 TEXT NOT NULL,
+    state TEXT NOT NULL,
+    not_assessed_reason TEXT,
+    ceiling_effect TEXT NOT NULL,
+    candidate_count INTEGER NOT NULL,
+    contender_count INTEGER NOT NULL,
+    contender_selection_rule TEXT NOT NULL,
+    discrimination_margin REAL,
+    max_reference_mz_spread_mda REAL,
+    ambiguity_class_id TEXT REFERENCES ambiguity_class(ambiguity_class_id),
+    linked_contender_count INTEGER NOT NULL DEFAULT 0,
+    unlinked_contender_count INTEGER NOT NULL DEFAULT 0,
+    state_reason TEXT,
+    assessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(run_id, subject_kind, subject_id, definition_label, rules_sha256)
+);
+
 CREATE INDEX IF NOT EXISTS idx_feature_sample ON feature(sample_id, master_peak_id);
 CREATE INDEX IF NOT EXISTS idx_spectrum_feature ON spectrum(feature_id);
 CREATE INDEX IF NOT EXISTS idx_spectrum_alignment ON spectrum(alignment_feature_id);
@@ -480,6 +503,7 @@ CREATE INDEX IF NOT EXISTS idx_reference_spectrum_skeleton ON reference_spectrum
 CREATE INDEX IF NOT EXISTS idx_ambiguity_member_class ON ambiguity_class_member(ambiguity_class_id);
 CREATE INDEX IF NOT EXISTS idx_msdial_annotation_subject ON msdial_annotation_result(subject_kind, subject_id);
 CREATE INDEX IF NOT EXISTS idx_msdial_candidate_subject ON msdial_annotation_candidate(subject_kind, subject_id);
+CREATE INDEX IF NOT EXISTS idx_candidate_assessment_run ON candidate_set_assessment(run_id, state);
 CREATE INDEX IF NOT EXISTS idx_criteria_rule_set ON criteria_rule(criteria_set_id);
 """
 
@@ -587,6 +611,36 @@ CREATE INDEX IF NOT EXISTS idx_reference_consensus_library ON reference_consensu
 """
 
 
+_CANDIDATE_ASSESSMENT_SQL = """
+CREATE TABLE IF NOT EXISTS candidate_set_assessment (
+    candidate_set_assessment_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES analysis_run(run_id),
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    definition_label TEXT NOT NULL,
+    rules_sha256 TEXT NOT NULL,
+    state TEXT NOT NULL,
+    not_assessed_reason TEXT,
+    ceiling_effect TEXT NOT NULL,
+    candidate_count INTEGER NOT NULL,
+    contender_count INTEGER NOT NULL,
+    contender_selection_rule TEXT NOT NULL,
+    discrimination_margin REAL,
+    max_reference_mz_spread_mda REAL,
+    ambiguity_class_id TEXT REFERENCES ambiguity_class(ambiguity_class_id),
+    linked_contender_count INTEGER NOT NULL DEFAULT 0,
+    unlinked_contender_count INTEGER NOT NULL DEFAULT 0,
+    state_reason TEXT,
+    assessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(run_id, subject_kind, subject_id, definition_label, rules_sha256)
+);
+"""
+
+_CANDIDATE_ASSESSMENT_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_candidate_assessment_run ON candidate_set_assessment(run_id, state);
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=3,
@@ -656,6 +710,14 @@ MIGRATIONS: tuple[Migration, ...] = (
         steps=(
             RunSql(_REFERENCE_CONSENSUS_SQL),
             RunSql(_REFERENCE_CONSENSUS_INDEX_SQL),
+        ),
+    ),
+    Migration(
+        version=9,
+        description="record why each candidate set holds more than one entry, and what that does to its claim",
+        steps=(
+            RunSql(_CANDIDATE_ASSESSMENT_SQL),
+            RunSql(_CANDIDATE_ASSESSMENT_INDEX_SQL),
         ),
     ),
 )

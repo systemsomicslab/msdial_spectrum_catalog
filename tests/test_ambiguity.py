@@ -13,6 +13,7 @@ from msdial_spectrum_catalog.ambiguity import (
     blocking_key,
     collision_energy_bin,
     compute_ambiguity_classes,
+    _class_id,
     discriminating_evidence_needed,
     discriminating_ions,
     is_clique,
@@ -512,8 +513,14 @@ class StorageTests(unittest.TestCase):
         self.assertNotEqual(base.rules_sha256, ClassDefinition(weighted_cosine_threshold=0.95).rules_sha256)
         self.assertNotEqual(base.rules_sha256, ClassDefinition(entropy_similarity_threshold=0.5).rules_sha256)
         self.assertNotEqual(base.rules_sha256, ClassDefinition(mz_tolerance_da=0.05).rules_sha256)
-        # The same rules under a different label are the same rules.
-        self.assertEqual(base.rules_sha256, ClassDefinition().rules_sha256)
+        # The same rules under a different label are the same rules: the label travels beside the
+        # digest in every identity, so folding it in would make the digest answer a different
+        # question from the one it is named for.
+        self.assertEqual(base.rules_sha256, ClassDefinition(definition_id="ambiguity-v9").rules_sha256)
+        # ...and the identity still separates them, because the label is part of that.
+        self.assertNotEqual(
+            _class_id(base, "anchor"), _class_id(ClassDefinition(definition_id="ambiguity-v9"), "anchor")
+        )
 
     def test_the_tool_run_is_recorded_on_every_row_it_produced(self):
         with tempfile.TemporaryDirectory() as directory:

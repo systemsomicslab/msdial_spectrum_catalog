@@ -93,8 +93,14 @@ class ClassDefinition:
         the upsert replaced the earlier rows in place: same id, different meaning, and nothing stored
         that said so. Deriving the identifier from the rules makes a recomputation at a different
         threshold a different class rather than a silent overwrite of the old one.
+
+        definition_id is excluded from the digest because it travels beside it in every identity and
+        every stored row. Folding it in would make the digest answer "which run was this" rather than
+        "which rules were these", and the point is that the label does not change when a threshold
+        does.
         """
-        return short_hash(_canonical(asdict(self)))
+        rules = {key: value for key, value in asdict(self).items() if key != "definition_id"}
+        return short_hash(_canonical(rules))
 
 
 @dataclass

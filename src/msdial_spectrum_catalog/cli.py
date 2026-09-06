@@ -75,6 +75,16 @@ def main(argv=None) -> int:
     annotations_parser.add_argument("database")
     annotations_parser.add_argument("run_id")
 
+    assess_parser = subparsers.add_parser(
+        "assess-candidates",
+        help="Decide why each candidate set holds more than one entry, and what that permits",
+    )
+    assess_parser.add_argument("database")
+    assess_parser.add_argument("run_id")
+    assess_parser.add_argument("--definition-label", default="candidate-ambiguity-v1")
+    assess_parser.add_argument("--mass-separation-mda", type=float, default=1.0)
+    assess_parser.add_argument("--discrimination-margin", type=float, default=0.01)
+
     candidates_parser = subparsers.add_parser(
         "show-candidates",
         help="Report how often MS-DIAL kept more than one candidate, and list one alignment feature's set",
@@ -366,6 +376,28 @@ def main(argv=None) -> int:
             ],
         }, ensure_ascii=False, indent=2))
         return 0
+    if args.command == "assess-candidates":
+        from .candidate_ambiguity import AssessmentDefinition, assess_run_candidates
+
+        report = assess_run_candidates(
+            args.database,
+            args.run_id,
+            definition=AssessmentDefinition(
+                label=args.definition_label,
+                mass_separation_mda=args.mass_separation_mda,
+                discrimination_margin=args.discrimination_margin,
+            ),
+        )
+        print(json.dumps({
+            "run_id": args.run_id,
+            "definition_label": report.definition_label,
+            "valid": report.valid,
+            "subjects": report.subjects,
+            "states": report.states,
+            "errors": report.errors,
+            "warnings": report.warnings,
+        }, ensure_ascii=False, indent=2))
+        return 0 if report.valid else 2
     if args.command == "show-candidates":
         with connect(args.database) as connection:
             if args.alignment_feature:
