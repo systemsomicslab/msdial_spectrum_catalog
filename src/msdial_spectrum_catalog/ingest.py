@@ -7,7 +7,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .identifiers import make_id
-from .parsers import parse_number, read_analysis_csv, read_msp, read_mztab, read_tsv, sha256_file
+from .parsers import (
+    fold_headers,
+    folded_value,
+    parse_number,
+    read_analysis_csv,
+    read_msp,
+    read_mztab,
+    read_tsv,
+    sha256_file,
+    split_refs,
+)
 from .storage import initialize, transaction
 
 
@@ -19,6 +29,9 @@ class IngestReport:
     spectra: int = 0
     alignments: int = 0
     alignment_members: int = 0
+    msdial_annotation_results: int = 0
+    msdial_annotation_candidates: int = 0
+    mztab_sme_linked: int = 0
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -27,12 +40,314 @@ class IngestReport:
         return not self.errors
 
 
+# MS-DIAL writes this into the metabolite name field of rows that carry no annotation claim at all.
+NOT_ANNOTATED_NAME_PREFIXES = ("unknown",)
+
+# MsdialCore/Utility/DataAccess.cs SetMoleculeMsPropertyAsSuggested prefixes a suggested annotation with
+# "no MS2: " when MS2RawSpectrumID < 0 and with "low score: " otherwise. "w/o MS2: " is the MS-DIAL 4
+# spelling, commented out in MS-DIAL 5, but MS-DIAL 4 exports remain ingestable.
+# Colon-terminated rather than space-terminated: MS-DIAL 5 writes "no MS2: " with a space, while MS-DIAL 4
+# code searches for "w/o MS2:" without one, so both spellings occur in exported names.
+MSDIAL_SUGGESTION_PREFIXES = (
+    ("no ms2:", "precursor_only"),
+    ("w/o ms2:", "precursor_only"),
+    ("low score:", "low_score"),
+)
+
+# Reference records whose NAME is an in-house identifier rather than a compound name.
+UNNAMED_REFERENCE_PREFIXES = ("riken",)
+
+
+def is_annotated_metabolite_name(name: str | None) -> bool:
+    """Report whether an MS-DIAL metabolite name field asserts an annotation."""
+    if name is None:
+        return False
+    text = name.strip()
+    if not text or text.lower() == "null":
+        return False
+    lowered = text.lower()
+    return not any(lowered.startswith(prefix) for prefix in NOT_ANNOTATED_NAME_PREFIXES)
+
+
+def classify_metabolite_name(name: str | None) -> tuple[str, str | None, bool]:
+    """Split an MS-DIAL metabolite name into annotation_kind, candidate_name and candidate_is_named.
+
+    A "no MS2: " row is a precursor-only suggestion: no product-ion spectrum was acquired, so it can
+    never support spectral-library evidence. A "low score: " row does have a product-ion spectrum, which
+    failed the search criteria. Collapsing either into the same bucket as a real MS/MS match would
+    overstate the evidence, so the distinction is stored rather than inferred downstream.
+    """
+    text = (name or "").strip()
+    lowered = text.lower()
+    kind = "msms_matched"
+    for prefix, suggestion_kind in MSDIAL_SUGGESTION_PREFIXES:
+        if lowered.startswith(prefix):
+            kind = suggestion_kind
+            text = text[len(prefix):].strip()
+            break
+    candidate = text or None
+    return kind, candidate, is_named_reference(candidate)
+
+
+def is_named_reference(name: str | None) -> bool:
+    """Report whether a reference name is a compound name rather than an in-house identifier."""
+    return bool(name) and not name.lower().startswith(UNNAMED_REFERENCE_PREFIXES)
+
+
+# Columns of the AlignResult-*.mdcandidate.tsv sidecar. The exporter writes an empty cell wherever the
+# run established nothing, so an empty string is absent rather than a value.
+_CANDIDATE_TEXT_COLUMNS = (
+    ("annotator_id", "annotator_id"),
+    ("database_id", "database_id"),
+    ("source", "source"),
+    ("name", "name"),
+    ("formula", "formula"),
+    ("ontology", "ontology"),
+    ("inchikey", "inchikey"),
+    ("smiles", "smiles"),
+    ("reference_adduct", "reference_adduct"),
+    ("annotation_tag", "annotation_tag_vs1"),
+)
+_CANDIDATE_FLAG_COLUMNS = (
+    "is_reference_matched",
+    "is_annotation_suggested",
+    "is_precursor_mz_match",
+    "is_spectrum_match",
+    "is_spectrum_comparison_performed",
+)
+_CANDIDATE_SCORE_COLUMNS = (
+    "total_score",
+    "mz_similarity",
+    "rt_similarity",
+    "ri_similarity",
+    "ccs_similarity",
+    "isotope_similarity",
+    "simple_dot_product",
+    "weighted_dot_product",
+    "reverse_dot_product",
+    "matched_peaks_count",
+    "matched_peaks_percentage",
+)
+# The five terms that only exist when a product-ion spectrum was compared against a reference spectrum.
+_CANDIDATE_SPECTRAL_SCORE_COLUMNS = (
+    "simple_dot_product",
+    "weighted_dot_product",
+    "reverse_dot_product",
+    "matched_peaks_count",
+    "matched_peaks_percentage",
+)
+# The four terms MS-DIAL computes with GetGaussianSimilarity, which is positive whenever it ran.
+_CANDIDATE_GAUSSIAN_SCORE_COLUMNS = (
+    "mz_similarity",
+    "rt_similarity",
+    "ri_similarity",
+    "ccs_similarity",
+)
+# GetIsotopeRatioSimilarity's "nothing to compare" return value.
+_ISOTOPE_NOT_COMPARED = -1.0
+_CANDIDATE_INTEGER_COLUMNS = ("priority", "library_id")
+
+_CANDIDATE_FIELDS = (
+    tuple(name for name, _ in _CANDIDATE_TEXT_COLUMNS)
+    + _CANDIDATE_FLAG_COLUMNS
+    + _CANDIDATE_INTEGER_COLUMNS
+    + _CANDIDATE_SCORE_COLUMNS
+    + ("reference_mz", "reference_rt_min", "candidate_is_named", "score_convention")
+)
+
+
+def _text_or_none(value: str | None) -> str | None:
+    text = (value or "").strip()
+    return text or None
+
+
+def _flag_or_none(value: str | None) -> int | None:
+    text = (value or "").strip().lower()
+    if text in {"true", "1", "yes"}:
+        return 1
+    if text in {"false", "0", "no"}:
+        return 0
+    return None
+
+
+def _candidate_block(row: dict[str, str]) -> tuple[dict[str, object], list[str]]:
+    """Collect one .mdcandidate.tsv row, and report anything the row asserts twice over."""
+    folded = fold_headers(row)
+    problems: list[str] = []
+    block: dict[str, object] = {
+        name: _text_or_none(folded_value(folded, column))
+        for name, column in _CANDIDATE_TEXT_COLUMNS
+    }
+    for name in _CANDIDATE_FLAG_COLUMNS:
+        block[name] = _flag_or_none(folded_value(folded, name))
+    for name in _CANDIDATE_INTEGER_COLUMNS:
+        block[name] = parse_number(folded_value(folded, name), int)
+    for name in _CANDIDATE_SCORE_COLUMNS:
+        block[name] = parse_number(folded_value(folded, name))
+    block["reference_mz"] = parse_number(folded_value(folded, "reference_mz"))
+    block["reference_rt_min"] = parse_number(folded_value(folded, "reference_rt_min"))
+    # A spectral score is a measurement only when a comparison happened. The exporter leaves those cells
+    # empty otherwise, so a row that reports both states contradicts itself and the score is the part
+    # that cannot be trusted. Dropped rather than stored, and reported rather than dropped silently.
+    if block["is_spectrum_comparison_performed"] == 0:
+        contradicted = [
+            name for name in _CANDIDATE_SPECTRAL_SCORE_COLUMNS if block[name] is not None
+        ]
+        if contradicted:
+            problems.append(
+                "reports " + ", ".join(contradicted) + " although no spectrum comparison was performed"
+            )
+        for name in _CANDIDATE_SPECTRAL_SCORE_COLUMNS:
+            block[name] = None
+    # The other five terms carry sentinels too, and two different ones, because two different MS-DIAL
+    # functions produce them. A current export writes those cells empty; these guards are what keeps a
+    # sidecar written before that fix from storing a sentinel as a measurement.
+    #
+    # GetGaussianSimilarity produces the m/z, RT, RI and CCS terms as
+    # exp(-0.5 * ((actual - reference) / tolerance)^2). It is strictly positive whenever it ran, returns
+    # -1 when a value was missing, and leaves the field at its default 0 when the run never enabled the
+    # term. Only a positive value is a measurement, which is also the test MS-DIAL's own GetTotalScore
+    # applies before adding a term to the total.
+    for name in _CANDIDATE_GAUSSIAN_SCORE_COLUMNS:
+        value = block[name]
+        if value is not None and value <= 0:
+            block[name] = None
+    # GetIsotopeRatioSimilarity is 1 minus an accumulated ratio difference, so it is genuinely signed and
+    # a negative value is a measurement saying the isotope patterns disagree. Only exactly -1 is its
+    # sentinel, and discarding every negative here would throw away the strongest evidence the term
+    # produces. Measured on one real export: 495 rows at exactly -1, all of them in-house records with no
+    # isotopic pattern deposited, against 19 rows carrying a genuine negative.
+    if block["isotope_similarity"] == _ISOTOPE_NOT_COMPARED:
+        block["isotope_similarity"] = None
+    block["candidate_is_named"] = int(is_named_reference(block["name"]))
+    # Same convention as the representative row: the exported dot products are plain cosines.
+    has_dot_product = any(
+        block[name] is not None for name in ("simple_dot_product", "weighted_dot_product", "reverse_dot_product")
+    )
+    block["score_convention"] = "cosine" if has_dot_product else None
+    return block, problems
+
+
+_ANNOTATION_TEXT_COLUMNS = (
+    ("metabolite_name", ("Metabolite name", "Name")),
+    ("formula", ("Formula",)),
+    ("ontology", ("Ontology",)),
+    ("inchikey", ("INCHIKEY", "InChIKey")),
+    ("smiles", ("SMILES",)),
+    ("adduct", ("Adduct type", "Adduct")),
+    ("annotation_tag", ("Annotation tag (VS1.0)", "Annotation tag")),
+    ("comment", ("Comment",)),
+)
+_ANNOTATION_FLAG_COLUMNS = (
+    ("is_rt_matched", ("RT matched",)),
+    ("is_mz_matched", ("m/z matched",)),
+    ("is_msms_matched", ("MS/MS matched",)),
+)
+_ANNOTATION_SCORE_COLUMNS = (
+    ("rt_similarity", ("RT similarity",)),
+    ("mz_similarity", ("m/z similarity",)),
+    ("ccs_similarity", ("CCS similarity",)),
+    ("simple_dot_product", ("Simple dot product",)),
+    ("weighted_dot_product", ("Weighted dot product",)),
+    ("reverse_dot_product", ("Reverse dot product",)),
+    ("matched_peaks_count", ("Matched peaks count",)),
+    ("matched_peaks_percentage", ("Matched peaks percentage",)),
+    ("total_score", ("Total score",)),
+)
+_DOT_PRODUCT_FIELDS = ("simple_dot_product", "weighted_dot_product", "reverse_dot_product")
+
+# MS-DIAL writes -1 into these two columns to mean "not applicable", never as a measurement. A count and a
+# percentage cannot be negative, so -1 is normalized away rather than stored as if it were a value.
+_NOT_APPLICABLE_NEGATIVE_FIELDS = ("matched_peaks_count", "matched_peaks_percentage")
+
+_ANNOTATION_RESULT_FIELDS = (
+    tuple(name for name, _ in _ANNOTATION_TEXT_COLUMNS)
+    + tuple(name for name, _ in _ANNOTATION_FLAG_COLUMNS)
+    + tuple(name for name, _ in _ANNOTATION_SCORE_COLUMNS)
+    + ("score_convention", "annotation_kind", "candidate_name", "candidate_is_named")
+)
+
+
+def _annotation_block(row: dict[str, str]) -> dict[str, object] | None:
+    """Collect MS-DIAL's annotation columns from one .mdpeak or .mdalign row."""
+    folded = fold_headers(row)
+    block: dict[str, object] = {
+        name: folded_value(folded, *headers) for name, headers in _ANNOTATION_TEXT_COLUMNS
+    }
+    if not is_annotated_metabolite_name(block["metabolite_name"]):
+        return None
+    for name, headers in _ANNOTATION_FLAG_COLUMNS:
+        raw = folded_value(folded, *headers)
+        block[name] = None if raw is None else int(raw.lower() in {"true", "1", "yes"})
+    for name, headers in _ANNOTATION_SCORE_COLUMNS:
+        block[name] = parse_number(folded_value(folded, *headers))
+    for name in _NOT_APPLICABLE_NEGATIVE_FIELDS:
+        value = block[name]
+        if value is not None and value < 0:
+            block[name] = None
+    kind, candidate, is_named = classify_metabolite_name(block["metabolite_name"])
+    block["annotation_kind"] = kind
+    block["candidate_name"] = candidate
+    block["candidate_is_named"] = int(is_named)
+    if kind == "precursor_only":
+        # A precursor-only suggestion had no product-ion spectrum to compare (MS2RawSpectrumID < 0), so
+        # no dot product was ever computed. MsScanMatching's scoring functions return -1 for "nothing to
+        # compare", that -1 is stored in MsScanMatchResult.Squared*, and the non-squared getters clamp it
+        # with Math.Max(value, 0f) -- so the 0.000 an older .mdpeak carries is a clamped sentinel, not a
+        # measurement and not an unset field. MatchedPeaksCount has no clamping getter, which is why the
+        # raw -1 shows through there on the same row.
+        # Only precursor-only rows are normalized: a low-score row DID have a spectrum compared, so a
+        # zero there is a real result and must survive. A non-zero value is kept either way, so a future
+        # MS-DIAL change shows up as an anomaly instead of being silently discarded.
+        for name in _DOT_PRODUCT_FIELDS:
+            if block[name] == 0.0:
+                block[name] = None
+    # score_convention describes the three dot-product columns only. The exported columns are plain
+    # cosines: MsScanMatching's GetSimpleDotProduct/GetWeightedDotProduct return cos-squared and are stored
+    # in MsScanMatchResult.Squared*, but those fields are used only for threshold comparison, and both text
+    # exporters write the non-squared computed properties (IMetadataAccessor.cs:114-116,
+    # IAnalysisMetadataAccessor.cs:123-125). Total score is an unnormalized weighted composite on its own
+    # scale -- 2.611 for a real match in the reference demo -- so it is never a cosine.
+    has_dot_product = any(block[name] is not None for name in _DOT_PRODUCT_FIELDS)
+    block["score_convention"] = "cosine" if has_dot_product else None
+    return block
+
+
+def _insert_annotation_result(
+    connection,
+    run_id: str,
+    subject_kind: str,
+    subject_id: str,
+    block: dict[str, object],
+    artifact_id: int,
+    row_number: int,
+) -> None:
+    result_id = make_id("msdial-annotation", run_id, subject_kind, subject_id, 1)
+    columns = ", ".join(_ANNOTATION_RESULT_FIELDS)
+    placeholders = ", ".join("?" for _ in _ANNOTATION_RESULT_FIELDS)
+    connection.execute(
+        f"""INSERT OR IGNORE INTO msdial_annotation_result(
+            msdial_annotation_result_id, run_id, subject_kind, subject_id, feature_id,
+            alignment_feature_id, rank, annotator_id, {columns}, source_artifact_id, source_row
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, '', {placeholders}, ?, ?)""",
+        (
+            result_id, run_id, subject_kind, subject_id,
+            subject_id if subject_kind == "feature" else None,
+            subject_id if subject_kind == "alignment_feature" else None,
+            *(block[name] for name in _ANNOTATION_RESULT_FIELDS),
+            artifact_id, row_number,
+        ),
+    )
+
+
 def _artifact_type(path: Path) -> str:
     lower = path.name.lower()
     if lower.endswith(".mdpeakid.tsv"):
         return "alignment_peak_id_matrix"
     if lower.endswith(".mdprovenance.tsv"):
         return "alignment_provenance"
+    if lower.endswith(".mdcandidate.tsv"):
+        return "alignment_annotation_candidates"
     if lower.endswith(".mdalign"):
         return "alignment_matrix"
     if lower.endswith(".mdpeak"):
@@ -158,6 +473,12 @@ def ingest_run(
                         row.get("Adduct"), artifact_ids[peak_path], row_number,
                     ),
                 )
+                block = _annotation_block(row)
+                if block is not None:
+                    _insert_annotation_result(
+                        connection, run_id, "feature", feature_id, block,
+                        artifact_ids[peak_path], row_number,
+                    )
 
         sample_msp_paths = [
             path for path in relevant
@@ -218,6 +539,12 @@ def ingest_run(
                         row.get("Metabolite name"), artifact_ids[alignment_path], row_number,
                     ),
                 )
+                block = _annotation_block(row)
+                if block is not None:
+                    _insert_annotation_result(
+                        connection, run_id, "alignment_feature", alignment_feature_id, block,
+                        artifact_ids[alignment_path], row_number,
+                    )
 
         alignment_msp_paths = [
             path for path in relevant
@@ -340,12 +667,32 @@ def ingest_run(
                         f"Peak ID matrix/provenance mismatch for alignment {alignment_id}, {sample_name}: "
                         f"{existing_member['source_master_peak_id']} vs {source_peak_id}"
                     )
+                # A member with no source peak has no source spectrum, so it must not carry a scan
+                # index. MS-DIAL before the AlignmentProvenanceExporter fix left those fields at 0,
+                # which is a real scan number: stored unguarded it points an auditor at a spectrum
+                # belonging to some other peak entirely. Newer exports write the cell empty, so this
+                # guard is a no-op on them and load-bearing on older ones.
+                ms1_scan_index = parse_number(row.get("ms1_raw_spectrum_id_top"), int)
+                ms2_scan_index = parse_number(row.get("ms2_raw_spectrum_id"), int)
+                if not has_source_peak:
+                    ms1_scan_index = None
+                    ms2_scan_index = None
+                # An m/z cannot be negative. Older exports read the column from the chromatogram axis
+                # rather than the peak mass, which reported the axis sentinel for exactly the members
+                # that did have a source peak.
+                mz = parse_number(row.get("mz"))
+                if mz is not None and mz < 0:
+                    mz = None
+                # peak_origin names why a member has no source peak. Absent from older exports, in
+                # which case the sentinel is all there is.
+                peak_origin = folded_value(fold_headers(row), "peak_origin")
                 connection.execute(
                     """INSERT INTO alignment_member(
                         alignment_member_id, alignment_feature_id, sample_id, feature_id, file_id,
                         is_representative, has_source_peak, source_master_peak_id, source_local_peak_id,
-                        ms1_scan_index, ms2_scan_index, rt_min, mz, height, source_artifact_id, source_row
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        peak_origin, ms1_scan_index, ms2_scan_index, rt_min, mz, height,
+                        source_artifact_id, source_row
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(alignment_feature_id, sample_id) DO UPDATE SET
                         feature_id = excluded.feature_id,
                         file_id = excluded.file_id,
@@ -353,6 +700,7 @@ def ingest_run(
                         has_source_peak = excluded.has_source_peak,
                         source_master_peak_id = excluded.source_master_peak_id,
                         source_local_peak_id = excluded.source_local_peak_id,
+                        peak_origin = excluded.peak_origin,
                         ms1_scan_index = excluded.ms1_scan_index,
                         ms2_scan_index = excluded.ms2_scan_index,
                         rt_min = excluded.rt_min,
@@ -362,9 +710,8 @@ def ingest_run(
                         member_id, alignment_feature_id, sample_id, feature_id, file_id,
                         int(row.get("is_representative", "").lower() == "true"), int(has_source_peak),
                         source_peak_id, parse_number(row.get("source_peak_id"), int),
-                        parse_number(row.get("ms1_raw_spectrum_id_top"), int),
-                        parse_number(row.get("ms2_raw_spectrum_id"), int),
-                        parse_number(row.get("rt_min")), parse_number(row.get("mz")),
+                        peak_origin, ms1_scan_index, ms2_scan_index,
+                        parse_number(row.get("rt_min")), mz,
                         parse_number(row.get("height")), artifact_ids[provenance_path], row_number,
                     ),
                 )
@@ -374,21 +721,89 @@ def ingest_run(
                         (sample_id, feature_id, alignment_feature_id),
                     )
 
+        # MS-DIAL keeps up to NUMBER_OF_ANNOTATION_RESULTS threshold-passing results per annotator, and
+        # alignment carries them into the spot; .mdalign publishes only the representative. Without this
+        # sidecar the catalog cannot tell an unambiguous identification from one where the search did not
+        # choose between references whose spectra it could not separate.
+        candidate_paths = [path for path in relevant if path.name.lower().endswith(".mdcandidate.tsv")]
+        for candidate_path in candidate_paths:
+            for row_number, row in read_tsv(candidate_path):
+                alignment_id = parse_number(row.get("alignment_master_id"), int)
+                alignment_feature_id = alignments.get(alignment_id) if alignment_id is not None else None
+                if alignment_feature_id is None:
+                    report.errors.append(f"Unknown alignment ID {alignment_id} in {candidate_path.name}")
+                    continue
+                rank = parse_number(row.get("candidate_rank"), int)
+                count = parse_number(row.get("candidate_count"), int)
+                if rank is None or count is None:
+                    report.errors.append(
+                        f"{candidate_path.name} row {row_number} has no candidate rank or count"
+                    )
+                    continue
+                block, problems = _candidate_block(row)
+                for problem in problems:
+                    report.errors.append(
+                        f"{candidate_path.name} row {row_number} (alignment {alignment_id}, rank {rank}) {problem}"
+                    )
+                columns = ", ".join(_CANDIDATE_FIELDS)
+                placeholders = ", ".join("?" for _ in _CANDIDATE_FIELDS)
+                candidate_id = make_id("msdial-candidate", run_id, "alignment_feature", alignment_feature_id, rank)
+                connection.execute(
+                    f"""INSERT OR IGNORE INTO msdial_annotation_candidate(
+                        msdial_annotation_candidate_id, run_id, subject_kind, subject_id,
+                        alignment_feature_id, candidate_rank, candidate_count, is_representative,
+                        {columns}, source_artifact_id, source_row
+                    ) VALUES (?, ?, 'alignment_feature', ?, ?, ?, ?, ?, {placeholders}, ?, ?)""",
+                    (
+                        candidate_id, run_id, alignment_feature_id, alignment_feature_id, rank, count,
+                        int(row.get("is_representative", "").strip().lower() == "true"),
+                        *(block[name] for name in _CANDIDATE_FIELDS),
+                        artifact_ids[candidate_path], row_number,
+                    ),
+                )
+
         for mztab_path in (path for path in relevant if path.name.lower().endswith(".mztab")):
             smf_to_alignment: dict[str, str] = {}
+            sme_to_alignment: dict[str, str] = {}
+            sme_owner: dict[str, str] = {}
             pending: list[tuple[int, str, dict[str, str]]] = []
             for row_number, section, row in read_mztab(mztab_path):
                 pending.append((row_number, section, row))
-                if section == "SMF":
-                    record_id = row.get("SMF_ID", "")
-                    alignment_id = parse_number(record_id, int)
-                    if alignment_id in alignments:
-                        smf_to_alignment[record_id] = alignments[alignment_id]
+                if section != "SMF":
+                    continue
+                record_id = row.get("SMF_ID", "")
+                alignment_id = parse_number(record_id, int)
+                if alignment_id not in alignments:
+                    continue
+                smf_to_alignment[record_id] = alignments[alignment_id]
+                for sme_ref in split_refs(row.get("SME_ID_REFS", "")):
+                    owner = sme_owner.get(sme_ref)
+                    if owner is None:
+                        sme_owner[sme_ref] = record_id
+                        sme_to_alignment[sme_ref] = alignments[alignment_id]
+                    elif owner != record_id:
+                        report.warnings.append(
+                            f"{mztab_path.name} SME_ID {sme_ref} is referenced by SMF_ID {owner} and "
+                            f"{record_id}; keeping the {owner} link"
+                        )
+            unlinked_sme = sum(
+                1 for _, section, row in pending
+                if section == "SME" and row.get("SME_ID", "") not in sme_to_alignment
+            )
+            if unlinked_sme:
+                report.warnings.append(
+                    f"{unlinked_sme} SME rows in {mztab_path.name} could not be linked to an alignment feature"
+                )
             for row_number, section, row in pending:
                 id_field = f"{section}_ID"
                 record_id = row.get(id_field, "")
                 refs = row.get("SMF_ID_REFS", "") if section == "SML" else row.get("SME_ID_REFS", "")
-                alignment_feature_id = smf_to_alignment.get(record_id) if section == "SMF" else None
+                if section == "SMF":
+                    alignment_feature_id = smf_to_alignment.get(record_id)
+                elif section == "SME":
+                    alignment_feature_id = sme_to_alignment.get(record_id)
+                else:
+                    alignment_feature_id = None
                 if section == "SML" and refs:
                     first_ref = refs.replace("|", ",").split(",", 1)[0].strip()
                     alignment_feature_id = smf_to_alignment.get(first_ref)
@@ -413,6 +828,18 @@ def ingest_run(
             "alignments": ("SELECT COUNT(*) FROM alignment_feature WHERE run_id = ?", run_id),
             "alignment_members": (
                 "SELECT COUNT(*) FROM alignment_member WHERE alignment_feature_id IN (SELECT alignment_feature_id FROM alignment_feature WHERE run_id = ?)",
+                run_id,
+            ),
+            "msdial_annotation_results": (
+                "SELECT COUNT(*) FROM msdial_annotation_result WHERE run_id = ?",
+                run_id,
+            ),
+            "msdial_annotation_candidates": (
+                "SELECT COUNT(*) FROM msdial_annotation_candidate WHERE run_id = ?",
+                run_id,
+            ),
+            "mztab_sme_linked": (
+                "SELECT COUNT(*) FROM mztab_record WHERE run_id = ? AND section = 'SME' AND alignment_feature_id IS NOT NULL",
                 run_id,
             ),
         }

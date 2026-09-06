@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "notes": "Version-pair-scoped migrations. There is deliberately no global alias table: the token CP is re-bound between smb-v1-draft and smb-v2-consensus, so a flat alias dictionary would silently corrupt data. Each entry maps tokens for human-readable notation only; stored data keys on (vocab_version, concept_id) and migration of a reading is performed on concept ids.",
+  "migrations": [
+    {
+      "migration_id": "smb-v1-draft__smb-v2-consensus",
+      "from_version": "smb-v1-draft",
+      "to_version": "smb-v2-consensus",
+      "map": {
+        "level3_claim": {
+          "SP": "SP",
+          "CP": "SC",
+          "MO": "SI",
+          "CL": "CP"
+        },
+        "evidence": {
+          "CX": "CO"
+        }
+      },
+      "reused_tokens": [
+        "CP"
+      ],
+      "dropped_terms": [
+        "SM"
+      ],
+      "evidence": [
+        "Verbatim definition-text identity: the smb-v1-draft CP definition 'Defined molecular components, building blocks, or modifications are proposed, but their positions, connectivities, or arrangements remain unresolved.' is the smb-v2-consensus SC definition, so CP(component) -> SC.",
+        "Verbatim definition-text identity: the smb-v1-draft MO definition 'A diagnostic substructure or structural motif is proposed, but a component-level representation is not sufficiently defined.' is the smb-v2-consensus SI definition, so MO -> SI.",
+        "Verbatim definition-text identity: the smb-v1-draft CL definition is the smb-v2-consensus CP 'Class proposed' definition, so CL -> CP and the token CP is reused for a different concept.",
+        "Definition-text identity for evidence: the smb-v1-draft CX row and the smb-v2-consensus CO row carry the same contextual-evidence meaning, and the intermediate Shin_MassBank_Annotation_Metadata_Proposal_EN.docx section 4 printed the row as 'CX or CO?', showing the rename was in progress.",
+        "User confirmation, Hiroshi Tsugawa, 2026-09-03: sections 1-4 of Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx are the internationally agreed consensus, which fixes the direction of the migration as smb-v1-draft -> smb-v2-consensus."
+      ],
+      "confidence": "high",
+      "reviewed": false,
+      "review_notes": "Not yet reviewed in a workshop session. reused_tokens and dropped_terms are the two facts a reviewer must confirm first."
+    },
+    {
+      "migration_id": "smb-v2-consensus__smb-v2.1-proposal",
+      "from_version": "smb-v2-consensus",
+      "to_version": "smb-v2.1-proposal",
+      "map": {},
+      "reused_tokens": [],
+      "dropped_terms": [],
+      "evidence": [
+        "Strict extension: smb-v2.1-proposal carries every smb-v2-consensus term unchanged and adds one term, SM, so every consensus concept maps to itself and no token changes meaning."
+      ],
+      "confidence": "high",
+      "reviewed": false,
+      "review_notes": "The addition of SM itself is the open question; the mapping is trivially identity."
+    },
+    {
+      "migration_id": "smb-v2.1-proposal__smb-v2-consensus",
+      "from_version": "smb-v2.1-proposal",
+      "to_version": "smb-v2-consensus",
+      "map": {},
+      "reused_tokens": [],
+      "dropped_terms": [
+        "SM"
+      ],
+      "evidence": [
+        "Reverse of the extension. smb:evidence/model_spectral_similarity does not exist in the consensus set, so a reading carrying it loses that tag and is marked unresolved rather than being silently recoded as SL or IS."
+      ],
+      "confidence": "high",
+      "reviewed": false,
+      "review_notes": "Confirms that downgrading to the consensus set is lossy and says so, instead of guessing a substitute tag."
+    }
+  ]
+}

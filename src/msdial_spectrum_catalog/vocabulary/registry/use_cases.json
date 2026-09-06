@@ -1,0 +1,502 @@
+{
+  "schema_version": 1,
+  "notes": "The 12 use cases of Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx section 6, with the notation string as written in each source document. Divergences between the sources are deliberately NOT reconciled: they are the fixtures that document the disagreement. 'parseable' is a statement about the notation GRAMMAR only. 'resolvable_under' lists the vocabulary versions under which every token resolves with status accepted (strict mode); an empty list on a grammatically valid string means the string mixes tag generations, which is the observable consequence of ISSUE-SECTIONS-5-8-STALE. resolvable_under also lists smb-v2.1-proposal wherever smb-v2-consensus resolves, because the proposal is a strict extension that renames and removes nothing.",
+  "sources": {
+    "v2-docx": {
+      "source_file": "Shin_MassBank_Annotation_Metadata_Proposal_EN_V2.docx",
+      "location": "section 6 Use-case map",
+      "source_date": "2026-09-03",
+      "vocabulary_expectation": "smb-v2-consensus for claim tags, but the table still prints the superseded evidence token CX"
+    },
+    "v1-docx": {
+      "source_file": "Shin_MassBank_Annotation_Metadata_Proposal_EN.docx",
+      "location": "section 6 Use-case map",
+      "source_date": "2026-08-20",
+      "vocabulary_expectation": "mixed; the section 6 table is byte-identical to the V2 section 6 table"
+    },
+    "table-s9": {
+      "source_file": "TableS9_Evidence_Inventory_Concrete_Examples.xlsx",
+      "location": "sheet 2 Concrete examples",
+      "source_date": "2026-08-19",
+      "vocabulary_expectation": "smb-v1-draft"
+    }
+  },
+  "cases": [
+    {
+      "case_id": "case-1",
+      "situation": "N1,N8-diacetylspermidine confirmed by authentic standard",
+      "comment": "Level 1 evidence should distinguish reference-standard evidence from ordinary library matching.",
+      "sources_in_agreement": [
+        "v2-docx",
+        "v1-docx",
+        "table-s9"
+      ],
+      "divergent": false,
+      "notations": [
+        {
+          "source": "v2-docx",
+          "notation_verbatim": "L1[RS,RT,SL,FM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft",
+            "smb-v2-consensus",
+            "smb-v2.1-proposal"
+          ]
+        },
+        {
+          "source": "v1-docx",
+          "notation_verbatim": "L1[RS,RT,SL,FM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft",
+            "smb-v2-consensus",
+            "smb-v2.1-proposal"
+          ]
+        },
+        {
+          "source": "table-s9",
+          "notation_verbatim": "L1[RS,RT,SL,FM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft",
+            "smb-v2-consensus",
+            "smb-v2.1-proposal"
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "case-2",
+      "situation": "alpha-tocomonoenol inferred by molecular network",
+      "comment": "Use CP if double-bond or isomer position remains unresolved; use SP only when a single 2D structure is explicitly proposed. The comment itself still says CP where section 2 would now say SC.",
+      "sources_in_agreement": [
+        "v2-docx",
+        "v1-docx"
+      ],
+      "divergent": true,
+      "divergence_note": "TableS9 commits to SP alone; both docx generations offer SC or SP as alternatives.",
+      "notations": [
+        {
+          "source": "v2-docx",
+          "notation_verbatim": "L3-SC[FM,DF,MN,CX] or L3-SP[FM,DF,MN,CX]",
+          "parseable": false,
+          "reason_outside_grammar": "or_alternation: two alternative claims joined by 'or'; alternation belongs in structured candidate fields, not in the notation string",
+          "resolvable_under": []
+        },
+        {
+          "source": "v1-docx",
+          "notation_verbatim": "L3-SC[FM,DF,MN,CX] or L3-SP[FM,DF,MN,CX]",
+          "parseable": false,
+          "reason_outside_grammar": "or_alternation: two alternative claims joined by 'or'",
+          "resolvable_under": []
+        },
+        {
+          "source": "table-s9",
+          "notation_verbatim": "L3-SP[FM,DF,MN,CX]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft"
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "case-3",
+      "situation": "Lenticin derivative with +CH2 and +O on indole ring, positions unresolved",
+      "comment": "Base scaffold and modifications are proposed, but attachment positions remain unresolved; CxSMILES may encode position variation.",
+      "sources_in_agreement": [
+        "v2-docx",
+        "v1-docx"
+      ],
+      "divergent": true,
+      "divergence_note": "TableS9 claims MO (motif), which migrates to SI, while both docx generations claim SC. This is a substantive change of claim specificity, not a token rename.",
+      "notations": [
+        {
+          "source": "v2-docx",
+          "notation_verbatim": "L3-SC[FM,DF,MN,CX]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": []
+        },
+        {
+          "source": "v1-docx",
+          "notation_verbatim": "L3-SC[FM,DF,MN,CX]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": []
+        },
+        {
+          "source": "table-s9",
+          "notation_verbatim": "L3-MO[FM,DF,MN,CX]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft"
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "case-4",
+      "situation": "N-acetylagmatine inferred from contextual evidence",
+      "comment": "Choose SP only when the planar structure is explicitly proposed.",
+      "sources_in_agreement": [
+        "v2-docx",
+        "v1-docx"
+      ],
+      "divergent": true,
+      "divergence_note": "TableS9 offers SP or CL (class); the docx generations offer SP or SC (components). The weaker alternative moved two specificity ranks.",
+      "notations": [
+        {
+          "source": "v2-docx",
+          "notation_verbatim": "L3-SP[FM,DF,CX] or L3-SC[FM,DF,CX]",
+          "parseable": false,
+          "reason_outside_grammar": "or_alternation: two alternative claims joined by 'or'",
+          "resolvable_under": []
+        },
+        {
+          "source": "v1-docx",
+          "notation_verbatim": "L3-SP[FM,DF,CX] or L3-SC[FM,DF,CX]",
+          "parseable": false,
+          "reason_outside_grammar": "or_alternation: two alternative claims joined by 'or'",
+          "resolvable_under": []
+        },
+        {
+          "source": "table-s9",
+          "notation_verbatim": "L3-SP[FM,DF,CX] or L3-CL[FM,DF,CX]",
+          "parseable": false,
+          "reason_outside_grammar": "or_alternation: two alternative claims joined by 'or'",
+          "resolvable_under": []
+        }
+      ]
+    },
+    {
+      "case_id": "case-5",
+      "situation": "MS-FINDER top structure hit",
+      "comment": "Criteria should be defined by score, rank, FDR, or posterior threshold.",
+      "sources_in_agreement": [
+        "v2-docx",
+        "v1-docx",
+        "table-s9"
+      ],
+      "divergent": false,
+      "notations": [
+        {
+          "source": "v2-docx",
+          "notation_verbatim": "L3-SP[IS,FM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft",
+            "smb-v2-consensus",
+            "smb-v2.1-proposal"
+          ]
+        },
+        {
+          "source": "v1-docx",
+          "notation_verbatim": "L3-SP[IS,FM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft",
+            "smb-v2-consensus",
+            "smb-v2.1-proposal"
+          ]
+        },
+        {
+          "source": "table-s9",
+          "notation_verbatim": "L3-SP[IS,FM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft",
+            "smb-v2-consensus",
+            "smb-v2.1-proposal"
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "case-6",
+      "situation": "MS-FINDER top formula hit",
+      "comment": "Formula-level claim only.",
+      "sources_in_agreement": [
+        "v2-docx",
+        "v1-docx",
+        "table-s9"
+      ],
+      "divergent": false,
+      "notations": [
+        {
+          "source": "v2-docx",
+          "notation_verbatim": "L4[FM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft",
+            "smb-v2-consensus",
+            "smb-v2.1-proposal"
+          ]
+        },
+        {
+          "source": "v1-docx",
+          "notation_verbatim": "L4[FM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft",
+            "smb-v2-consensus",
+            "smb-v2.1-proposal"
+          ]
+        },
+        {
+          "source": "table-s9",
+          "notation_verbatim": "L4[FM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft",
+            "smb-v2-consensus",
+            "smb-v2.1-proposal"
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "case-7",
+      "situation": "Spectral library match above threshold",
+      "comment": "Level depends on match specificity, library quality, and ambiguity among isomers. This case is the direct evidence for ISSUE-LEVEL-NOT-DERIVABLE: the same evidence bracket [SL,FM] carries either L2 or L3-SP.",
+      "sources_in_agreement": [
+        "v2-docx",
+        "v1-docx"
+      ],
+      "divergent": true,
+      "divergence_note": "Same two options, different syntax: the docx generations use 'or', TableS9 uses a prose conditional.",
+      "notations": [
+        {
+          "source": "v2-docx",
+          "notation_verbatim": "L2[SL,FM] or L3-SP[SL,FM]",
+          "parseable": false,
+          "reason_outside_grammar": "or_alternation: two alternative levels joined by 'or'",
+          "resolvable_under": []
+        },
+        {
+          "source": "v1-docx",
+          "notation_verbatim": "L2[SL,FM] or L3-SP[SL,FM]",
+          "parseable": false,
+          "reason_outside_grammar": "or_alternation: two alternative levels joined by 'or'",
+          "resolvable_under": []
+        },
+        {
+          "source": "table-s9",
+          "notation_verbatim": "L2[SL,FM] if unambiguous; otherwise L3-SP[SL,FM]",
+          "parseable": false,
+          "reason_outside_grammar": "prose_conditional: a curator decision rule written as prose; it belongs in a criteria set and a curation comment, not in the notation string",
+          "resolvable_under": []
+        }
+      ]
+    },
+    {
+      "case_id": "case-8",
+      "situation": "Spectral library match + retention agreement",
+      "comment": "Thresholds should be defined at the study level.",
+      "sources_in_agreement": [
+        "v2-docx",
+        "v1-docx"
+      ],
+      "divergent": true,
+      "divergence_note": "TableS9 allows escalation to L1 when the reference came from an authentic standard measured in the same study; the docx generations dropped that alternative.",
+      "notations": [
+        {
+          "source": "v2-docx",
+          "notation_verbatim": "L2[SL,RT,FM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft",
+            "smb-v2-consensus",
+            "smb-v2.1-proposal"
+          ]
+        },
+        {
+          "source": "v1-docx",
+          "notation_verbatim": "L2[SL,RT,FM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft",
+            "smb-v2-consensus",
+            "smb-v2.1-proposal"
+          ]
+        },
+        {
+          "source": "table-s9",
+          "notation_verbatim": "L2[SL,RT,FM] or L1[RS,RT,SL,FM]",
+          "parseable": false,
+          "reason_outside_grammar": "or_alternation: two alternative levels joined by 'or'",
+          "resolvable_under": []
+        }
+      ]
+    },
+    {
+      "case_id": "case-9",
+      "situation": "Targeted MRM + retention time",
+      "comment": "Otherwise report as targeted detection with explicit criteria.",
+      "sources_in_agreement": [
+        "v2-docx",
+        "v1-docx"
+      ],
+      "divergent": true,
+      "divergence_note": "TableS9 spells out the fallback claims; the docx generations keep only the L1 branch and push the fallback into the comment column.",
+      "notations": [
+        {
+          "source": "v2-docx",
+          "notation_verbatim": "L1[RS,RT,DF,FM] if standard-confirmed",
+          "parseable": false,
+          "reason_outside_grammar": "prose_conditional: the notation carries the condition 'if standard-confirmed'",
+          "resolvable_under": []
+        },
+        {
+          "source": "v1-docx",
+          "notation_verbatim": "L1[RS,RT,DF,FM] if standard-confirmed",
+          "parseable": false,
+          "reason_outside_grammar": "prose_conditional: the notation carries the condition 'if standard-confirmed'",
+          "resolvable_under": []
+        },
+        {
+          "source": "table-s9",
+          "notation_verbatim": "L1[RS,RT,DF,FM] if standard-confirmed; otherwise L3-MO[DF,RT,FM] or L3-SP[DF,RT,FM]",
+          "parseable": false,
+          "reason_outside_grammar": "prose_conditional: a conditional plus an alternation in one string",
+          "resolvable_under": []
+        }
+      ]
+    },
+    {
+      "case_id": "case-10",
+      "situation": "Lipid motif and predicted mobility agree",
+      "comment": "Use CP when acyl components are explicitly assigned; use MO when only motif/class evidence is available. The comment still uses the superseded tokens CP(component) and MO while the notation uses SI and SC.",
+      "sources_in_agreement": [
+        "v2-docx",
+        "v1-docx"
+      ],
+      "divergent": true,
+      "divergence_note": "TableS9 commits to MO alone, which migrates to SI; the docx generations offer SI or SC.",
+      "notations": [
+        {
+          "source": "v2-docx",
+          "notation_verbatim": "L3-SI[DF,IM,FM] or L3-SC[DF,IM,FM]",
+          "parseable": false,
+          "reason_outside_grammar": "or_alternation: two alternative claims joined by 'or'",
+          "resolvable_under": []
+        },
+        {
+          "source": "v1-docx",
+          "notation_verbatim": "L3-SI[DF,IM,FM] or L3-SC[DF,IM,FM]",
+          "parseable": false,
+          "reason_outside_grammar": "or_alternation: two alternative claims joined by 'or'",
+          "resolvable_under": []
+        },
+        {
+          "source": "table-s9",
+          "notation_verbatim": "L3-MO[DF,IM,FM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v1-draft"
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "case-11",
+      "situation": "Inferred from Kendrick mass defects",
+      "comment": "",
+      "sources_in_agreement": [
+        "v2-docx",
+        "v1-docx"
+      ],
+      "divergent": true,
+      "divergence_note": "No TableS9 counterpart: TableS9 case 11 is a different situation (lipid motif only), so the case numbering of the two generations does not align beyond case 10.",
+      "notations": [
+        {
+          "source": "v2-docx",
+          "notation_verbatim": "L3-SI[DF,HO,RT,IM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v2-consensus",
+            "smb-v2.1-proposal"
+          ]
+        },
+        {
+          "source": "v1-docx",
+          "notation_verbatim": "L3-SI[DF,HO,RT,IM]",
+          "parseable": true,
+          "reason_outside_grammar": null,
+          "resolvable_under": [
+            "smb-v2-consensus",
+            "smb-v2.1-proposal"
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "case-12",
+      "situation": "Spectral match with UV-spectrum",
+      "comment": "UN was supported by UV to characterize cyanidin instead of the other flavonoids not having 'O+' component in the aglycone.",
+      "sources_in_agreement": [
+        "v2-docx",
+        "v1-docx"
+      ],
+      "divergent": true,
+      "divergence_note": "No TableS9 counterpart. The published notation tags the UV evidence UN, but the use-case map is outdated relative to the agreed section 4 set: Hiroshi Tsugawa ruled on 2026-09-03 that UV, IR and ECD evidence is OS, not UN. UN is reserved for evidence that fits no other tag.",
+      "notations": [
+        {
+          "source": "v2-docx",
+          "notation_verbatim": "L3-SC/SI[FM,DF,SL,RT,IM,UN]",
+          "parseable": false,
+          "reason_outside_grammar": "slash_alternation: 'SC/SI' is an alternation between two claims, which belongs in structured candidate fields; '+' in the grammar means both claims are asserted together and is not a synonym for '/'",
+          "resolvable_under": []
+        },
+        {
+          "source": "v1-docx",
+          "notation_verbatim": "L3-SC/SI[FM,DF,SL,RT,IM,UN]",
+          "parseable": false,
+          "reason_outside_grammar": "slash_alternation: 'SC/SI' is an alternation between two claims",
+          "resolvable_under": []
+        }
+      ],
+      "resolution": {
+        "decided_by": "Hiroshi Tsugawa",
+        "decided_on": "2026-09-03",
+        "ruling": "Use OS for the UV evidence. The use-case map is outdated, not the section 4 tag set.",
+        "corrected_evidence_tokens": [
+          "FM",
+          "DF",
+          "SL",
+          "RT",
+          "IM",
+          "OS"
+        ],
+        "claim_still_unresolved": "The 'SC/SI' alternation remains outside the grammar and belongs in structured candidate fields, so no single corrected notation string is recorded."
+      }
+    }
+  ],
+  "unmatched_source_cases": [
+    {
+      "source": "table-s9",
+      "source_case_number": 11,
+      "situation": "Lipid: motif only",
+      "notation_verbatim": "L3-MO[DF,FM] or L3-CL[DF,FM]",
+      "parseable": false,
+      "reason_outside_grammar": "or_alternation: two alternative claims joined by 'or'",
+      "resolvable_under": [],
+      "note": "Has no counterpart in the section 6 use-case map of either docx generation. Recorded separately rather than aligned with V2 case 11, which is the Kendrick mass defect case."
+    }
+  ]
+}
