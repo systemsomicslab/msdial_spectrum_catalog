@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -393,6 +393,8 @@ CREATE TABLE IF NOT EXISTS msdial_annotation_result (
     annotation_kind TEXT,
     candidate_name TEXT,
     candidate_is_named INTEGER,
+    evidence_source TEXT,
+    measured_terms TEXT,
     comment TEXT,
     source_artifact_id INTEGER REFERENCES artifact(artifact_id),
     source_row INTEGER,
@@ -718,6 +720,14 @@ MIGRATIONS: tuple[Migration, ...] = (
         steps=(
             RunSql(_CANDIDATE_ASSESSMENT_SQL),
             RunSql(_CANDIDATE_ASSESSMENT_INDEX_SQL),
+        ),
+    ),
+    Migration(
+        version=10,
+        description="record the evidence MS-DIAL states in a column instead of a name prefix",
+        steps=(
+            AddColumn("msdial_annotation_result", "evidence_source", "TEXT"),
+            AddColumn("msdial_annotation_result", "measured_terms", "TEXT"),
         ),
     ),
 )

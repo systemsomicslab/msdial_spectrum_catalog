@@ -54,6 +54,32 @@ MSDIAL_SUGGESTION_PREFIXES = (
     ("low score:", "low_score"),
 )
 
+# MS-DIAL now states the evidence in a column of its own, and the name carries the compound name
+# alone. The prefixes above stopped being written on 2026-09-15; reading a table exported after that
+# through the prefixes alone classifies EVERY row as msms_matched, which overstates the evidence of
+# every precursor-only suggestion in the file -- the exact failure classify_metabolite_name exists to
+# prevent.
+#
+# The column says more than the prefix could. "low score: " collapsed two findings that MS-DIAL now
+# separates: a spectrum that was compared and fell short, and a spectrum that was compared and
+# explained nothing. And it had no way at all to say that a name came from an in-silico tool.
+EVIDENCE_SOURCE_KINDS = {
+    # A spectrum was compared and carried the match. RuleBased is the lipid pipeline, where the
+    # characteristic-ion rules are the evidence and the spectral comparison is a pre-filter.
+    "referencespectrum": "msms_matched",
+    "rulebased": "msms_matched",
+    # Compared, some criteria met, the conjunction not. What "low score: " used to mean.
+    "weakspectrummatch": "low_score",
+    # Compared and explained essentially nothing. A positive finding AGAINST the candidate, which is
+    # not the same as falling short, and the prefix could not distinguish them.
+    "unmatchedspectrum": "unmatched_spectrum",
+    # No product-ion spectrum was opened at all.
+    "precursoronly": "precursor_only",
+    # A structure or a spectrum was computed -- MS-FINDER, SIRIUS, CFM-ID, ICEBERG. Neither a
+    # reference match nor a bare precursor mass.
+    "insilico": "in_silico",
+}
+
 # Reference records whose NAME is an in-house identifier rather than a compound name.
 UNNAMED_REFERENCE_PREFIXES = ("riken",)
 
@@ -69,22 +95,39 @@ def is_annotated_metabolite_name(name: str | None) -> bool:
     return not any(lowered.startswith(prefix) for prefix in NOT_ANNOTATED_NAME_PREFIXES)
 
 
-def classify_metabolite_name(name: str | None) -> tuple[str, str | None, bool]:
-    """Split an MS-DIAL metabolite name into annotation_kind, candidate_name and candidate_is_named.
+def classify_metabolite_name(
+    name: str | None, evidence_source: str | None = None
+) -> tuple[str, str | None, bool]:
+    """Split an MS-DIAL annotation into annotation_kind, candidate_name and candidate_is_named.
 
-    A "no MS2: " row is a precursor-only suggestion: no product-ion spectrum was acquired, so it can
-    never support spectral-library evidence. A "low score: " row does have a product-ion spectrum, which
-    failed the search criteria. Collapsing either into the same bucket as a real MS/MS match would
-    overstate the evidence, so the distinction is stored rather than inferred downstream.
+    THE COLUMN FIRST, THE PREFIX AS FALLBACK. MS-DIAL used to say what an annotation rested on by
+    prefixing the compound name -- "no MS2: " for a precursor-only suggestion, "low score: " for a
+    spectrum that failed the search. Since 2026-09-15 it writes the compound name alone and states
+    the evidence in an "Evidence source" column instead, because the prefix could not distinguish a
+    comparison that fell short from one that explained nothing, could not name the library, and made
+    the name field unusable as a name.
+
+    Reading a post-2026-09-15 table through the prefixes alone classifies every row as
+    msms_matched: a precursor-only suggestion would be recorded as a reference match with a
+    product-ion spectrum. That is the overstatement this function exists to prevent, so the column
+    wins wherever it is present.
+
+    The prefix path is kept and still tested. MS-DIAL 4 exports carry "w/o MS2: ", MS-DIAL 5 exports
+    made before the change carry the others, and both remain ingestable.
     """
     text = (name or "").strip()
     lowered = text.lower()
-    kind = "msms_matched"
+    kind = ""
     for prefix, suggestion_kind in MSDIAL_SUGGESTION_PREFIXES:
         if lowered.startswith(prefix):
             kind = suggestion_kind
             text = text[len(prefix):].strip()
             break
+    declared = EVIDENCE_SOURCE_KINDS.get((evidence_source or "").strip().lower())
+    # An unrecognised or absent evidence source falls through to the prefix, and a table with
+    # neither -- every MS-DIAL 5 export between the two changes -- keeps today's default. Manual and
+    # Unspecified are deliberately absent from the map: neither says what was compared.
+    kind = declared or kind or "msms_matched"
     candidate = text or None
     return kind, candidate, is_named_reference(candidate)
 
@@ -236,6 +279,11 @@ _ANNOTATION_TEXT_COLUMNS = (
     ("smiles", ("SMILES",)),
     ("adduct", ("Adduct type", "Adduct")),
     ("annotation_tag", ("Annotation tag (VS1.0)", "Annotation tag")),
+    # Written by MS-DIAL since 2026-09-15. Stored as exported rather than only consumed, so a
+    # reader can see what the kind was derived from, and so a term MS-DIAL adds later is retained
+    # even before this catalog knows how to classify it.
+    ("evidence_source", ("Evidence source",)),
+    ("measured_terms", ("Measured terms",)),
     ("comment", ("Comment",)),
 )
 _ANNOTATION_FLAG_COLUMNS = (
@@ -285,7 +333,9 @@ def _annotation_block(row: dict[str, str]) -> dict[str, object] | None:
         value = block[name]
         if value is not None and value < 0:
             block[name] = None
-    kind, candidate, is_named = classify_metabolite_name(block["metabolite_name"])
+    kind, candidate, is_named = classify_metabolite_name(
+        block["metabolite_name"], block.get("evidence_source")
+    )
     block["annotation_kind"] = kind
     block["candidate_name"] = candidate
     block["candidate_is_named"] = int(is_named)
