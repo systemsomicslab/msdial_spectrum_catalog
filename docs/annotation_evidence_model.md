@@ -158,16 +158,30 @@ similarity of minus one.
 discarded entirely. It is not a Level-3 claim; it is the raw material for one. MS-DIAL distinguishes four
 outcomes, and collapsing them would overstate the evidence:
 
-| `annotation_kind` | MS-DIAL name | Meaning | May support |
-| --- | --- | --- | --- |
-| `msms_matched` | no prefix | reference match with a product-ion spectrum | `SL`, and `DF` from matched peaks |
-| `low_score` | `low score: ` | product-ion spectrum acquired, search criteria failed | `SL` with `passed = 0`, as a broad candidate |
-| `precursor_only` | `no MS2: ` | no product-ion spectrum was acquired at all | `FM` only, never `SL` |
-| (no row) | `Unknown` | no candidate | nothing |
+| `annotation_kind` | `Evidence source` | old name prefix | Meaning | May support |
+| --- | --- | --- | --- | --- |
+| `msms_matched` | `ReferenceSpectrum`, `RuleBased` | no prefix | reference match with a product-ion spectrum | `SL`, and `DF` from matched peaks |
+| `low_score` | `WeakSpectrumMatch` | `low score: ` | spectrum compared, some criteria met, the conjunction not | `SL` with `passed = 0`, as a broad candidate |
+| `unmatched_spectrum` | `UnmatchedSpectrum` | (was `low score: `) | spectrum compared and explained essentially nothing | nothing; evidence AGAINST the candidate |
+| `precursor_only` | `PrecursorOnly` | `no MS2: ` | no product-ion spectrum was opened at all | `FM` only, never `SL` |
+| `in_silico` | `InSilico` | (inexpressible) | a structure or a spectrum was computed -- MS-FINDER, SIRIUS, CFM-ID, ICEBERG | per tool; never `SL` |
+| (no row) | — | `Unknown` | no candidate | nothing |
 
-`MsdialCore/Utility/DataAccess.cs` `SetMoleculeMsPropertyAsSuggested` writes `"no MS2: "` when
-`MS2RawSpectrumID < 0` and `"low score: "` otherwise. `"w/o MS2: "` is the MS-DIAL 4 spelling and is
-commented out in MS-DIAL 5, but MS-DIAL 4 exports are still ingestable so both are recognized.
+**The column is the source; the prefix is the fallback.** Until 2026-09-15 MS-DIAL said what an
+annotation rested on by prefixing the compound name, and `MsdialCore/Utility/DataAccess.cs`
+`SetMoleculeMsPropertyAsSuggested` wrote `"no MS2: "` when `MS2RawSpectrumID < 0` and `"low score: "`
+otherwise. It now writes the compound name alone and states the evidence in an `Evidence source`
+column, so the name field is usable as a name and the evidence says more than three prefixes could.
+
+Reading a table exported after that change through the prefixes alone classifies every row as
+`msms_matched`, which records every precursor-only suggestion as a reference match. So the column
+wins wherever it is present, and the prefix path is kept for MS-DIAL 4 exports (`"w/o MS2: "`) and
+for MS-DIAL 5 exports made before the change. `Manual` and `Unspecified` are deliberately unmapped:
+neither states what was compared, so both fall through to whatever the name carries.
+
+The two rows the prefix could not express are the reason this is not a cosmetic change. `low score: `
+meant both "fell short" and "explained nothing", which are opposite findings about a candidate, and
+an in-silico assignment had no rendering at all.
 
 Two MS-DIAL export artefacts are normalized on the way in, because leaving them would read as
 measurements. Both trace to one mechanism: `MsScanMatching`'s scoring functions return **-1** when there
