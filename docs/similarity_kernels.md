@@ -38,6 +38,7 @@ in list order and chooses the unused `e` with strictly smallest intensity
 difference; ties keep the first index. Product matching is tested first using
 `abs(e_mz-r_mz) < tol`, then neutral loss using
 `abs((r_prec-e_prec + e_mz)-r_mz) < tol`, preserving expression order.
+All C# sums use explicit sequential addition, including on Python 3.12+.
 Local matched flags replace C# input mutation. Only absolute Da tolerance is
 exposed. Bonanza sums unmatched squares in argument order as C# does.
 
@@ -47,7 +48,10 @@ candidates, and no shifted candidates if abs(shift) <= tol. Greedy sorts
 stably ascending by weight then reverses (including ties). Optimal de-duplicates
 edges and uses a pure Python Hungarian solver per connected component. Tied
 optimal assignments may have different matched counts; only their score is a
-parity contract. Zero full norm returns 0. Scores are not clamped.
+parity contract. Zero full norm returns 0. Scores are not clamped. Nonfinite peak weights
+(for example, MN zero/zero normalization) return NaN with zero assigned
+pairs rather than entering the Hungarian solver; matchms/SciPy does not
+support nonfinite costs. This is an explicit degenerate-input extension.
 
 ## Preprocessing
 
