@@ -147,7 +147,13 @@ class ChemistryTests(unittest.TestCase):
         queries = p1.motifs()
         self.assertEqual(len(queries), 15)
         examples = {"indole": "c1ccc2[nH]ccc2c1", "catechol": "Oc1ccccc1O", "sulfate_ester": "CCOS(=O)(=O)O",
-                    "phosphate_ester": "CCOP(=O)(O)O", "flavone": "O=c1cc(-c2ccccc2)oc2ccccc12"}
+                    "phosphate_ester": "CCOP(=O)(O)O", "flavone": "O=c1cc(-c2ccccc2)oc2ccccc12",
+                    "steroid": "CC12CCC3C(C1CCC2O)CCC4=CC(=CC=C34)O",
+                    "glucuronide": "COC1OC(C(=O)O)C(O)C(O)C1O", "hexoside": "COC1OC(CO)C(O)C(O)C1O",
+                    "pentoside": "COC1OCC(O)C(O)C1O", "deoxyhexoside": "COC1OC(C)C(O)C(O)C1O",
+                    "gpc": "OCC(O)COP(=O)([O-])OCC[N+](C)(C)C", "gpe": "OCC(O)COP(=O)(O)OCCN",
+                    "gps": "OCC(O)COP(=O)(O)OCC(N)C(=O)O", "gpi": "OCC(O)COP(=O)(O)OC1C(O)C(O)C(O)C(O)C1O",
+                    "gpg": "OCC(O)COP(=O)(O)OCC(O)CO"}
         for motif, smiles in examples.items():
             self.assertTrue(Chem.MolFromSmiles(smiles).HasSubstructMatch(queries[motif]), motif)
 
