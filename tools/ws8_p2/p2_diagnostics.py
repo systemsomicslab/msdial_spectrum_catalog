@@ -764,6 +764,10 @@ def main():
     run = json.loads(run_path.read_text(encoding="utf-8")) if run_path.exists() else {}
     if run.get("status") == "complete":
         parser.error("Completed run is immutable; use a new code commit/run ID")
+    if "parameters" in run:
+        for field, value in (("sources", args.sources), ("workers", args.workers), ("limit", args.limit)):
+            if run["parameters"].get(field) != value:
+                parser.error("Stage arguments must match the preparation manifest")
     priority_name = priority()
     context = process_context()
     if args.detached_child and context["launcher"]["in_windows_job"]:
@@ -777,7 +781,21 @@ def main():
                                resolution="all peaks within 0.001 Da of integer OR all lexical m/z <2 decimals",
                                representative="most positive finite peaks after resolution gate, earliest record tie",
                                pooling="one unit per first block/mode/precursor type, summed across types",
-                               formula_gate="heavy-element residue counts; H ignored", electron_mass=0.000549),
+                               formula_gate="heavy-element residue counts; H ignored", electron_mass=0.000549,
+                               precursor_base_exclusion_da=1.0, neutral_loss_min_below_precursor_da=1.0,
+                               standardisation=dict(implementation="tools.ws8_p1.mcs_core.standardise",
+                                                    min_heavy_atoms=4, max_heavy_atoms=80, remove_stereo=True,
+                                                    remove_isotopes=True, reject_radicals=True,
+                                                    largest_fragment=True, uncharger="RDKit defaults",
+                                                    allowed_elements="C H N O P S F Cl Br I Si B Se"),
+                               multiprocessing="spawn", worker_priority="Win32 Set/GetPriorityClass verified by initializer",
+                               mining=dict(bin_da=0.01, bin_rounding="half up", min_rel_intensity=0.01,
+                                           min_neutral_loss_da=12, min_positive_compounds=200,
+                                           min_positive_frequency=0.05, top_per_motif_mode=20,
+                                           ranking="precision, positive support, kind, bin",
+                                           formula_tolerance_da=0.003, formula_elements="C H N O P S",
+                                           formula_compositions="nonnegative; no valence heuristic",
+                                           heldout_n_min=30, discovery="vs20 only", evaluation="vs21 only")),
                process=dict(detached_child=args.detached_child, launch_method="WMI" if args.detached_child else "foreground", **context),
                status="running")
     run.setdefault("timings_seconds", {})
