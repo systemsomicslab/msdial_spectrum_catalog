@@ -4,9 +4,11 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from msdial_spectrum_catalog.linkage import export_sample_attributes, ingest_unit, read_unit_metadata
 from ws1_fixture import write_unit
+from msdial_spectrum_catalog.validate import validate_run
 
 
 class LinkageTests(unittest.TestCase):
@@ -87,3 +89,17 @@ class LinkageTests(unittest.TestCase):
         report = ingest_unit(self.db, self.unit, granularity="representative")
         self.assertIn("annotator settings missing", report.warnings)
         self.assertIn("reviewed sample metadata missing", report.warnings)
+
+    def test_interrupted_linkage_is_flagged_by_validation(self):
+        with patch("msdial_spectrum_catalog.linkage.transaction", side_effect=RuntimeError("synthetic")):
+            with self.assertRaises(RuntimeError):
+                ingest_unit(self.db, self.unit, granularity="representative")
+        with closing(sqlite3.connect(self.db)) as c:
+            run_id = c.execute("SELECT run_id FROM analysis_run").fetchone()[0]
+        report = validate_run(self.db, run_id)
+        self.assertEqual(report.counts["metadata_sources"], 0)
+        self.assertIn("Run has no metadata linkage (no run_metadata_source rows)", report.warnings)
+        ingest_unit(self.db, self.unit, granularity="representative")
+        linked = validate_run(self.db, run_id)
+        self.assertGreater(linked.counts["metadata_sources"], 0)
+        self.assertNotIn("Run has no metadata linkage (no run_metadata_source rows)", linked.warnings)

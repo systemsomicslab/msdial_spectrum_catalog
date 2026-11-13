@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 from .annotation import LibraryIdentity, ToolRunInput, record_tool_run
+from .annotator_settings import read_annotator_settings
 from .devset import refuse_analysis_output, sha256_file
 from .ingest import ingest_run
 from .parsers import read_analysis_csv
@@ -77,34 +78,6 @@ def read_unit_metadata(unit_dir, *, handoff=None, campaign_id=None):
             raise ValueError("unsupported handoff schema")
         handoff_data = _take(handoff_raw, ("unit_attributes", "technical_settings"))
     return project, campaign, output, handoff_data
-
-
-def read_annotator_settings(path):
-    """The sole settings reader. Project named columns before materialising any row.
-
-    In particular the path column is never accessed, retained, hashed or logged.
-    """
-    path = Path(path)
-    if not path.exists():
-        return []
-    with path.open(encoding="utf-8-sig", newline="") as stream:
-        reader = csv.reader(stream, delimiter="\t")
-        header = next(reader, [])
-        columns = {name: header.index(name) for name in ("annotator_id", "evidence_tier", "library_kind")
-                   if name in header}
-        if "annotator_id" not in columns:
-            raise ValueError("settings lack annotator_id")
-        result = []
-        for cells in reader:
-            row = {name: safe_value(cells[index] if index < len(cells) else "")
-                   for name, index in columns.items()}
-            evidence, kind = row.get("evidence_tier", ""), row.get("library_kind", "")
-            tier = ("in_silico" if kind.lower() == "predicted" else "strict" if "high" in evidence.lower()
-                    else "relaxed" if "low" in evidence.lower() else "unknown")
-            row["tier"] = tier
-            row["library_kind"] = kind or ("acquired" if tier in {"strict", "relaxed"} else "")
-            result.append(row)
-        return result
 
 
 def match_annotator_library(annotator_id, libraries):

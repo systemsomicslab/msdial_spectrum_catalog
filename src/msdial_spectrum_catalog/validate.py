@@ -44,6 +44,10 @@ def validate_run(database, run_id: str) -> ValidationReport:
             "mztab_small_molecule_summaries": "SELECT COUNT(*) FROM mztab_record WHERE run_id = ? AND section = 'SML'",
         }
         report.counts = {name: connection.execute(query, (run_id,)).fetchone()[0] for name, query in queries.items()}
+        report.counts["metadata_sources"] = connection.execute(
+            "SELECT COUNT(*) FROM run_metadata_source WHERE run_id=?", (run_id,)).fetchone()[0]
+        if not report.counts["metadata_sources"]:
+            report.warnings.append("Run has no metadata linkage (no run_metadata_source rows)")
 
         missing_sample_links = connection.execute(
             "SELECT COUNT(*) FROM spectrum WHERE run_id = ? AND spectrum_kind = 'deconvoluted' AND feature_id IS NULL",
@@ -220,7 +224,7 @@ def validate_run(database, run_id: str) -> ValidationReport:
         # newer sidecars state the supported name explicitly, which takes priority.
         disagreeing_winners = sum(
             (supported != (published or "")) if supported else
-            ((published or "") not in (name or "").split("|"))
+            ((published or "") not in {name or "", *(name or "").split("|")})
             for name, supported, published in winners
         )
         if disagreeing_winners:

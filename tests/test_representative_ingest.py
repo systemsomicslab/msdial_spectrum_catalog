@@ -85,6 +85,24 @@ class RepresentativeTests(unittest.TestCase):
         self.assertTrue(validation.valid, validation.errors)
         self.assertEqual(validation.counts["mztab_small_molecule_features"], 0)
 
+    def test_full_dual_name_is_accepted_as_published(self):
+        name = "Invented alpha|Invented beta"
+        for filename in ("AlignResult.mdcandidate.tsv", "AlignResult.mdalign"):
+            path = self.unit / "output" / filename
+            path.write_text(path.read_text().replace("Invented alpha", name))
+        report = self.ingest(granularity="representative")
+        self.assertTrue(validate_run(self.db, report.run_id).valid)
+
+    def test_blank_candidate_evidence_is_null_in_inventory(self):
+        from msdial_spectrum_catalog.catalog_build import build_report
+        path = self.unit / "output/AlignResult.mdcandidate.tsv"
+        path.write_text(path.read_text().replace("ReferenceSpectrum", "").replace(" mz; msms ", "   "))
+        self.ingest(granularity="representative")
+        with closing(sqlite3.connect(self.db)) as c:
+            self.assertEqual(c.execute("SELECT evidence_source, measured_terms FROM msdial_annotation_candidate").fetchone(),
+                             (None, None))
+        self.assertEqual(build_report(self.db)["candidate_evidence_null"], 1)
+
     def test_missing_representative_is_invalid(self):
         report = self.ingest(granularity="representative")
         with closing(sqlite3.connect(self.db)) as c, c:

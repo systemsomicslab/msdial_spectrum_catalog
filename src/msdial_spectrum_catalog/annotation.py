@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 
 from .identifiers import make_id, short_hash
@@ -157,11 +158,14 @@ def _resolve(vocabulary, axis: str, token: str, mode: str):
     return term
 
 
-def record_tool_run(database, tool_run: ToolRunInput, *, run_id: str | None = None) -> str:
+def record_tool_run(database, tool_run: ToolRunInput, *, run_id: str | None = None,
+                    connection=None) -> str:
+    """Record a tool run, optionally within the caller's initialized transaction."""
     scope_ids = set(tool_run.scope_run_ids) | ({run_id} if run_id else set())
     if len(scope_ids) > 1:
         run_id = None
-    initialize(database)
+    if connection is None:
+        initialize(database)
     identity_fields = {
             "tool_name": tool_run.tool_name,
             "tool_version": tool_run.tool_version,
@@ -180,7 +184,7 @@ def record_tool_run(database, tool_run: ToolRunInput, *, run_id: str | None = No
     tool_run_id = make_id(
         "tool-run", tool_run.tool_name, tool_run.tool_version or "unversioned", short_hash(identity)
     )
-    with transaction(database) as connection:
+    with (transaction(database) if connection is None else nullcontext(connection)) as connection:
         connection.execute(
             """INSERT INTO annotation_tool_run(
                    tool_run_id, run_id, tool_name, tool_version, tool_provenance_json,

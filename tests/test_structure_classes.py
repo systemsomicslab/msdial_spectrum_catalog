@@ -3,12 +3,48 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+import json
+from unittest.mock import patch
 
 from msdial_spectrum_catalog.catalog_build import privacy_scan
 from msdial_spectrum_catalog.structure_classes import load_structure_classes
 
 
 class StructureClassesTests(unittest.TestCase):
+    def test_adjacent_run_json_is_only_updated_with_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "Invented.icd"
+            path.write_bytes((Path(__file__).parent / "fixtures/ws1/class_lookup.tsv").read_bytes())
+            db = root / "catalog.sqlite"
+            run = root / "run.json"
+            original = '{"schema":"ws0.c11", "inputs": ["synthetic"]}\n'
+            run.write_text(original)
+            load_structure_classes(db, path)
+            self.assertEqual(run.read_text(), original)
+            load_structure_classes(db, path, update_run_json=True)
+            updated = json.loads(run.read_text())
+            self.assertEqual(updated["inputs"], ["synthetic"])
+            self.assertEqual(updated["structure_classes"]["assignments"], 2)
+
+    def test_failed_lookup_rolls_back_tool_run_and_all_lookup_rows(self):
+        from msdial_spectrum_catalog.storage import initialize
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "Invented.icd"
+            path.write_bytes((Path(__file__).parent / "fixtures/ws1/class_lookup.tsv").read_bytes())
+            db = root / "catalog.sqlite"
+            initialize(db)
+            from msdial_spectrum_catalog.identifiers import make_id
+            with patch("msdial_spectrum_catalog.structure_classes.make_id",
+                       side_effect=[make_id("class-term", "synthetic"), RuntimeError("synthetic")]):
+                with self.assertRaises(RuntimeError):
+                    load_structure_classes(db, path)
+            with closing(sqlite3.connect(db)) as c:
+                for table in ("annotation_tool_run", "annotation_tool_run_library", "class_ontology",
+                              "class_term", "structure_class_assignment"):
+                    self.assertEqual(c.execute("SELECT COUNT(*) FROM " + table).fetchone()[0], 0, table)
+
     def test_three_column_lookup_identity_no_path_and_idempotency(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "Invented.icd"

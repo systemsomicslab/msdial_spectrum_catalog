@@ -12,10 +12,11 @@ from .annotation import LibraryIdentity, ToolRunInput, record_tool_run
 from .classes import LOOKUP_LEVEL
 from .devset import refuse_analysis_output, sha256_file
 from .identifiers import make_id
-from .storage import transaction
+from .storage import initialize, transaction
 
 
-def load_structure_classes(database, icd):
+def load_structure_classes(database, icd, *, update_run_json=False):
+    """Load lookup rows atomically; updating adjacent run.json requires opt-in."""
     refuse_analysis_output(database)
     path = Path(icd)
     digest = sha256_file(path)
@@ -35,10 +36,12 @@ def load_structure_classes(database, icd):
             if not re.fullmatch(r"CHEMONTID:\d{7}", native):
                 raise ValueError("invalid ICD direct-parent ID")
             rows.append((key, name, native))
-    tool_id = record_tool_run(database, ToolRunInput("msfinder.icd_lookup", libraries=(library,),
-                              input_fingerprint=digest, parameters={"layout": "direct-parent.v1"}))
+    initialize(database)
     added = terms_added = 0
     with transaction(database) as connection:
+        tool_id = record_tool_run(database, ToolRunInput("msfinder.icd_lookup", libraries=(library,),
+                                  input_fingerprint=digest, parameters={"layout": "direct-parent.v1"}),
+                                  connection=connection)
         connection.execute("INSERT OR IGNORE INTO class_ontology VALUES ('classyfire.chemont', 'unknown', ?)",
                            ("ICD direct parents; ontology version and hierarchy depth unreported",))
         for key, name, native in rows:
@@ -51,7 +54,7 @@ def load_structure_classes(database, icd):
     result = dict(library_name=path.name, sha256=digest, rows_read=len(rows), assignments_added=added,
                   terms_added=terms_added, assignments=total, parent_edges_added=0)
     run_path = Path(database).parent / "run.json"
-    if run_path.exists():
+    if update_run_json and run_path.exists():
         run = json.loads(run_path.read_text(encoding="utf-8-sig"))
         run["structure_classes"] = result
         run["db_bytes"] = Path(database).stat().st_size

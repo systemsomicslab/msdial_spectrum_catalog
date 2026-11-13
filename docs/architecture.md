@@ -75,12 +75,16 @@ adds ingest granularity, campaign linkage, reviewed sample/unit attributes and
 candidate evidence_source/measured_terms. v12 adds library identities, kernel
 identity, multi-run scope and run_annotator. v13 supplies the shared class model
 described in [class_ontology.md](class_ontology.md).
+Declared v11 deviation: `name_at_supported_level` and `is_lipid_chains_match`
+also preserve MS-DIAL's optional columns (MsdialWorkbench #898).
+Blank candidate evidence_source/measured_terms become NULL; nonblank values
+remain verbatim.
 MS-DIAL tables use plain tab-separated cells. The reader preserves literal quotes
 and supports exported spectrum cells larger than the CSV module's 128-KiB
 default; reviewed metadata CSV/TSV readers retain their own quoting semantics.
 Member m/z validation applies to detailed provenance rows. Peak-ID matrix rows
 do not export m/z and contribute a coverage count instead. Winner reconciliation
-accepts either exact half of a dual lipid name separated by `|`; when exported,
+accepts the full dual lipid name or either exact half separated by `|`; when exported,
 `name_at_supported_level` takes priority. The candidate keeps its raw record name
 and the optional `is_lipid_chains_match` flag.
 
@@ -103,12 +107,19 @@ recording the rule. All remaining phenotype columns keep their verbatim headers.
 Export phenotype data with
 `export-sample-attributes DB --out FILE.tsv [--unit ID]`.
 
-Only linkage.read_annotator_settings projects the three allowed settings columns.
+Only annotator_settings.read_annotator_settings opens the settings file and
+projects the three allowed columns for linkage and msemblator export.
+The export hashes its spectrum and candidate inputs, excluding the settings
+file because its unselected cells include library paths. Selection and exported
+MSP/manifest content retain their existing behaviour.
 Generic msp_high_quality/msp_low_quality names resolve to the unique acquired MSP
 in output-manifest libraries; msp_in_silico resolves to the unique predicted MSP.
 Named MSP:/LbmDB: IDs resolve by role and exact file name/stem, with recognised
 high/low suffixes. Ambiguous or absent identities remain NULL and are counted.
 All identities come from the manifest, never the settings path column.
+`validate-run` reports metadata_sources and warns when no run_metadata_source
+rows exist, exposing an ingest interrupted before linkage. Direct legacy ingests
+remain valid with that warning.
 
 Each linked run seeds msdial.console with campaign libraries_as_run, enriched by
 SHA-256 from output-manifest libraries; set differences are warnings. Library

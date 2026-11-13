@@ -4,7 +4,6 @@ from __future__ import annotations
 from contextlib import closing
 
 import json
-import csv
 import platform
 import re
 import sqlite3
@@ -15,6 +14,7 @@ from pathlib import Path
 
 from .devset import canonical_digest, git_commit, refuse_analysis_output, sha256_file
 from .linkage import ingest_unit, read_unit_libraries
+from .parsers import read_tsv
 from .storage import connect
 from .validate import validate_run
 
@@ -27,7 +27,7 @@ def table_counts(connection):
 
 
 def privacy_scan(database):
-    pattern = re.compile(r"[A-Za-z]:[\\/][^\t]*\.(msp|lbm2?)", re.I)
+    pattern = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/]|//[^/]+/)[^\t\r\n]*\.(msp|lbm2?)", re.I)
     exemptions = {("analysis_run", "output_directory"), ("artifact", "source_path"), ("sample", "raw_file_path")}
     hits = {}
     with closing(connect(database)) as connection:
@@ -179,11 +179,12 @@ def build_report(database, *, devset=None, out=None):
         source_census = Counter()
         for unit in selection["units"]:
             for path in sorted(Path(unit["output_dir"]).glob("AlignResult*.mdcandidate.tsv")):
-                with path.open(encoding="utf-8-sig", newline="") as stream:
-                    for row in csv.DictReader(stream, delimiter="\t"):
-                        if row.get("is_representative", "").strip().lower() == "true":
-                            source_census[(row.get("annotator_id") or None, row.get("evidence_source"),
-                                           row.get("annotation_tag_vs1") or None)] += 1
+                for _, row in read_tsv(path):
+                    if row.get("is_representative", "").strip().lower() == "true":
+                        evidence = row.get("evidence_source")
+                        source_census[(row.get("annotator_id") or None,
+                                       evidence if evidence and evidence.strip() else None,
+                                       row.get("annotation_tag_vs1") or None)] += 1
         result["source_census_rows"] = sum(source_census.values())
         result["source_census_matches"] = source_census == census
         result["source_census_difference_rows"] = sum((source_census - census).values()) + sum((census - source_census).values())

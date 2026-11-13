@@ -232,7 +232,8 @@ def _candidate_block(row: dict[str, str]) -> tuple[dict[str, object], list[str]]
         for name, column in _CANDIDATE_TEXT_COLUMNS
     }
     for name in ("evidence_source", "measured_terms"):
-        block[name] = row.get(name)
+        value = row.get(name)
+        block[name] = value if value and value.strip() else None
     for name in _CANDIDATE_FLAG_COLUMNS:
         block[name] = _flag_or_none(folded_value(folded, name))
     for name in _CANDIDATE_INTEGER_COLUMNS:

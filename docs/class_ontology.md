@@ -20,17 +20,19 @@ All commands use the interpreter/PYTHONPATH invocation in AGENTS.md.
 `InChIKey`, `Direct parent name`, `Direct parent ID` layout. The library identity
 is the file name and SHA-256; its path is never stored or reported. Each valid
 lookup assigns an InChIKey to its native ChemOnt term under one
-`msfinder.icd_lookup` tool run. Repeating the same file adds no rows. If run.json
-exists beside the database, its counts, database checksum and lookup identity
-are updated as part of the build.
+`msfinder.icd_lookup` tool run, committed in the same transaction as the lookup.
+Repeating the same file adds no rows. An existing adjacent run.json is updated
+only with explicit `--update-run-json` (API: `update_run_json=True`).
 
-**Observed layout limitation:** this three-column file has neither ontology
+**R2b-partial (D-1(c)):** this three-column file has neither ontology
 version, parent depth nor hierarchy edges. Lookup terms use version `unknown`
 and level `direct_parent`; no kingdom/class depth or parent edges are invented.
 `direct_parent` is a lookup-only level, outside the ordered prediction API.
 An emitted, versioned lineage is required to provide actual hierarchy edges for
 lowest-common-ancestor inference. This is an explicit deviation from the WS1
 specification's expectation that the ICD would supply those edges.
+L3-CP LCA cannot be computed from this lookup. CANOPUS terms must join on
+`native_id`; WS0 will supply ChemOnt hierarchy input later. No ontology is fetched.
 An emitted lineage with the same ontology version and native term ID can replace
 the lookup-only level with its known depth, preserving all existing assignments;
 reloading the lookup never downgrades that depth.

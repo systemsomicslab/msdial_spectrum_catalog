@@ -41,6 +41,8 @@ def add_parsers(subparsers):
     load = subparsers.add_parser("load-structure-classes")
     load.add_argument("--database", required=True)
     load.add_argument("--icd", required=True)
+    load.add_argument("--update-run-json", action="store_true",
+                      help="Update the existing run.json beside the database")
 
 
 def dispatch(args):
@@ -75,7 +77,7 @@ def dispatch(args):
         result = list_class_predictions(args.database, args.subject_id)
     elif args.command == "load-structure-classes":
         from .structure_classes import load_structure_classes
-        result = load_structure_classes(args.database, args.icd)
+        result = load_structure_classes(args.database, args.icd, update_run_json=args.update_run_json)
     else:
         return None
     print(json.dumps(result, ensure_ascii=False, indent=2))

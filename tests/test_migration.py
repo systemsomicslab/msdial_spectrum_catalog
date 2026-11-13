@@ -1,6 +1,4 @@
 from contextlib import closing
-import subprocess
-from unittest.mock import patch
 from msdial_spectrum_catalog.annotation import ToolRunInput, record_tool_run
 import sqlite3
 import tempfile
@@ -521,29 +519,18 @@ if __name__ == "__main__":
 
 class FoundationMigrationTests(unittest.TestCase):
     def test_main_v10_upgrade_preserves_all_rows_and_legacy_tool_id(self):
-        # Read the committed public baseline, never another checkout's working files.
-        schema_source = subprocess.check_output(["git", "show", "36f1fce:src/msdial_spectrum_catalog/schema.py"], text=True)
-        annotation_source = subprocess.check_output(["git", "show", "36f1fce:src/msdial_spectrum_catalog/annotation.py"], text=True)
-        schema_ns = {"__name__": "baseline_schema"}
-        # Dataclasses resolve their defining module; use an ordinary existing module name.
-        schema_ns["__name__"] = __name__
-        exec(compile(schema_source, "baseline_schema", "exec"), schema_ns)
-        annotation_ns = {"__name__": __name__, "__package__": "msdial_spectrum_catalog"}
-        exec(compile(annotation_source, "baseline_annotation", "exec"), annotation_ns)
+        fixture = Path(__file__).parent / "fixtures/ws1/v10.sql"
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "catalog.sqlite"
-            with patch.object(storage, "SCHEMA_VERSION", 10), patch.object(storage, "SCHEMA_SQL", schema_ns["SCHEMA_SQL"]), patch.object(storage, "MIGRATIONS", schema_ns["MIGRATIONS"]), patch.object(storage, "AddColumn", schema_ns["AddColumn"]), patch.object(storage, "RunSql", schema_ns["RunSql"]):
-                storage.initialize(db)
-                with storage.transaction(db) as c:
-                    c.execute("INSERT INTO study(study_id, repository, accession) VALUES ('s','synthetic','a')")
-                    c.execute("INSERT INTO analysis_unit(analysis_unit_id,study_id,external_unit_id) VALUES ('u','s','u')")
-                    c.execute("INSERT INTO analysis_run(run_id,analysis_unit_id,run_fingerprint,output_directory) VALUES ('r','u','fp','.')")
-                    c.execute("INSERT INTO sample(sample_id,analysis_unit_id,sample_name) VALUES ('sample','u','invented')")
-                old = annotation_ns["record_tool_run"](db, annotation_ns["ToolRunInput"]("invented", tool_version="1", parameters={"key": 4}), run_id="r")
-                with closing(storage.connect(db)) as c:
-                    before = {row[0]: ([col[1] for col in c.execute('PRAGMA table_info("' + row[0] + '")')],
-                                       [tuple(r) for r in c.execute('SELECT * FROM "' + row[0] + '"')])
-                              for row in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name != 'catalog_meta'").fetchall()}
+            with closing(sqlite3.connect(db)) as c:
+                c.executescript(fixture.read_text(encoding="utf-8"))
+                self.assertEqual(storage.read_schema_version(c), 10)
+                old = c.execute("SELECT tool_run_id FROM annotation_tool_run").fetchone()[0]
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM feature").fetchone()[0], 1)
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM msdial_annotation_candidate").fetchone()[0], 2)
+                before = {row[0]: ([col[1] for col in c.execute('PRAGMA table_info("' + row[0] + '")')],
+                                   [tuple(r) for r in c.execute('SELECT * FROM "' + row[0] + '"')])
+                          for row in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name != 'catalog_meta'").fetchall()}
             storage.initialize(db)
             with closing(storage.connect(db)) as c:
                 self.assertEqual(storage.read_schema_version(c), 13)

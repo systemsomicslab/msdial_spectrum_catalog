@@ -115,6 +115,39 @@ class CatalogBuildTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "analysis root"):
             ingest_devset(self.root / "MSDIAL_Public_Reanalysis/analysis/catalog.sqlite", "missing.json")
 
+    def test_privacy_scan_catches_unc_library_paths_without_reporting_values(self):
+        db = self.root / "catalog.sqlite"
+        initialize(db)
+        values = (r"\\synthetic-server\share\Invented.MSP",
+                  r"\\synthetic-server\share\Invented.lbm2",
+                  "//synthetic-server/share/Invented.lbm")
+        with closing(sqlite3.connect(db)) as c, c:
+            for index, value in enumerate(values):
+                c.execute("INSERT INTO study(study_id,repository,accession,title) VALUES (?, 'synthetic', ?, ?)",
+                          (str(index), str(index), value))
+        scan = privacy_scan(db)
+        self.assertEqual(scan["hits"], 3)
+        self.assertEqual(scan["columns"], {"study.title": 3})
+        self.assertNotIn("synthetic-server", repr(scan))
+
+    def test_source_census_accepts_long_literal_quote_cells_and_blank_evidence(self):
+        unit = write_unit(self.root)
+        selection = self.selection(unit)
+        data = json.loads(selection.read_text())
+        data["units"][0]["output_dir"] = str(unit / "output")
+        selection.write_text(json.dumps(data))
+        sidecar = unit / "output/AlignResult.mdcandidate.tsv"
+        header, row = sidecar.read_text().splitlines()
+        row = row.replace("ReferenceSpectrum", "   ")
+        sidecar.write_text(header + '\tunused\n' + row + '\t"' + 'x' * 140000 + '\n')
+        from msdial_spectrum_catalog.linkage import ingest_unit
+        db = self.root / "catalog.sqlite"
+        ingest_unit(db, unit, granularity="representative")
+        result = build_report(db, devset=selection)
+        self.assertEqual(result["source_census_rows"], 1)
+        self.assertTrue(result["source_census_matches"])
+        self.assertEqual(result["source_census_difference_rows"], 0)
+
     def test_counts_report_matches_independent_source_census(self):
         unit = write_unit(self.root)
         selection = self.selection(unit)

@@ -9,6 +9,11 @@ from ws1_fixture import write_unit
 
 
 class RunAnnotatorTests(unittest.TestCase):
+    def test_linkage_and_export_use_the_same_settings_reader(self):
+        from msdial_spectrum_catalog import annotator_settings, linkage, msemblator_export
+        self.assertIs(linkage.read_annotator_settings, annotator_settings.read_annotator_settings)
+        self.assertIs(msemblator_export.read_annotator_settings, annotator_settings.read_annotator_settings)
+
     def test_allowlisted_reader_tiers_sentinel_and_unresolved(self):
         with tempfile.TemporaryDirectory() as tmp:
             unit = write_unit(tmp)
