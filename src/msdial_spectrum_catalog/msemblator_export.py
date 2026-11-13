@@ -183,7 +183,7 @@ def select_spectra(output: Path, unit_id: str, selection: str = "unresolved",
         "representative_spectra_by_tier": by_tier,
         "sources": {
             name: sha256_file(output / name)
-            for name in (f"{stem}.mdmsp", f"{stem}.mdcandidate.tsv", "msp_annotator_settings.tsv")
+            for name in (f"{stem}.mdmsp", f"{stem}.mdcandidate.tsv")
             if (output / name).exists()
         },
     }
