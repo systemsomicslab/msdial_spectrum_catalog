@@ -209,12 +209,22 @@ class BatchTest(unittest.TestCase):
             encoding="utf-8")
         (self.msemblator / "models" / "structure").mkdir(parents=True)
         (self.msemblator / "models" / "structure" / "catboostranker_final_all.pkl").write_bytes(b"m")
-        changed = batch.backfill_rankers(self.run_dir / "plan.json", self.msemblator)
+        model = self.msemblator / "models" / "structure" / "catboostranker_final_all.pkl"
+        wrong = self.base / "wrong.txt"
+        wrong.write_text("0" * 64 + " *models/structure/catboostranker_final_all.pkl\n", encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            batch.backfill_rankers(self.run_dir / "plan.json", self.msemblator, wrong)
+        self.assertNotIn("rankers", json.loads((output / "msemblator_run.json").read_text(encoding="utf-8")))
+        listed = self.base / "installed-models-sha256.txt"
+        listed.write_text(f"{sha256(model)} *models/structure/catboostranker_final_all.pkl\n", encoding="utf-8")
+        changed = batch.backfill_rankers(self.run_dir / "plan.json", self.msemblator, listed)
         self.assertEqual(changed, [self.plan["chunks"][0]["chunk_id"]])
         record = json.loads((output / "msemblator_run.json").read_text(encoding="utf-8"))
         self.assertEqual(record["rankers"]["structure"]["ranker"], "catboost")
         self.assertEqual(record["rankers_backfilled"]["from"], "msemblator.log")
-        self.assertEqual(batch.backfill_rankers(self.run_dir / "plan.json", self.msemblator), [])
+        self.assertEqual(record["rankers_backfilled"]["verified_against_sha256"], sha256(listed))
+        self.assertTrue(record["rankers_backfilled"]["match"])
+        self.assertEqual(batch.backfill_rankers(self.run_dir / "plan.json", self.msemblator, listed), [])
 
     def test_throughput_and_chunk_size(self):
         self._run()

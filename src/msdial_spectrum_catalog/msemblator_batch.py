@@ -537,15 +537,28 @@ def throughput(plan_path: Path, targets: dict[str, int], first: int | None = Non
     return result
 
 
-def backfill_rankers(plan_path: Path, msemblator_root: Path) -> list[str]:
+def read_sha256_list(path: Path) -> dict[str, str]:
+    """`<sha256> *<relative path>` lines (sha256sum format) as {relative posix path: sha256}."""
+    entries = {}
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        digest, _, name = line.strip().partition(" ")
+        if digest and name:
+            entries[name.lstrip("*").strip().replace("\\", "/")] = digest.lower()
+    return entries
+
+
+def backfill_rankers(plan_path: Path, msemblator_root: Path, expected: Path) -> list[str]:
     """Add `rankers` to chunk records written before the driver recorded it, from each chunk's own log.
 
-    The record says it was backfilled, by which code and when; nothing else in it changes. The model files
-    are hashed as installed now, so run this only while the same asset set is installed.
+    The ranker file is the one the chunk's log names. Its sha256 must equal the entry in `expected`, a
+    list written when the models were installed (before the run), or nothing is written. The record says
+    it was backfilled, from what, against which list and by which code; nothing else in it changes.
     """
     run_dir = plan_path.parent
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    changed = []
+    listed = read_sha256_list(expected)
+    list_sha256 = sha256(expected)
+    pending = []
     for chunk in plan["chunks"]:
         output = run_dir / chunk["output_dir"]
         record = read_record(output)
@@ -553,9 +566,20 @@ def backfill_rankers(plan_path: Path, msemblator_root: Path) -> list[str]:
         if record is None or "rankers" in record or not log.is_file():
             continue
         loaded = parse_log(log.read_text(encoding="utf-8").splitlines())["ranker_models"]
-        record["rankers"] = rankers(loaded, msemblator_root.resolve())
+        found = rankers(loaded, msemblator_root.resolve())
+        for step, entry in found.items():
+            want = listed.get(f"models/{step}/{entry['file']}")
+            if want is None or entry["sha256"] != want:
+                raise SystemExit(f"Refusing to backfill {chunk['chunk_id']}: models/{step}/{entry['file']} "
+                                 f"sha256 {entry['sha256']} does not match the install-time list ({want})")
+        pending.append((chunk, output, record, found))
+    changed = []
+    for chunk, output, record, found in pending:
+        record["rankers"] = found
         record["rankers_backfilled"] = {"from": "msemblator.log", "at": now(),
-                                        "by_catalog_commit": git_commit(Path(__file__).resolve().parents[2])}
+                                        "by_catalog_commit": git_commit(Path(__file__).resolve().parents[2]),
+                                        "verified_against": expected.name, "verified_against_sha256": list_sha256,
+                                        "match": True}
         (output / "msemblator_run.json").write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n",
                                                     encoding="utf-8")
         changed.append(chunk["chunk_id"])
@@ -595,6 +619,8 @@ def main(argv: list[str] | None = None) -> int:
     backfill_parser = commands.add_parser("backfill-rankers", help="Add the rankers field to older records")
     backfill_parser.add_argument("--plan", required=True, type=Path)
     backfill_parser.add_argument("--msemblator-root", required=True, type=Path)
+    backfill_parser.add_argument("--expected-sha256", required=True, type=Path,
+                                 help="sha256sum-format list of the installed models, written before the run")
 
     status_parser = commands.add_parser("status", help="Summarise plan.json against the chunk records")
     status_parser.add_argument("--plan", required=True, type=Path)
@@ -621,7 +647,7 @@ def main(argv: list[str] | None = None) -> int:
                          chunk_timeout=args.chunk_timeout, hash_libraries=not args.no_library_hash,
                          sirius_directory=root / "external" / "sirius", model_assets=args.model_assets)
     if args.command == "backfill-rankers":
-        print(json.dumps(backfill_rankers(args.plan, args.msemblator_root), indent=2))
+        print(json.dumps(backfill_rankers(args.plan, args.msemblator_root, args.expected_sha256), indent=2))
         return 0
     if args.command == "status":
         print(json.dumps(status(args.plan), indent=2))
