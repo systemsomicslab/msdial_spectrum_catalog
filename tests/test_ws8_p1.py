@@ -14,6 +14,11 @@ HAS_RDKIT = importlib.util.find_spec("rdkit") is not None
 
 
 class StatisticsTests(unittest.TestCase):
+    def test_pilot_samples_five_percent_of_sparse_cells(self):
+        self.assertEqual(p1.sample_count(10, 600, True), 1)
+        self.assertEqual(p1.sample_count(800, 600, True), 30)
+        self.assertEqual(p1.sample_count(0, 150, True), 0)
+
     def test_wilson_known_values(self):
         self.assertAlmostEqual(p1.wilson(100, 100)[0], 0.9630065, places=6)
         self.assertEqual(p1.wilson(0, 0), (0.0, 1.0))

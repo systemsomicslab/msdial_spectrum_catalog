@@ -140,6 +140,10 @@ def atom_bin(n):
     return BINS[0 if n <= 15 else 1 if n <= 25 else 2 if n <= 40 else 3]
 
 
+def sample_count(available, cap, pilot):
+    return math.ceil(min(available, cap) * (0.05 if pilot else 1))
+
+
 def seed_generators(seed, sources):
     import numpy as np
     # Fixed registry, independent of missing cells and scheduling.
@@ -260,6 +264,7 @@ def prepare(args, run):
                     continue
                 identity = (metadata.get("smiles", ""), adduct)
                 lipid = bool(re.match(r"^[A-Za-z][A-Za-z0-9-]*\s+\d+:\d+", metadata.get("name", "")))
+                lipid = lipid or (identity in raw_reps and raw_reps[identity]["lipid_name"])
                 if identity not in raw_reps or len(peaks) > len(raw_reps[identity]["peaks"]):
                     raw_reps[identity] = {"adduct": adduct, "mode": "pos" if adduct == "[M+H]+" else "neg",
                                           "precursor": precursor, "peaks": sorted(peaks), "lipid_name": lipid}
@@ -274,8 +279,12 @@ def prepare(args, run):
                     continue
                 record.update(spectrum)
                 key = (record["key"], record["adduct"])
+                if key in reps:
+                    record["lipid_name"] = record["lipid_name"] or reps[key]["lipid_name"]
                 if key not in reps or len(record["peaks"]) > len(reps[key]["peaks"]):
                     reps[key] = record
+                elif record["lipid_name"]:
+                    reps[key]["lipid_name"] = True
         del raw_reps
         truths = {}
         for record in reps.values():
@@ -283,7 +292,9 @@ def prepare(args, run):
             if source == "vs21" and key in public_keys:
                 continue
             if key not in truths or len(record["peaks"]) > len(truths[key]["peaks"]):
-                truths[key] = record.copy()
+                truths[key] = dict(record, lipid_name=record["lipid_name"] or (key in truths and truths[key]["lipid_name"]))
+            elif record["lipid_name"]:
+                truths[key]["lipid_name"] = True
         if source == "vs20":
             public_keys = set(truths)
         for key, record in truths.items():
@@ -304,7 +315,7 @@ def prepare(args, run):
         chosen = set()
         for stratum in sorted({r["stratum"] for r in truths.values()}):
             candidates = sorted(k for k, r in truths.items() if r["stratum"] == stratum)
-            count = min(len(candidates), math.ceil(args.cap * (0.05 if args.pilot else 1)))
+            count = sample_count(len(candidates), args.cap, args.pilot)
             rng = generators[source, stratum, "truths", 0]
             for index in rng.choice(len(candidates), count, replace=False):
                 key = candidates[index]
@@ -315,7 +326,7 @@ def prepare(args, run):
             candidates = [k for k in sorted(truths) if k not in chosen
                           and Chem.MolFromSmiles(truths[k]["smiles"]).HasSubstructMatch(query)]
             rng = generators[source, "all", "motifs", 0]
-            count = min(len(candidates), math.ceil(150 * (0.05 if args.pilot else 1)))
+            count = sample_count(len(candidates), 150, args.pilot)
             for index in rng.choice(len(candidates), count, replace=False):
                 key = candidates[index]
                 chosen.add(key)
@@ -643,7 +654,8 @@ def choose(args, run):
             a = choose_axis([r for r in c if r["axis"] == "heavy_atoms"], chances.get("heavy_atoms"), args.target, args.n_min)
             f = choose_axis([r for r in c if r["axis"] == "fraction_smallest"], chances.get("fraction_smallest"), args.target, args.n_min)
             by_k[str(k)] = {"heavy_atoms": int(a["value"]) if a else None, "fraction": f["value"] if f else None,
-                            "status": "estimable" if a and f else "partially_estimable" if a or f else "not_estimable",
+                            "status": "estimable" if a and f else "not_estimable",
+                            "axis_status": {"heavy_atoms": "estimable" if a else "not_estimable", "fraction": "estimable" if f else "not_estimable"},
                             "n_at_bar": {"heavy_atoms": a["n"] if a else None, "fraction": f["n"] if f else None},
                             "wilson_lo_at_bar": {"heavy_atoms": a["wilson_lo"] if a else None, "fraction": f["wilson_lo"] if f else None},
                             "chance95_atoms": chances.get("heavy_atoms"), "chance95_fraction": chances.get("fraction_smallest"),
@@ -746,6 +758,11 @@ def main(argv=None):
     if args.out.parent != OUTPUT_ROOT or not re.fullmatch(r"p1(?:pilot)?-\d{8}-[0-9a-f]{7,40}", args.out.name):
         parser.error("Output must be the assigned root and P1 run-id format")
     args.out.mkdir(parents=True, exist_ok=True)
+    for variable, directory in (("NUMBA_CACHE_DIR", "cache/numba"), ("MPLCONFIGDIR", "cache/matplotlib"),
+                                ("TEMP", "cache/tmp"), ("TMP", "cache/tmp")):
+        target = args.out / directory
+        target.mkdir(parents=True, exist_ok=True)
+        os.environ[variable] = str(target)
     if args.launch:
         command = [sys.executable, "-B", str(Path(__file__).resolve())] + [a for a in sys.argv[1:] if a != "--launch"]
         with open(args.out / "run.log", "ab", buffering=0) as log:
@@ -783,6 +800,7 @@ def main(argv=None):
         run["pilot_projection"] = {"run_id": args.pilot_run.name, "seconds_at_16": projected,
                                    "cap_decision": args.cap, "reason": "within_6h" if args.cap == 600 else "projection_above_6h"}
     stages = ("prepare", "neighbours", "sets", "mcs", "curves", "choose") if args.stage == "all" else (args.stage,)
+    finish(args, run)
     try:
         for stage in stages:
             print(f"stage {stage} started", flush=True)
