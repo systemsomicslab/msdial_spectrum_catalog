@@ -65,6 +65,12 @@ def _upsert_lineage(connection, terms):
         connection.execute("INSERT OR IGNORE INTO class_term VALUES (?, ?, ?, ?, ?, ?)",
                            (term_id, term.ontology_id, term.ontology_version, term.level, term.name, term.native_id))
         row = connection.execute("SELECT * FROM class_term WHERE term_id=?", (term_id,)).fetchone()
+        if (row is not None and row["level"] == LOOKUP_LEVEL
+                and (row["name"], row["native_id"]) == (term.name, term.native_id)):
+            # A later emitted lineage can supply the depth absent from the ICD.
+            # Preserve term IDs and all structure assignments while adding knowledge.
+            connection.execute("UPDATE class_term SET level=? WHERE term_id=?", (term.level, term_id))
+            row = connection.execute("SELECT * FROM class_term WHERE term_id=?", (term_id,)).fetchone()
         if row is None or (row["level"], row["name"], row["native_id"]) != (term.level, term.name, term.native_id):
             raise ValueError("conflicting class term identity")
         if ids:

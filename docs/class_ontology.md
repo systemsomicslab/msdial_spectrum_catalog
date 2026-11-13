@@ -31,6 +31,9 @@ and level `direct_parent`; no kingdom/class depth or parent edges are invented.
 An emitted, versioned lineage is required to provide actual hierarchy edges for
 lowest-common-ancestor inference. This is an explicit deviation from the WS1
 specification's expectation that the ICD would supply those edges.
+An emitted lineage with the same ontology version and native term ID can replace
+the lookup-only level with its known depth, preserving all existing assignments;
+reloading the lookup never downgrades that depth.
 
 No ontology dictionary or ICD data is bundled. Tests create an invented lookup
 with the same layout at runtime.

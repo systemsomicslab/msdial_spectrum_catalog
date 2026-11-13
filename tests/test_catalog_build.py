@@ -65,6 +65,24 @@ class CatalogBuildTests(unittest.TestCase):
         self.assertEqual(result["table_counts"]["analysis_run"], 1)
         self.assertNotIn("SENTINEL_PRIVATE_VALUE", repr(result))
 
+    def test_invalid_unit_linkage_does_not_abort_later_units(self):
+        unit = write_unit(self.root)
+        selection = self.selection(unit)
+        campaign_path = unit / "campaign-record.json"
+        record = json.loads(campaign_path.read_text())
+        record["unit_key"] = "different"
+        campaign_path.write_text(json.dumps(record))
+        second = write_unit(self.root, key="unit-b")
+        data = json.loads(selection.read_text())
+        data["units"].append(dict(unit_key=second.name, workspace=str(second), campaign_id="synthetic-campaign"))
+        data["content_sha256"] = canonical_digest({key: data[key] for key in ("campaigns", "exclusions", "units")})
+        selection.write_text(json.dumps(data))
+        with patch("msdial_spectrum_catalog.catalog_build.git_commit", return_value="synthetic"):
+            result = ingest_devset(self.root / "build/catalog.sqlite", selection)
+        self.assertEqual(result["failures"], 1)
+        self.assertTrue(result["units"][1]["valid"])
+        self.assertEqual(result["table_counts"]["analysis_run"], 1)
+
     def test_probe_four_variants_counts_vacuum_and_cleanup(self):
         unit = write_unit(self.root)
         out = self.root / "probe/size-report.json"

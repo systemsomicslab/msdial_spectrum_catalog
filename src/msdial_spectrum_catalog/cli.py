@@ -32,6 +32,9 @@ def _report_dict(report):
         "spectra": report.spectra,
         "alignments": report.alignments,
         "alignment_members": report.alignment_members,
+        "granularity": report.granularity,
+        "representative_spectra_nonempty": report.representative_spectra_nonempty,
+        "db_bytes_after": report.db_bytes_after,
         "errors": report.errors,
         "warnings": report.warnings,
     }

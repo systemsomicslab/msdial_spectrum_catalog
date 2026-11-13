@@ -34,3 +34,16 @@ class StructureClassesTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_structure_classes(db, path)
             self.assertFalse(db.exists())
+
+    def test_emitted_lineage_can_supply_missing_lookup_depth(self):
+        from msdial_spectrum_catalog.classes import ClassTermInput, upsert_lineage
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Invented.icd"
+            path.write_bytes((Path(__file__).parent / "fixtures/ws1/class_lookup.tsv").read_bytes())
+            db = Path(tmp) / "catalog.sqlite"
+            load_structure_classes(db, path)
+            upsert_lineage(db, [ClassTermInput("classyfire.chemont", "unknown", "class", "Invented class", "CHEMONTID:9999999")])
+            load_structure_classes(db, path)
+            with closing(sqlite3.connect(db)) as c:
+                self.assertEqual(c.execute("SELECT level FROM class_term").fetchone()[0], "class")
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM structure_class_assignment").fetchone()[0], 2)

@@ -43,6 +43,15 @@ def _load(path):
         return json.load(stream)
 
 
+def read_unit_libraries(unit_dir):
+    """Privacy preflight independent of per-unit linkage/identifier validation."""
+    unit_dir = Path(unit_dir)
+    campaign = _load(unit_dir / "campaign-record.json")
+    output = _load(unit_dir / "output/run-manifest.json")
+    return [_take(library, LIBRARY_FIELDS) for library in
+            campaign.get("libraries_as_run", []) + output.get("libraries", [])]
+
+
 def read_unit_metadata(unit_dir, *, handoff=None, campaign_id=None):
     unit_dir = Path(unit_dir)
     provenance = _load(unit_dir / "provenance/run-manifest.json")
@@ -110,6 +119,7 @@ def match_annotator_library(annotator_id, libraries):
                       and lib.get("library_kind", "").casefold() == generic_kind]
         return candidates[0] if len(candidates) == 1 else None
     prefix, separator, name = annotator_id.partition(":")
+    name = name.strip()
     role = {"msp": "msp", "lbmdb": "lbm"}.get(prefix.casefold())
     if not separator or role is None:
         return None

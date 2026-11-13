@@ -14,7 +14,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .devset import canonical_digest, git_commit, refuse_analysis_output, sha256_file
-from .linkage import ingest_unit, read_unit_metadata
+from .linkage import ingest_unit, read_unit_libraries
 from .storage import connect
 from .validate import validate_run
 
@@ -63,8 +63,14 @@ def ingest_devset(database, devset, *, granularity="representative", members=Tru
         raise ValueError("development-set content digest mismatch")
     # All preflight checks happen before mkdir/initialize/run.json creation.
     for unit in selection["units"]:
-        _, campaign, output, _ = read_unit_metadata(unit["workspace"], handoff=unit.get("handoff_path"))
-        libraries = campaign["libraries_as_run"] + output["libraries"]
+        try:
+            libraries = read_unit_libraries(unit["workspace"])
+        except (OSError, ValueError, KeyError, TypeError):
+            if database.name.endswith(".local-vs21.sqlite"):
+                # Naming is safe regardless of the unreadable unit's libraries.
+                # Its actual failure belongs to the per-unit report below.
+                continue
+            raise ValueError("cannot verify private-library naming before build") from None
         if any(lib.get("private") is True or str(lib.get("distribution", "")).lower() == "private" for lib in libraries):
             if not database.name.endswith(".local-vs21.sqlite"):
                 raise ValueError("private-library catalog requires .local-vs21.sqlite suffix")
