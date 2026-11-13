@@ -331,6 +331,13 @@ def parse_log(lines: list[str]) -> dict:
             continue
         if _SERVICE_ERROR.search(text):
             service_errors += 1
+        if section == "structure" and text.startswith("Generating output files"):
+            opened["structure.summary"] = stamp
+            continue
+        if section == "structure" and "structure.summary" in opened and (
+                text.startswith("structure elucidation complete") or "completed with failed steps" in text
+                or text.startswith("Summary saved")):
+            stages["structure.summary"] = round((stamp - opened.pop("structure.summary")).total_seconds(), 3)
         mark = _STAGE_MARK.match(text)
         if mark and section:
             tool = mark.group(1).lower().replace("-", "")

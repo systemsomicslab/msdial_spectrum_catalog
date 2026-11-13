@@ -273,6 +273,8 @@ class ParseLogTest(unittest.TestCase):
             "2026-11-13T00:00:06.000000+00:00 Processing completed in 6.0 seconds.",
             "2026-11-13T00:00:07.000000+00:00 Running structure elucidation",
             "2026-11-13T00:00:08.000000+00:00 2026-11-13 09:00:08 - INFO - SIRIUS processing time: 30.00 seconds",
+            "2026-11-13T00:00:08.200000+00:00 Generating output files...",
+            "2026-11-13T00:00:08.700000+00:00 structure elucidation complete",
             "2026-11-13T00:00:09.000000+00:00 ERROR: HTTP 403 Forbidden from the web service",
             "2026-11-13T00:00:09.000000+00:00 401.2001\t1234",
             "2026-11-13T00:00:10.000000+00:00 Error: formula elucidation completed with failed steps: SIRIUS, msbuddy",
@@ -281,6 +283,7 @@ class ParseLogTest(unittest.TestCase):
         self.assertEqual(parsed["stage_seconds"]["formula.sirius"], 4.0)
         self.assertEqual(parsed["stage_seconds"]["formula.summary"], 1.0)
         self.assertEqual(parsed["stage_seconds"]["structure.sirius"], 30.0)
+        self.assertEqual(parsed["stage_seconds"]["structure.summary"], 0.5)
         self.assertEqual(parsed["failed_steps"], ["formula:SIRIUS", "formula:msbuddy"])
         self.assertEqual(parsed["service_error_lines"], 1)
         self.assertEqual(parsed["ranker_models"], {"formula": "xgbranker_final_all.pkl"})
