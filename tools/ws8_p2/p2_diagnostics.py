@@ -189,6 +189,45 @@ def priority():
     return "BelowNormal"
 
 
+def process_context():
+    """Inspect our own launcher, not other jobs or campaign processes.
+
+    Windows' venv launcher puts the real interpreter in its own job. Verify the
+    launcher is outside a job rather than incorrectly rejecting that venv job.
+    """
+    import ctypes
+    from ctypes import wintypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    nt = ctypes.WinDLL("ntdll")
+    class BasicInfo(ctypes.Structure):
+        _fields_ = [("exit", ctypes.c_void_p), ("peb", ctypes.c_void_p),
+                    ("affinity", ctypes.c_void_p), ("base_priority", ctypes.c_void_p),
+                    ("pid", ctypes.c_size_t), ("parent", ctypes.c_size_t)]
+    k.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    k.OpenProcess.restype = wintypes.HANDLE
+    k.CloseHandle.argtypes = (wintypes.HANDLE,)
+    k.IsProcessInJob.argtypes = (wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL))
+    k.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+    nt.NtQueryInformationProcess.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p)
+    def info(pid):
+        handle = k.OpenProcess(0x400 | 0x1000, False, pid)
+        if not handle:
+            raise RuntimeError("Cannot inspect own process ancestry")
+        try:
+            basic, inside = BasicInfo(), wintypes.BOOL()
+            buf, size = ctypes.create_unicode_buffer(32768), wintypes.DWORD(32768)
+            if nt.NtQueryInformationProcess(handle, 0, ctypes.byref(basic), ctypes.sizeof(basic), None) != 0:
+                raise RuntimeError("Cannot inspect own parent process")
+            if not k.IsProcessInJob(handle, None, ctypes.byref(inside)) or not k.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                raise RuntimeError("Cannot verify own process context")
+            return dict(pid=pid, parent_pid=basic.parent, image=Path(buf.value).name, in_windows_job=bool(inside.value))
+        finally:
+            k.CloseHandle(handle)
+    current = info(os.getpid())
+    launcher = info(current["parent_pid"])
+    return dict(current=current, launcher=launcher)
+
+
 QUERIES = None
 
 
@@ -711,15 +750,9 @@ def main():
     if run.get("status") == "complete":
         parser.error("Completed run is immutable; use a new code commit/run ID")
     priority_name = priority()
-    import ctypes
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.GetCurrentProcess.restype = ctypes.c_void_p
-    kernel.IsProcessInJob.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int))
-    in_job = ctypes.c_int()
-    if not kernel.IsProcessInJob(kernel.GetCurrentProcess(), None, ctypes.byref(in_job)):
-        raise RuntimeError("Cannot verify Windows job membership")
-    if args.detached_child and in_job.value:
-        raise RuntimeError("Detached process still belongs to a Windows job")
+    context = process_context()
+    if args.detached_child and context["launcher"]["in_windows_job"]:
+        raise RuntimeError("Detached venv launcher still belongs to a Windows job")
     import rdkit, numpy, matchms, pandas, pyarrow
     run.update(label="ws8-p2", run_id=args.out.name, code_commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                interpreter=sys.executable, versions=dict(python=sys.version, rdkit=rdkit.__version__, numpy=numpy.__version__,
@@ -730,7 +763,7 @@ def main():
                                representative="most positive finite peaks after resolution gate, earliest record tie",
                                pooling="one unit per first block/mode/precursor type, summed across types",
                                formula_gate="heavy-element residue counts; H ignored", electron_mass=0.000549),
-               process=dict(pid=os.getpid(), detached_child=args.detached_child, in_windows_job=bool(in_job.value)),
+               process=dict(detached_child=args.detached_child, launch_method="WMI" if args.detached_child else "foreground", **context),
                status="running")
     run.setdefault("timings_seconds", {})
     write_json(run_path, run)

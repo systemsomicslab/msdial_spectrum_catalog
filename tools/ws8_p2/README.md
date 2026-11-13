@@ -21,8 +21,10 @@ The full run uses every record. Completed runs are immutable.
 
 `--detach` uses the built-in WMI Win32_Process service to launch independently of
 nested application jobs, writes the run's `run.log`, and returns its child PID.
-The child checks it is outside every Windows job. A direct Win32 breakaway launch
-was insufficient on this host and exited before reading any inputs. The run
+The child verifies its venv launcher is outside every Windows job; the actual
+interpreter is inside the Windows venv launcher's own job. Both memberships are
+recorded. Preliminary launch checks rejected this benign venv job before reading
+any inputs; the WMI launcher separates the batch from the application. The run
 process and each spawned chemistry worker set and verify BelowNormal via
 Win32. At most eight workers are permitted, and BLAS/Numba thread variables are one
 before optional imports. No ports or campaign state are accessed.
