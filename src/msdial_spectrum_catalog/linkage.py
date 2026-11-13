@@ -115,8 +115,8 @@ def match_annotator_library(annotator_id, libraries):
     generic_kind = {"msp_high_quality": "acquired", "msp_low_quality": "acquired",
                     "msp_in_silico": "predicted"}.get(annotator_id.casefold())
     if generic_kind:
-        candidates = [lib for lib in libraries if lib.get("role", "").casefold() == "msp"
-                      and lib.get("library_kind", "").casefold() == generic_kind]
+        candidates = [lib for lib in libraries if str(lib.get("role") or "").casefold() == "msp"
+                      and str(lib.get("library_kind") or "").casefold() == generic_kind]
         return candidates[0] if len(candidates) == 1 else None
     prefix, separator, name = annotator_id.partition(":")
     name = name.strip()

@@ -75,6 +75,14 @@ adds ingest granularity, campaign linkage, reviewed sample/unit attributes and
 candidate evidence_source/measured_terms. v12 adds library identities, kernel
 identity, multi-run scope and run_annotator. v13 supplies the shared class model
 described in [class_ontology.md](class_ontology.md).
+MS-DIAL tables use plain tab-separated cells. The reader preserves literal quotes
+and supports exported spectrum cells larger than the CSV module's 128-KiB
+default; reviewed metadata CSV/TSV readers retain their own quoting semantics.
+Member m/z validation applies to detailed provenance rows. Peak-ID matrix rows
+do not export m/z and contribute a coverage count instead. Winner reconciliation
+accepts either exact half of a dual lipid name separated by `|`; when exported,
+`name_at_supported_level` takes priority. The candidate keeps its raw record name
+and the optional `is_lipid_chains_match` flag.
 
 `ingest-run --granularity representative` preserves every alignment consensus
 (empty records included), alignment candidates, sample identities and only the

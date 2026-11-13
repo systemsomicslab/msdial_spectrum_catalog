@@ -32,3 +32,9 @@ class RunAnnotatorTests(unittest.TestCase):
         self.assertIsNone(match_annotator_library("MSP:Invented_high", [lib, lib]))
         self.assertIsNone(match_annotator_library("msp_high_quality", [lib, lib]))
         self.assertIsNone(match_annotator_library("LbmDB:Invented", [lib]))
+
+    def test_nullable_manifest_identity_fields_remain_unresolved(self):
+        self.assertIsNone(match_annotator_library("msp_high_quality", [
+            dict(name="Invented.msp", sha256="a" * 64, role="msp", library_kind=None)]))
+        self.assertIsNone(match_annotator_library("msp_high_quality", [
+            dict(name="Invented.msp", sha256="a" * 64, role=None, library_kind="acquired")]))

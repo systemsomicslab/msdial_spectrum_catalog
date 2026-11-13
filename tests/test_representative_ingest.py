@@ -48,6 +48,35 @@ class RepresentativeTests(unittest.TestCase):
             self.assertEqual(before, list(c.iterdump()))
         self.assertTrue(validate_run(self.db, rep.run_id).valid)
 
+    def test_matrix_only_members_have_unexported_mz_coverage(self):
+        (self.unit / "output/AlignResult.mdprovenance.tsv").unlink()
+        report = self.ingest(granularity="representative")
+        validation = validate_run(self.db, report.run_id)
+        self.assertTrue(validation.valid, validation.errors)
+        self.assertEqual(validation.counts["member_mz_not_exported"], 4)
+        self.assertIn("4 member m/z not exported", validation.warnings)
+
+    def test_dual_lipid_winner_and_supported_name_priority(self):
+        sidecar = self.unit / "output/AlignResult.mdcandidate.tsv"
+        original = sidecar.read_text()
+        for index, (name, supported, expected) in enumerate((
+            ("Invented alpha|Invented beta", "", True),
+            ("Invented beta|Invented alpha", "", True),
+            ("Invented alpha|Invented beta", "Invented beta", False),
+            ("Invented beta|Invented gamma", "Invented alpha", True),
+            ("Invented alphabet|Invented beta", "", False),
+        )):
+            with self.subTest(name=name, supported=supported):
+                lines = original.replace("Invented alpha", name).splitlines()
+                sidecar.write_text(lines[0] + "\tname_at_supported_level\tis_lipid_chains_match\n"
+                                   + lines[1] + "\t" + supported + "\ttrue\n")
+                self.db = self.root / f"lipid-{index}.sqlite"
+                report = self.ingest(granularity="representative")
+                self.assertEqual(validate_run(self.db, report.run_id).valid, expected)
+                with closing(sqlite3.connect(self.db)) as c:
+                    self.assertEqual(c.execute("SELECT name, name_at_supported_level, is_lipid_chains_match FROM msdial_annotation_candidate").fetchone(),
+                                     (name, supported or None, 1))
+
     def test_optional_members_and_mztab(self):
         report = self.ingest(granularity="representative", members=False, mztab="none")
         self.assertTrue(report.valid, report.errors)

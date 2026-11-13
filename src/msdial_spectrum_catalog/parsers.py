@@ -53,6 +53,10 @@ def split_refs(value: str | None) -> list[str]:
 
 
 def read_tsv(path: Path, header_prefix: str | None = None) -> Iterator[tuple[int, dict[str, str]]]:
+    # MS-DIAL writes plain tab-separated cells (tabs/newlines are sanitised by
+    # its exporters), not CSV-quoted fields. Some exported spectrum cells also
+    # exceed csv's default 128-KiB limit. Split physical lines just as read_mztab
+    # does, retaining literal quote characters and arbitrarily long cells.
     with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
         header_line = 1
         if header_prefix:
@@ -62,11 +66,18 @@ def read_tsv(path: Path, header_prefix: str | None = None) -> Iterator[tuple[int
                     break
             else:
                 raise ValueError(f"Header {header_prefix!r} was not found in {path}")
-            reader = csv.DictReader(handle, fieldnames=header, delimiter="\t")
         else:
-            reader = csv.DictReader(handle, delimiter="\t")
-        for row_number, row in enumerate(reader, start=header_line + 1):
-            yield row_number, {str(key): value or "" for key, value in row.items() if key is not None}
+            first = handle.readline()
+            if not first:
+                return
+            header = first.rstrip("\r\n").split("\t")
+        for row_number, line in enumerate(handle, start=header_line + 1):
+            text = line.rstrip("\r\n")
+            if not text:
+                continue
+            cells = text.split("\t")
+            yield row_number, {key: cells[index] if index < len(cells) else ""
+                               for index, key in enumerate(header)}
 
 
 def read_analysis_csv(path: Path) -> dict[str, dict[str, str]]:

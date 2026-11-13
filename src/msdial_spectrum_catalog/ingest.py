@@ -158,8 +158,10 @@ _CANDIDATE_TEXT_COLUMNS = (
     ("annotation_tag", "annotation_tag_vs1"),
     ("evidence_source", "evidence_source"),
     ("measured_terms", "measured_terms"),
+    ("name_at_supported_level", "name_at_supported_level"),
 )
 _CANDIDATE_FLAG_COLUMNS = (
+    "is_lipid_chains_match",
     "is_reference_matched",
     "is_annotation_suggested",
     "is_precursor_mz_match",

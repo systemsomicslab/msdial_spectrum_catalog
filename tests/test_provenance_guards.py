@@ -135,10 +135,15 @@ class ValidatorGuardTests(unittest.TestCase):
                 " VALUES ('af', ?, 0)", (self.RUN,)
             )
             connection.execute(
+                "INSERT INTO artifact(artifact_id, run_id, artifact_type, relative_path, source_path, sha256, byte_size)"
+                " VALUES (1, ?, 'alignment_provenance', 'Invented.mdprovenance.tsv', '.', 'synthetic', 0)",
+                (self.RUN,),
+            )
+            connection.execute(
                 """INSERT INTO alignment_member(
                     alignment_member_id, alignment_feature_id, sample_id, file_id,
-                    is_representative, has_source_peak, mz, ms2_scan_index
-                ) VALUES ('am', 'af', 'sm', 0, 1, ?, ?, ?)""",
+                    is_representative, has_source_peak, mz, ms2_scan_index, source_artifact_id
+                ) VALUES ('am', 'af', 'sm', 0, 1, ?, ?, ?, 1)""",
                 (has_source_peak, mz, ms2_scan_index),
             )
 

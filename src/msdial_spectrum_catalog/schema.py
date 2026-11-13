@@ -741,6 +741,8 @@ MIGRATIONS: tuple[Migration, ...] = (
             "class_id", "source_name", "raw_file_paired_by", "metadata_matched_by")),
         AddColumn("msdial_annotation_candidate", "evidence_source", "TEXT"),
         AddColumn("msdial_annotation_candidate", "measured_terms", "TEXT"),
+        AddColumn("msdial_annotation_candidate", "name_at_supported_level", "TEXT"),
+        AddColumn("msdial_annotation_candidate", "is_lipid_chains_match", "INTEGER"),
         RunSql("""CREATE TABLE IF NOT EXISTS sample_attribute (
             sample_id TEXT NOT NULL REFERENCES sample, attribute_key TEXT NOT NULL,
             attribute_value TEXT, source TEXT NOT NULL,

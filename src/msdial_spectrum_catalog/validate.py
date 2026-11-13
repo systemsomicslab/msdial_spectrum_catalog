@@ -62,14 +62,17 @@ def validate_run(database, run_id: str) -> ValidationReport:
         if missing_member_links:
             report.errors.append(f"{missing_member_links} alignment members reference missing sample features")
 
-        # A member with a source peak must carry a usable m/z. This check exists because an earlier
+        # Detailed provenance exports m/z; the peak-ID matrix deliberately does not.
+        # A provenance member with a source peak must carry a usable m/z. An earlier
         # MS-DIAL provenance export read the column from the chromatogram axis instead of the peak mass,
         # so every member that DID have a source peak stored a sentinel and only the gap-filled ones
         # stored a real value. That run validated clean while being systematically wrong, which is the
         # failure this check makes impossible to repeat.
         unusable_member_mz = connection.execute(
             """SELECT COUNT(*) FROM alignment_member
-               WHERE has_source_peak = 1 AND (mz IS NULL OR mz <= 0)
+               JOIN artifact ON artifact.artifact_id = alignment_member.source_artifact_id
+               WHERE artifact.artifact_type = 'alignment_provenance'
+               AND has_source_peak = 1 AND (mz IS NULL OR mz <= 0)
                AND alignment_feature_id IN (SELECT alignment_feature_id FROM alignment_feature WHERE run_id = ?)""",
             (run_id,),
         ).fetchone()[0]
@@ -77,6 +80,16 @@ def validate_run(database, run_id: str) -> ValidationReport:
             report.errors.append(
                 f"{unusable_member_mz} alignment members have a source peak but no usable m/z"
             )
+        report.counts["member_mz_not_exported"] = connection.execute(
+            """SELECT COUNT(*) FROM alignment_member m JOIN artifact a
+               ON a.artifact_id=m.source_artifact_id
+               WHERE a.artifact_type='alignment_peak_id_matrix' AND m.mz IS NULL
+               AND m.alignment_feature_id IN
+                   (SELECT alignment_feature_id FROM alignment_feature WHERE run_id=?)""",
+            (run_id,),
+        ).fetchone()[0]
+        if report.counts["member_mz_not_exported"]:
+            report.warnings.append(f"{report.counts['member_mz_not_exported']} member m/z not exported")
 
         # The mirror image: a member with no source peak has no source spectrum either, so a scan index
         # on such a row points at a spectrum belonging to something else.
@@ -194,14 +207,22 @@ def validate_run(database, run_id: str) -> ValidationReport:
         # The two artifacts describe the same decision from different sides, so the winner must agree.
         # .mdalign renders the representative with MS-DIAL's "no MS2: " and "low score: " prefixes, which
         # candidate_name has already stripped, and the sidecar publishes the raw reference name.
-        disagreeing_winners = connection.execute(
-            """SELECT COUNT(*) FROM msdial_annotation_candidate c
+        winners = connection.execute(
+            """SELECT c.name, c.name_at_supported_level, r.candidate_name
+               FROM msdial_annotation_candidate c
                JOIN msdial_annotation_result r
                  ON r.run_id = c.run_id AND r.subject_kind = c.subject_kind AND r.subject_id = c.subject_id
                WHERE c.run_id = ? AND c.candidate_rank = 1 AND r.rank = 1
-                 AND IFNULL(c.name, '') != IFNULL(r.candidate_name, '')""",
+                 """,
             (run_id,),
-        ).fetchone()[0]
+        )
+        # Preserve the raw dual lipid name. Current exporters publish one half;
+        # newer sidecars state the supported name explicitly, which takes priority.
+        disagreeing_winners = sum(
+            (supported != (published or "")) if supported else
+            ((published or "") not in (name or "").split("|"))
+            for name, supported, published in winners
+        )
         if disagreeing_winners:
             report.errors.append(
                 f"{disagreeing_winners} alignment features name a different winner in .mdalign and in the candidate set"
