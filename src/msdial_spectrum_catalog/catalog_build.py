@@ -4,10 +4,12 @@ from __future__ import annotations
 from contextlib import closing
 
 import json
+import csv
 import platform
 import re
 import sqlite3
 import time
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 
@@ -133,5 +135,52 @@ def size_probe(unit_dirs, out):
                 for suffix in ("", "-wal", "-shm", "-journal"):
                     Path(str(database) + suffix).unlink(missing_ok=True)
         result["units"].append(unit)
+        _write_json(out, result)
+    return result
+
+
+def build_report(database, *, devset=None, out=None):
+    """Counts-only handback and independent representative-sidecar census."""
+    with closing(connect(database)) as connection:
+        result = dict(db_bytes=Path(database).stat().st_size, database_sha256=sha256_file(database),
+                      table_counts=table_counts(connection))
+        result["metadata_matched"] = connection.execute("SELECT COUNT(*) FROM sample WHERE metadata_matched_by IS NOT NULL").fetchone()[0]
+        result["samples_with_attributes"] = connection.execute("SELECT COUNT(DISTINCT sample_id) FROM sample_attribute").fetchone()[0]
+        result["consensus_nonempty"] = connection.execute("SELECT COUNT(*) FROM spectrum WHERE spectrum_kind='alignment_consensus' AND peak_count>0").fetchone()[0]
+        result["sample_spectra"] = connection.execute("SELECT COUNT(*) FROM spectrum WHERE sample_id IS NOT NULL").fetchone()[0]
+        result["library_identity_unresolved_rows"] = connection.execute("SELECT COUNT(*) FROM run_annotator WHERE library_sha256 IS NULL").fetchone()[0]
+        result["library_identity_unresolved_runs"] = connection.execute("SELECT COUNT(DISTINCT run_id) FROM run_annotator WHERE library_sha256 IS NULL").fetchone()[0]
+        result["runs_with_annotators"] = connection.execute("SELECT COUNT(DISTINCT run_id) FROM run_annotator").fetchone()[0]
+        result["console_tool_runs"] = connection.execute("SELECT COUNT(*) FROM annotation_tool_run WHERE tool_name='msdial.console'").fetchone()[0]
+        result["console_runs_with_libraries"] = connection.execute("SELECT COUNT(DISTINCT t.run_id) FROM annotation_tool_run t JOIN annotation_tool_run_library l USING(tool_run_id) WHERE tool_name='msdial.console'").fetchone()[0]
+        result["candidate_evidence_null"] = connection.execute("SELECT COUNT(*) FROM msdial_annotation_candidate WHERE subject_kind='alignment_feature' AND evidence_source IS NULL").fetchone()[0]
+        runs = [row[0] for row in connection.execute("SELECT run_id FROM analysis_run ORDER BY run_id")]
+        census = Counter({tuple(row[:3]): row[3] for row in connection.execute("""SELECT annotator_id,
+            evidence_source, annotation_tag, COUNT(*) FROM msdial_annotation_candidate
+            WHERE subject_kind='alignment_feature' AND is_representative=1
+            GROUP BY annotator_id, evidence_source, annotation_tag""")})
+        result["representative_candidates"] = [dict(annotator=key[0], evidence_source=key[1], tag=key[2], rows=value)
+            for key, value in sorted(census.items(), key=lambda item: tuple(str(v) for v in item[0]))]
+        result["annotator_tiers"] = [dict(row) for row in connection.execute(
+            "SELECT tier, COUNT(*) AS rows FROM run_annotator GROUP BY tier ORDER BY tier")]
+    result["validations"] = [dict(run_id=run, valid=validation.valid, counts=validation.counts,
+                                  error_count=len(validation.errors), warning_count=len(validation.warnings))
+                              for run in runs for validation in [validate_run(database, run)]]
+    result["validation_failures"] = sum(not v["valid"] for v in result["validations"])
+    result["privacy"] = privacy_scan(database)
+    if devset:
+        selection = json.loads(Path(devset).read_text(encoding="utf-8-sig"))
+        source_census = Counter()
+        for unit in selection["units"]:
+            for path in sorted(Path(unit["output_dir"]).glob("AlignResult*.mdcandidate.tsv")):
+                with path.open(encoding="utf-8-sig", newline="") as stream:
+                    for row in csv.DictReader(stream, delimiter="\t"):
+                        if row.get("is_representative", "").strip().lower() == "true":
+                            source_census[(row.get("annotator_id") or None, row.get("evidence_source"),
+                                           row.get("annotation_tag_vs1") or None)] += 1
+        result["source_census_rows"] = sum(source_census.values())
+        result["source_census_matches"] = source_census == census
+        result["source_census_difference_rows"] = sum((source_census - census).values()) + sum((census - source_census).values())
+    if out:
         _write_json(out, result)
     return result

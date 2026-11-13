@@ -117,3 +117,6 @@ database checksum/size. Builds refuse existing outputs and analysis-root writes.
 after VACUUM, reports row counts and dbstat bytes when available, and deletes its
 exact scratch database files. `privacy-scan DB` returns counts only for forbidden
 library paths in TEXT columns, with the three specified path-column exemptions.
+`build-report DB [--devset FILE] [--out FILE]` produces a counts-only handback,
+validates every run, scans privacy and independently reconciles representative
+candidate counts against the source sidecars of the supplied selection.

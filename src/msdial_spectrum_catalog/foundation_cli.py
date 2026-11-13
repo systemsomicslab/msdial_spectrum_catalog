@@ -27,6 +27,10 @@ def add_parsers(subparsers):
     probe.add_argument("--out", required=True)
     privacy = subparsers.add_parser("privacy-scan")
     privacy.add_argument("database")
+    report = subparsers.add_parser("build-report")
+    report.add_argument("database")
+    report.add_argument("--devset")
+    report.add_argument("--out")
     attrs = subparsers.add_parser("export-sample-attributes")
     attrs.add_argument("database")
     attrs.add_argument("--unit")
@@ -40,7 +44,7 @@ def add_parsers(subparsers):
 
 
 def dispatch(args):
-    from .catalog_build import ingest_devset, privacy_scan, size_probe
+    from .catalog_build import build_report, ingest_devset, privacy_scan, size_probe
     from .linkage import export_sample_attributes, ingest_unit
     from .classes import list_class_predictions
     code = 0
@@ -62,6 +66,9 @@ def dispatch(args):
     elif args.command == "privacy-scan":
         result = privacy_scan(args.database)
         code = 0 if result["valid"] else 2
+    elif args.command == "build-report":
+        result = build_report(args.database, devset=args.devset, out=args.out)
+        code = 0 if result["privacy"]["valid"] and result["validation_failures"] == 0 and result.get("source_census_matches", True) else 2
     elif args.command == "export-sample-attributes":
         result = {"samples": export_sample_attributes(args.database, args.out, unit=args.unit)}
     elif args.command == "show-classes":

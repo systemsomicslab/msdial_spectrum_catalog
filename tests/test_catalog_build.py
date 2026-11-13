@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from msdial_spectrum_catalog.catalog_build import ingest_devset, privacy_scan, size_probe
+from msdial_spectrum_catalog.catalog_build import build_report, ingest_devset, privacy_scan, size_probe
 from msdial_spectrum_catalog.devset import canonical_digest
 from msdial_spectrum_catalog.storage import initialize
 from ws1_fixture import write_unit
@@ -96,3 +96,19 @@ class CatalogBuildTests(unittest.TestCase):
     def test_analysis_output_refused(self):
         with self.assertRaisesRegex(ValueError, "analysis root"):
             ingest_devset(self.root / "MSDIAL_Public_Reanalysis/analysis/catalog.sqlite", "missing.json")
+
+    def test_counts_report_matches_independent_source_census(self):
+        unit = write_unit(self.root)
+        selection = self.selection(unit)
+        data = json.loads(selection.read_text())
+        data["units"][0]["output_dir"] = str(unit / "output")
+        selection.write_text(json.dumps(data))
+        from msdial_spectrum_catalog.linkage import ingest_unit
+        db = self.root / "catalog.sqlite"
+        ingest_unit(db, unit, granularity="representative")
+        result = build_report(db, devset=selection)
+        self.assertTrue(result["source_census_matches"])
+        self.assertEqual(result["source_census_rows"], 1)
+        self.assertEqual(result["metadata_matched"], 2)
+        self.assertEqual(result["validation_failures"], 0)
+        self.assertTrue(result["privacy"]["valid"])
