@@ -209,6 +209,13 @@ def write_msp(path: Path, spectra: list[tuple[ExportedSpectrum, list]]) -> None:
             handle.write("\n")
 
 
+def manifest_name(unit_id: str, selection: str) -> str:
+    """The manifest's file name. The benchmark manifest holds the private library's identities (the truth
+    the benchmark compares against), so its name says it is local-only."""
+    suffix = "_manifest.local-vs21.tsv" if selection == "benchmark" else "_manifest.tsv"
+    return f"{unit_id}_{selection}{suffix}"
+
+
 def export_unit(output: Path, unit_id: str, destination: Path, selection: str = "unresolved",
                 max_spectra: int | None = None) -> dict:
     """Write <unit>_<selection>.msp, its manifest TSV and a selection JSON into destination."""
@@ -217,11 +224,13 @@ def export_unit(output: Path, unit_id: str, destination: Path, selection: str = 
     base = destination / f"{unit_id}_{selection}"
     write_msp(base.with_suffix(".msp"), spectra)
     fields = list(ExportedSpectrum.__dataclass_fields__)
-    with base.with_name(base.name + "_manifest.tsv").open("w", encoding="utf-8", newline="") as handle:
+    summary["manifest"] = manifest_name(unit_id, selection)
+    with (destination / summary["manifest"]).open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", lineterminator="\n")
         writer.writeheader()
         for spectrum, _ in spectra:
             writer.writerow(asdict(spectrum))
+    summary["msp"] = base.with_suffix(".msp").name
     summary["msp_sha256"] = sha256_file(base.with_suffix(".msp"))
     base.with_name(base.name + "_selection.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

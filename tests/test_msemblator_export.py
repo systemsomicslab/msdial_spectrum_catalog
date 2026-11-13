@@ -74,7 +74,9 @@ class MsemblatorExportTest(unittest.TestCase):
         destination = self.root / "out"
         summary = export_unit(self.output, "unit1", destination, selection, max_spectra)
         records = list(read_msp(destination / f"unit1_{selection}.msp"))
-        with (destination / f"unit1_{selection}_manifest.tsv").open(encoding="utf-8") as handle:
+        suffix = "_manifest.local-vs21.tsv" if selection == "benchmark" else "_manifest.tsv"
+        self.assertEqual(summary["manifest"], f"unit1_{selection}{suffix}")
+        with (destination / f"unit1_{selection}{suffix}").open(encoding="utf-8") as handle:
             manifest = list(csv.DictReader(handle, delimiter="\t"))
         return summary, records, manifest
 
