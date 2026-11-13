@@ -151,6 +151,35 @@ class ChemistryTests(unittest.TestCase):
         for motif, smiles in examples.items():
             self.assertTrue(Chem.MolFromSmiles(smiles).HasSubstructMatch(queries[motif]), motif)
 
+    def test_timeout_partial_result_is_never_used(self):
+        from unittest.mock import patch
+        partial = SimpleNamespace(canceled=True, smartsString="[#6]", numAtoms=1)
+        with patch("rdkit.Chem.rdFMCS.FindMCS", return_value=partial):
+            self.assertEqual(core.mcs_over_set([core.standardise("CCCC"), core.standardise("CCCO")]), ("", 0, True))
+
+    def test_spectral_scaffold_and_formula_families_exclude_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            db_rows = [p1.chem_record(s) for s in ("CCc1ccccc1", "Cc1ccccc1C", "Cc1cccc(C)c1", "Cc1ccc(C)cc1", "Oc1ccccc1", "COc1ccccc1", "c1ccccc1")]
+            db = {r["key"]: r for r in db_rows}
+            truths = [dict(r, source="vs20", stratum="0:4-15", lipid=0, heavy_bin="4-15", motif_oversample=False) for r in (db_rows[0], db_rows[-1])]
+            neighbours = []
+            for truth in truths:
+                candidates = [(0.9, r["key"], r["formula"], r["smiles"]) for r in db_rows if r["key"] != truth["key"]][:5]
+                neighbours.append(dict(source="vs20", key=truth["key"], spectral_nn=candidates, spectral_nn_any=candidates,
+                                       same_formula_spectral=[r for r in candidates if r[2] == truth["formula"]]))
+            p1.dump(out / "prepared.local-vs21.pkl", {"db": db, "truths": truths})
+            p1.dump(out / "neighbours.local-vs21.pkl", neighbours)
+            p1.sets(SimpleNamespace(out=out, sources=["vs20"], seed=20261113, pilot=True), {})
+            rows = [r for r in p1.load(out / "pending.local-vs21.pkl") if r["truth_key"]]
+            for row in rows:
+                if row["family"] != "truth_in_set":
+                    self.assertNotIn(row["truth_key"], row["member_keys"])
+                else:
+                    self.assertIn(row["truth_key"], row["member_keys"])
+            self.assertEqual({r["family"] for r in rows}, set(p1.FAMILIES))
+            self.assertFalse(any(r["family"] == "spectral_nn_scaffold" and r["truth_key"] == db_rows[-1]["key"] for r in rows))
+
 
 if __name__ == "__main__":
     unittest.main()
