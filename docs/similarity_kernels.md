@@ -52,6 +52,9 @@ parity contract. Zero full norm returns 0. Scores are not clamped. Nonfinite pea
 (for example, MN zero/zero normalization) return NaN with zero assigned
 pairs rather than entering the Hungarian solver; matchms/SciPy does not
 support nonfinite costs. This is an explicit degenerate-input extension.
+The specified zero-norm guard also differs from the pinned greedy helper,
+which divides unconditionally and may raise or return NaN under numba.
+The optional reference test recognises only this degenerate discrepancy.
 
 ## Preprocessing
 
@@ -123,5 +126,15 @@ null/nonfinite scores are excluded from quantiles and threshold fractions and
 counted separately. Matched-one fractions use all eligible pairs; entropy
 reports 0 matched because that wrapper does not define peak assignment.
 
-The optional matchms test makes filtering explicit where supported. matchms
+The optional matchms test makes filtering explicit where supported. All finite
+fixture pairs and 200 random pairs are compared; nonfinite MN weights are
+outside the reference solver domain. Source was checked directly at GitHub
+tag 0.34.0; executing the optional cross-check remains a WS4 check. matchms
 is not a runtime dependency and is never installed by this module.
+
+Bonanza preserves C#'s `(P + Ua) + Ub` expression. With nonintegral or very
+large intensities, swapping unequal-precursor inputs can change the last bit
+through addition order even though the mathematical score is symmetric.
+The 500-pair bitwise property uses exactly representable integral sums; general
+floating-point fixture symmetry uses the stated 1e-9 score tolerance. Replacing
+this with role-ordered sums would violate the faithful C# expression order.

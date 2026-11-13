@@ -41,9 +41,22 @@ class MatchmsParity(unittest.TestCase):
             kwargs["noise_cutoff"] = 0
         if "remove_precursor" in signature:
             kwargs["remove_precursor"] = False
-        expected = cls(**kwargs).pair(self.reference_spectrum(a), self.reference_spectrum(b))
         result = mn.modified_cosine(a, b, tol=params["tol"], assign=params["assign"],
                                     mz_power=params["mzpow"], intensity_power=params["ipow"])
+        zero_norm = any(not any(mz ** params["mzpow"] * intensity ** params["ipow"]
+                                  for mz, intensity in spectrum.peaks) for spectrum in (a, b))
+        try:
+            expected = cls(**kwargs).pair(self.reference_spectrum(a), self.reference_spectrum(b))
+        except ZeroDivisionError:
+            # The WS2 contract defines 0 for zero norms; the pinned greedy
+            # helper divides unconditionally and can raise under numba.
+            if not zero_norm:
+                raise
+            self.assertEqual(result.score, 0)
+            return
+        if zero_norm and not math.isfinite(float(expected["score"])):
+            self.assertEqual(result.score, 0)
+            return
         self.assertAlmostEqual(result.score, float(expected["score"]), delta=1e-9)
         if params["assign"] == "greedy":
             self.assertEqual(result.matched_peak_count, int(expected["matches"]))
