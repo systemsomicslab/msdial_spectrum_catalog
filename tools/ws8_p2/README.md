@@ -83,7 +83,7 @@ separate, each in <20 / 20-<40 / >=40 bins. Ranges and stepped fields remain
 unparseable. The P1 cross-check includes every family from its aggregate table.
 
 Mining first collapses representatives to one compound per mode, OR-ing bins across
-single-charge precursor types. It uses half-up 0.01-Da bins and >=1% intensity;
+all recorded precursor types. It uses half-up 0.01-Da bins and >=1% intensity;
 neutral losses must be >=12 Da. A motif needs >=200 VS20 positives. Bins present in
 >=5% of positives are ranked by VS20 precision, then positive support, kind, and
 mass bin; the top 20 combined product-ion/loss bins are frozen before VS21 is read.
@@ -96,7 +96,7 @@ All output is beneath the validated run directory. `prepared*.parquet` holds
 eligible spectra and motif matches; `observations*.parquet` holds representative
 diagnostic observations. Every VS21 row artifact uses `.local-vs21.` in its name.
 `confusion_counts.csv`, `diagnostics_precision.csv/.json`, `mined_selection-vs20.json`,
-`mined_candidates.csv`, `p1_crosscheck.csv`, `report.md`, and the figure contain
+`mined_candidates.csv`, `motif_prevalence.csv`, `p1_crosscheck.csv`, `report.md`, and the figure contain
 aggregates only. `run.json` records input names and checksums (never private paths),
 commit, versions, parameters, process/priority checks, exclusions, stage times,
 and hashes of all artifacts except itself and the open log. Report its own hash

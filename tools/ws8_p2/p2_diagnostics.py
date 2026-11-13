@@ -63,6 +63,7 @@ def write_csv(path, rows, fields=None):
 
 
 def formula_counts(formula):
+    formula = re.sub(r"[+-]\d*$", "", formula)  # RDKit Hill formula of permanent ions.
     parts = re.findall(r"([A-Z][a-z]?)(\d*)", formula)
     if "".join(e + n for e, n in parts) != formula:
         raise ValueError("Invalid elemental formula")
@@ -526,7 +527,7 @@ def mining_compounds(records):
     """Collapse adduct representatives to one compound/mode, OR-ing 0.01-Da bins."""
     result = {}
     for r in records:
-        if not r["representative"] or not re.search(r"\][+-]$|\]1[+-]$", r["adduct"]):
+        if not r["representative"]:
             continue
         key = (r["key"], r["mode"])
         if key not in result:
@@ -618,12 +619,24 @@ def mine(args, run):
     private = mining_compounds(parquet_rows(row_path(args.out, "prepared", "vs21"))) if "vs21" in args.sources else []
     scored = score_candidates(selected, private)
     assign_formulas(scored)
+    prevalence_rows = []
+    for source, compounds in (("vs20", public), ("vs21", private)):
+        if source not in args.sources:
+            continue
+        for mode in ("pos", "neg"):
+            records = [r for r in compounds if r["mode"] == mode]
+            for motif in motif_rows():
+                n = sum(motif["motif_id"] in r["motifs"] for r in records)
+                prevalence_rows.append(dict(source=source, ion_mode=mode, motif_id=motif["motif_id"],
+                                            n_compounds=len(records), n_positive=n,
+                                            prevalence=n / len(records) if records else None))
+    write_csv(args.out / "motif_prevalence.csv", prevalence_rows)
     fields = list(scored[0]) if scored else ["motif_id", "ion_mode", "kind", "mz_or_loss", "formula", "vs20_n", "vs20_precision", "vs21_n_obs", "vs21_precision", "vs21_wilson_lo", "status"]
     write_csv(args.out / "mined_candidates.csv", scored, fields)
     run["mining"] = dict(selected=len(selected), status_counts=dict(Counter(r["status"] for r in scored)),
                          selection_source="vs20", evaluation_source="vs21", n_min=30,
                          positive_compound_min=200, positive_frequency_min=0.05, top_per_motif_mode=20,
-                         observation="same 0.01-Da bin, >=1% relative intensity; OR across single-charge adduct representatives")
+                         observation="same 0.01-Da bin, >=1% relative intensity; OR across all precursor-type representatives")
     print("mine", run["mining"]["status_counts"], flush=True)
 
 
@@ -684,11 +697,13 @@ def report(args, run, result, rows):
               "Weighted all-spectra Wilson/log intervals are descriptive sensitivity intervals using fractional counts, not independent replicate confidence intervals.",
               "Formula gating requires at least the residue's heavy-element counts; H is ignored because charge/adduct changes H stoichiometry.",
               "Collision energies are stratified by explicit units; stepped/ranged/mixed fields remain unparseable. Ties in representative peak counts keep the earliest record.",
-              "Mined bins are 0.01 Da with half-up rounding and a >=1% floor. A compound is counted once per mode, OR across single-charge precursor types; NL >=12 Da.",
+              "Mined bins are 0.01 Da with half-up rounding and a >=1% floor. A compound is counted once per mode, OR across all precursor types; NL is PRECURSORMZ minus peak m/z and >=12 Da.",
               "Discovery keeps the top 20 combined product-ion/loss bins per motif/mode by VS20 precision, then positive support, kind and bin. Formula uniqueness searches all nonnegative CHNOPS compositions within 3 mDa of the bin centre.",
               "", "Mining: " + json.dumps(run.get("mining", {}), sort_keys=True), "",
               "Exclusions (record units except explicitly unique-SMILES counters):", "", "```json", json.dumps(run.get("exclusions", {}), indent=2), "```", "",
-              "P1 cross-check is in p1_crosscheck.csv; all specified tolerance, intensity, formula, instrument and energy variants are in diagnostics_precision.csv."]
+              "P1 cross-check is in p1_crosscheck.csv; all specified tolerance, intensity, formula, instrument and energy variants are in diagnostics_precision.csv.",
+              "Both the broad P1 pentoside and strict P2 pentopyranoside are reported in motif_prevalence.csv (compounds per mode).",
+              "The formula-derived negative taurine ion is 124.007384 Da, correcting the neutral-mass rounding shown in the starting examples; the formula/electron rule is authoritative."]
     (args.out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     import matplotlib
     matplotlib.use("Agg")
@@ -786,6 +801,9 @@ def main():
         write_json(run_path, run)
         # Never expose an exception containing real library data or paths in a shared log.
         print("FAILED", type(exc).__name__, flush=True)
+        import traceback
+        for frame in traceback.extract_tb(exc.__traceback__):
+            print(Path(frame.filename).name, frame.lineno, frame.name, flush=True)
         raise SystemExit(1) from None
 
 

@@ -66,6 +66,8 @@ class ObservationTests(unittest.TestCase):
         self.assertTrue(p2.formula_gate("C20H30O4S", "HSO4"))
         self.assertFalse(p2.formula_gate("C20H30O4", "HSO4"))
         self.assertFalse(p2.formula_gate("C20H30O3S", "HSO4"))
+        self.assertTrue(p2.formula_gate("C20H30NO4P+", "C5H15NO4P"))
+        self.assertTrue(p2.formula_gate("C20H30O4S-2", "HSO4"))
 
     def test_energy_units_and_instrument_strata(self):
         self.assertEqual(p2.energy_bin("35 eV"), "eV:20-<40")
@@ -127,6 +129,15 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(p2.score_candidates(selected, [])[0]["status"], "not_estimable")
         self.assertNotIn(20020, [c["mass_bin"] for c in selected])
 
+    def test_mining_collapses_all_precursor_types_per_compound(self):
+        rows = [dict(key="synthetic", mode="pos", adduct=adduct, representative=True,
+                     motifs=["m"], mz=[mz, 150.12], intensity=[100, 10], precursor=300.2)
+                for adduct, mz in [("[M+H]+", 100.12), ("[M+2H]2+", 110.12)]]
+        compounds = p2.mining_compounds(rows)
+        self.assertEqual(len(compounds), 1)
+        self.assertIn(("product_ion", 10012), compounds[0]["bins"])
+        self.assertIn(("product_ion", 11012), compounds[0]["bins"])
+
     def test_csv_json_recomputation_and_mined_never_allowed(self):
         # A4 and A6 use the actual precision/choose/audit path on synthetic counts.
         if not HAS_RDKIT:
@@ -182,7 +193,13 @@ class ChemistryTests(unittest.TestCase):
         rows = p2.motif_rows()
         extras = p2.read_tsv(p2.HERE / "motifs-p2-extra.tsv")
         self.assertEqual(len(rows), len({r["motif_id"] for r in rows}))
-        # Public chemical definitions, not sampled from any library.
+        # Public chemical definitions, not sampled from any library. Positives are
+        # cited in the extra TSV (PubChem CID 11768891, 10917, 159864 and 190).
+        # Negatives, respectively (stereochemistry is ignored):
+        # https://pubchem.ncbi.nlm.nih.gov/compound/Methyl-beta-D-glucopyranoside
+        # https://pubchem.ncbi.nlm.nih.gov/compound/Choline
+        # https://pubchem.ncbi.nlm.nih.gov/compound/Taurine
+        # https://pubchem.ncbi.nlm.nih.gov/compound/Guanine
         fixtures = {
             "pentopyranoside": ("COC1OCC(O)C(O)C1O", "COC1OC(CO)C(O)C(O)C1O"),
             "carnitine": ("C[N+](C)(C)CC(O)CC(=O)[O-]", "C[N+](C)(C)CCO"),
