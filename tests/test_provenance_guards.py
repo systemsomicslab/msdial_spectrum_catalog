@@ -119,9 +119,9 @@ class ValidatorGuardTests(unittest.TestCase):
     def _minimal_run(self, database: Path, *, has_source_peak: int, mz, ms2_scan_index) -> None:
         storage.initialize(database)
         with storage.transaction(database) as connection:
-            connection.execute("INSERT INTO study VALUES ('s', 'test', 'A', NULL)")
+            connection.execute("INSERT INTO study(study_id, repository, accession, title) VALUES ('s', 'test', 'A', NULL)")
             connection.execute(
-                "INSERT INTO analysis_unit VALUES ('u', 's', 'unit', NULL, NULL, NULL)"
+                "INSERT INTO analysis_unit(analysis_unit_id, study_id, external_unit_id, separation_type, ion_mode, acquisition_type) VALUES ('u', 's', 'unit', NULL, NULL, NULL)"
             )
             connection.execute(
                 "INSERT INTO analysis_run(run_id, analysis_unit_id, run_fingerprint, output_directory)"

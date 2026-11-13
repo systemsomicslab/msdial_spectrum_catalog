@@ -1,0 +1,137 @@
+"""Sequential local builds, measurements and counts-only privacy verification."""
+from __future__ import annotations
+
+from contextlib import closing
+
+import json
+import platform
+import re
+import sqlite3
+import time
+from dataclasses import asdict
+from pathlib import Path
+
+from .devset import canonical_digest, git_commit, refuse_analysis_output, sha256_file
+from .linkage import ingest_unit, read_unit_metadata
+from .storage import connect
+from .validate import validate_run
+
+
+def table_counts(connection):
+    tables = [row[0] for row in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+    return {table: connection.execute('SELECT COUNT(*) FROM "' + table.replace('"', '""') + '"').fetchone()[0]
+            for table in tables}
+
+
+def privacy_scan(database):
+    pattern = re.compile(r"[A-Za-z]:[\\/][^\t]*\.(msp|lbm2?)", re.I)
+    exemptions = {("analysis_run", "output_directory"), ("artifact", "source_path"), ("sample", "raw_file_path")}
+    hits = {}
+    with closing(connect(database)) as connection:
+        for table in table_counts(connection):
+            quoted = '"' + table.replace('"', '""') + '"'
+            for col in connection.execute(f"PRAGMA table_info({quoted})"):
+                name, kind = col[1], col[2]
+                if "TEXT" not in kind.upper() or (table, name) in exemptions:
+                    continue
+                column = '"' + name.replace('"', '""') + '"'
+                count = sum(bool(pattern.search(str(row[0]))) for row in connection.execute(
+                    f"SELECT {column} FROM {quoted} WHERE {column} IS NOT NULL"))
+                if count:
+                    hits[table + "." + name] = count
+    return {"valid": not hits, "hits": sum(hits.values()), "columns": hits}
+
+
+def _write_json(path, value):
+    path = Path(path)
+    refuse_analysis_output(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def ingest_devset(database, devset, *, granularity="representative", members=True, mztab="all"):
+    database, devset = Path(database), Path(devset)
+    refuse_analysis_output(database)
+    selection = json.loads(devset.read_text(encoding="utf-8-sig"))
+    if selection.get("schema") != "msdial-annotation-devset.v1":
+        raise ValueError("unsupported development-set schema")
+    content = {key: selection[key] for key in ("campaigns", "exclusions", "subsets", "units") if key in selection}
+    if canonical_digest(content) != selection["content_sha256"]:
+        raise ValueError("development-set content digest mismatch")
+    # All preflight checks happen before mkdir/initialize/run.json creation.
+    for unit in selection["units"]:
+        _, campaign, output, _ = read_unit_metadata(unit["workspace"], handoff=unit.get("handoff_path"))
+        libraries = campaign["libraries_as_run"] + output["libraries"]
+        if any(lib.get("private") is True or str(lib.get("distribution", "")).lower() == "private" for lib in libraries):
+            if not database.name.endswith(".local-vs21.sqlite"):
+                raise ValueError("private-library catalog requires .local-vs21.sqlite suffix")
+    if database.exists() or (database.parent / "run.json").exists():
+        raise FileExistsError("build output already exists")
+    code_root = Path(__file__).resolve().parents[2]
+    result = dict(devset=str(devset), content_sha256=selection["content_sha256"],
+                  devset_sha256=sha256_file(devset), git_commit=git_commit(), pin_worktree=str(code_root),
+                  python_version=platform.python_version(),
+                  parameters=dict(granularity=granularity, members=members, mztab=mztab),
+                  units=[], local_only=True,
+                  contains="MS-DIAL annotation outputs including private-library hit identities")
+    for unit in selection["units"]:
+        entry = {"unit_key": unit["unit_key"]}
+        try:
+            report = ingest_unit(database, unit["workspace"], granularity=granularity,
+                                 members=members, mztab=mztab, handoff=unit.get("handoff_path"),
+                                 campaign_id=unit["campaign_id"])
+            validation = validate_run(database, report.run_id)
+            entry.update(report=asdict(report), validation=asdict(validation),
+                         valid=report.valid and validation.valid)
+        except Exception as error:
+            # Exception text can include private row values or input paths. Report type only.
+            entry.update(valid=False, error_type=type(error).__name__)
+        result["units"].append(entry)
+        result["db_bytes"] = database.stat().st_size if database.exists() else 0
+        _write_json(database.parent / "run.json", result)
+    result["failures"] = sum(not entry["valid"] for entry in result["units"])
+    if database.exists():
+        with closing(connect(database)) as connection:
+            result["table_counts"] = table_counts(connection)
+        result["database_sha256"] = sha256_file(database)
+    _write_json(database.parent / "run.json", result)
+    return result
+
+
+def size_probe(unit_dirs, out):
+    out = Path(out)
+    refuse_analysis_output(out)
+    if out.exists():
+        raise FileExistsError("size report already exists")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    result = dict(git_commit=git_commit(), pin_worktree=str(Path(__file__).resolve().parents[2]),
+                  python_version=platform.python_version(), units=[])
+    variants = (("full", True, "all"), ("representative", True, "all"),
+                ("representative", False, "all"), ("representative", False, "none"))
+    for unit_dir in unit_dirs:
+        unit = dict(unit_key=Path(unit_dir).name, variants=[])
+        for index, (granularity, members, mztab) in enumerate(variants):
+            database = out.parent / f"probe-{Path(unit_dir).name}-{index}.local-vs21.sqlite"
+            if database.exists():
+                raise FileExistsError("probe scratch database already exists")
+            started = time.monotonic()
+            try:
+                report = ingest_unit(database, unit_dir, granularity=granularity, members=members, mztab=mztab)
+                with closing(connect(database)) as connection:
+                    connection.execute("VACUUM")
+                    counts = table_counts(connection)
+                    try:
+                        sizes = dict(connection.execute("SELECT name, SUM(pgsize) FROM dbstat GROUP BY name"))
+                    except sqlite3.OperationalError:
+                        sizes = None
+                unit["variants"].append(dict(granularity=granularity, members=members, mztab=mztab,
+                    valid=report.valid, error_count=len(report.errors), bytes=database.stat().st_size,
+                    wall_seconds=round(time.monotonic() - started, 3), row_counts=counts, dbstat_bytes=sizes))
+            finally:
+                # Only this probe's exact scratch paths, never directories or input files.
+                for suffix in ("", "-wal", "-shm", "-journal"):
+                    Path(str(database) + suffix).unlink(missing_ok=True)
+        result["units"].append(unit)
+        _write_json(out, result)
+    return result

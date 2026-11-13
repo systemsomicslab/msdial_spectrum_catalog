@@ -23,11 +23,13 @@ def validate_run(database, run_id: str) -> ValidationReport:
     report = ValidationReport(run_id)
     connection = connect(database)
     try:
-        if connection.execute("SELECT 1 FROM analysis_run WHERE run_id = ?", (run_id,)).fetchone() is None:
+        run = connection.execute("SELECT ingest_granularity FROM analysis_run WHERE run_id = ?", (run_id,)).fetchone()
+        if run is None:
             report.errors.append("Run does not exist")
             return report
+        representative = run[0] == "representative"
         queries = {
-            "samples": "SELECT COUNT(DISTINCT sample_id) FROM feature WHERE run_id = ?",
+            "samples": "SELECT COUNT(*) FROM sample WHERE analysis_unit_id=(SELECT analysis_unit_id FROM analysis_run WHERE run_id=?)",
             "features": "SELECT COUNT(*) FROM feature WHERE run_id = ?",
             "sample_spectra": "SELECT COUNT(*) FROM spectrum WHERE run_id = ? AND spectrum_kind = 'deconvoluted'",
             "sample_ms2_spectra": "SELECT COUNT(*) FROM spectrum WHERE run_id = ? AND spectrum_kind = 'deconvoluted' AND peak_count > 0",
@@ -47,14 +49,15 @@ def validate_run(database, run_id: str) -> ValidationReport:
             "SELECT COUNT(*) FROM spectrum WHERE run_id = ? AND spectrum_kind = 'deconvoluted' AND feature_id IS NULL",
             (run_id,),
         ).fetchone()[0]
-        if missing_sample_links:
+        if missing_sample_links and not representative:
             report.errors.append(f"{missing_sample_links} sample spectra are not linked to mdpeak features")
 
         missing_member_links = connection.execute(
             """SELECT COUNT(*) FROM alignment_member
                WHERE has_source_peak = 1 AND feature_id IS NULL
+               AND (? = 0 OR is_representative = 1)
                AND alignment_feature_id IN (SELECT alignment_feature_id FROM alignment_feature WHERE run_id = ?)""",
-            (run_id,),
+            (int(representative), run_id),
         ).fetchone()[0]
         if missing_member_links:
             report.errors.append(f"{missing_member_links} alignment members reference missing sample features")
@@ -97,8 +100,15 @@ def validate_run(database, run_id: str) -> ValidationReport:
             )""",
             (run_id,),
         ).fetchone()[0]
-        if bad_representatives:
+        member_count = report.counts["alignment_members"]
+        if bad_representatives and member_count:
             report.errors.append(f"{bad_representatives} alignments do not have exactly one representative member")
+        if representative:
+            missing = connection.execute("""SELECT COUNT(*) FROM alignment_feature
+                WHERE run_id=? AND representative_sample_id IS NOT NULL AND representative_feature_id IS NULL""",
+                (run_id,)).fetchone()[0]
+            if missing:
+                report.errors.append(f"{missing} alignments lack their representative feature")
 
         if report.counts["alignments"] != report.counts["consensus_spectra"]:
             report.errors.append(
