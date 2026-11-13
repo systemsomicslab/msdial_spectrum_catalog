@@ -695,11 +695,17 @@ def main():
         if sys.platform != "win32":
             parser.error("Detached launch requires Windows")
         command = [sys.executable, "-B", str(Path(__file__).resolve())] + [x for x in sys.argv[1:] if x != "--detach"] + ["--detached-child"]
-        with open(args.out / "run.log", "ab", buffering=0) as log:
-            child = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                     creationflags=0x01000000 | 0x00000008 | 0x00000200 | 0x00004000)
-        print("Detached P2 process:", child.pid, flush=True)
+        # WMI's service creates the child independently of nested application jobs.
+        # CREATE_BREAKAWAY_FROM_JOB alone did not escape all host jobs in the smoke.
+        env = dict(os.environ, WS8_P2_COMMAND=subprocess.list2cmdline(command), WS8_P2_CWD=str(ROOT))
+        script = "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$env:WS8_P2_COMMAND; CurrentDirectory=$env:WS8_P2_CWD}; if ($r.ReturnValue -ne 0) { throw 'WMI detached launch failed' }; Write-Output $r.ProcessId"
+        pid = subprocess.check_output(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                                      env=env, text=True, creationflags=0x08000000).strip()
+        print("Detached P2 process:", pid, flush=True)
         return
+    if args.detached_child:
+        sys.stdout = open(args.out / "run.log", "a", encoding="utf-8", buffering=1)
+        sys.stderr = sys.stdout
     run_path = args.out / "run.json"
     run = json.loads(run_path.read_text(encoding="utf-8")) if run_path.exists() else {}
     if run.get("status") == "complete":

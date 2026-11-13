@@ -19,10 +19,11 @@ requires both sources for held-out validation; missing held-out support is expli
 record. All raw structures are still standardized for the VS20 overlap exclusion.
 The full run uses every record. Completed runs are immutable.
 
-`--detach` uses Windows `CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS |
-CREATE_NEW_PROCESS_GROUP | BELOW_NORMAL_PRIORITY_CLASS`, redirects to the run's
-`run.log`, and returns its child PID. The child checks it is outside every Windows
-job. The parent and each spawned chemistry worker set and verify BelowNormal via
+`--detach` uses the built-in WMI Win32_Process service to launch independently of
+nested application jobs, writes the run's `run.log`, and returns its child PID.
+The child checks it is outside every Windows job. A direct Win32 breakaway launch
+was insufficient on this host and exited before reading any inputs. The run
+process and each spawned chemistry worker set and verify BelowNormal via
 Win32. At most eight workers are permitted, and BLAS/Numba thread variables are one
 before optional imports. No ports or campaign state are accessed.
 
