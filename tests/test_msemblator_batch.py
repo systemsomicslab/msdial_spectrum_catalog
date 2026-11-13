@@ -188,6 +188,47 @@ class BatchTest(unittest.TestCase):
         run_json = json.loads((self.run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertIn("consecutive", run_json["invocations"][-1]["outcome"])
 
+    def test_an_interrupt_is_recorded_and_a_restart_resumes(self):
+        first = self.run_dir / self.plan["chunks"][0]["output_dir"]
+        work = self.msemblator / "work"
+
+        class Interrupted:  # a driver that was midway when Ctrl+C arrived
+            def __init__(self, *args, **kwargs):
+                self.pid = 0
+                first.mkdir(parents=True, exist_ok=True)
+                (first / "msemblator.log").write_text("partial\n", encoding="utf-8")
+                (work / "structure").mkdir(parents=True, exist_ok=True)
+
+            def communicate(self, timeout=None):
+                raise KeyboardInterrupt
+
+        real_popen, real_kill = batch.subprocess.Popen, batch.kill_tree
+
+        def popen(command, *args, **kwargs):  # only the driver call is interrupted; git etc. run for real
+            if str(self.fake.resolve()) in [str(c) for c in command]:
+                return Interrupted()
+            return real_popen(command, *args, **kwargs)
+
+        batch.subprocess.Popen, batch.kill_tree = popen, lambda process: None
+        try:
+            self.assertEqual(self._run(), 1)
+        finally:
+            batch.subprocess.Popen, batch.kill_tree = real_popen, real_kill
+        invocation = json.loads((self.run_dir / "run.json").read_text(encoding="utf-8"))["invocations"][-1]
+        self.assertEqual(invocation["outcome"], f"interrupted during {self.plan['chunks'][0]['chunk_id']}")
+        self.assertIn("finished_at", invocation)
+        self.assertNotIn("subscription_limits_after", invocation)
+        self.assertFalse((self.root / batch.LOCK_NAME).exists(), "the lock must be released")
+        self.assertFalse(work.exists(), "the work folder must be moved into the chunk's bundle")
+        self.assertTrue((first / "work" / "structure").is_dir())
+        event = json.loads((self.run_dir / "batch_events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertIsNone(event["exit_code"])
+        self.assertIn("interrupted", event["reason"])
+        # a restart sets the partial bundle aside and reruns the chunk as its second attempt
+        self.assertEqual(self._run(), 0)
+        self.assertTrue(first.with_name(first.name + ".failed-1").is_dir())
+        self.assertEqual(batch.status(self.run_dir / "plan.json")["chunks"]["done"], 6)
+
     def test_refused_driver_stops_the_batch(self):
         self.assertEqual(self._run(exits="3"), 1)
         self.assertEqual(self._calls(), 1)

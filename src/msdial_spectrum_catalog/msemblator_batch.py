@@ -26,6 +26,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -298,6 +299,14 @@ def kill_tree(process: subprocess.Popen) -> None:
     process.wait()
 
 
+def rescue_work(root: Path, output: Path) -> None:
+    """Move MS-Emblator's shared work folder into the chunk's bundle after the driver was killed."""
+    work = root / "work"
+    if work.exists():
+        output.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(work), str(output / "work"))
+
+
 def library_hashes(root: Path) -> dict:
     hashes = {}
     for name in ("MsfinderStructureDB_all.txt", "metfrag_StructureDB.txt", "sirius_structure_db.siriusdb"):
@@ -394,10 +403,18 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
                 except subprocess.TimeoutExpired:
                     kill_tree(process)
                     exit_code, stderr, reason = 2, b"", f"timeout after {chunk_timeout} s; process tree killed"
-                    work = root / "work"
-                    if work.exists():
-                        output.mkdir(parents=True, exist_ok=True)
-                        shutil.move(str(work), str(output / "work"))
+                    rescue_work(root, output)
+                except KeyboardInterrupt:
+                    # Ctrl+C or Ctrl+Break: stop the chunk, keep what it wrote, and leave MS-Emblator's work
+                    # folder free so a restart is not refused. The attempt counts as a failed one.
+                    kill_tree(process)
+                    rescue_work(root, output)
+                    append_event(run_dir, {"chunk_id": chunk["chunk_id"], "attempt": attempts + 1,
+                                           "started_at": started, "finished_at": now(), "exit_code": None,
+                                           "reason": "interrupted (Ctrl+C or Ctrl+Break); process tree killed",
+                                           "failed_steps": None, "stderr_tail": ""})
+                    outcome = f"interrupted during {chunk['chunk_id']}"
+                    raise _Stop
                 attempts += 1
                 record = read_record(output)
                 if record is None and reason is None and exit_code != EXIT_REFUSED:
@@ -423,17 +440,22 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
                 consecutive = 0
     except _Stop:
         pass
+    except KeyboardInterrupt:  # between chunks
+        outcome = "interrupted between chunks"
     finally:
+        # Record the outcome and free the lock first: whoever sent an interrupt may kill the process soon
+        # after, and the limits query below starts SIRIUS, which takes seconds.
         invocation["finished_at"] = now()
         invocation["outcome"] = outcome
         invocation["chunks_attempted"] = ran
-        if sirius_directory is not None:
+        update_run_json(run_dir, invocation)
+        release_lock(lock_path)
+        if sirius_directory is not None and not outcome.startswith("interrupted"):
             try:
                 invocation["subscription_limits_after"] = subscription_limits(str(sirius_directory))
             except Exception as error:
                 invocation["subscription_limits_after"] = f"not read: {type(error).__name__}"
-        update_run_json(run_dir, invocation)
-        release_lock(lock_path)
+            update_run_json(run_dir, invocation)
     print(outcome)
     return EXIT_OK if outcome.startswith(("completed", "stopped: --limit")) else 1
 
@@ -642,6 +664,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "run":
         root = args.msemblator_root
+        if hasattr(signal, "SIGBREAK"):  # Windows: Ctrl+Break would otherwise end Python without cleanup
+            signal.signal(signal.SIGBREAK, signal.default_int_handler)
         return run_batch(args.plan, root, args.python, lock_path=args.lock, limit=args.limit,
                          max_attempts=args.max_attempts, stop_after=args.stop_after,
                          chunk_timeout=args.chunk_timeout, hash_libraries=not args.no_library_hash,

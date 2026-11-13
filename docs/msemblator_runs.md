@@ -68,6 +68,11 @@ python -m msdial_spectrum_catalog.msemblator_batch run --plan <run>\plan.json --
   `cNNN.failed-<n>` and run again, up to `--max-attempts` (2) in all.
 - Stops: after `--stop-after` (3) consecutive chunks failing on login or the web service; when the driver
   refuses (exit 3); when `<run>\STOP` exists; after `--limit` chunks.
+- Interrupts: on Ctrl+C or Ctrl+Break the runner kills the running chunk's process tree, moves
+  MS-Emblator's `work\` into that chunk's bundle, appends an event with `exit_code: null`, writes the
+  outcome `interrupted during <chunk_id>` to `run.json` and frees the lock before anything slow (the usage
+  limits are not queried after an interrupt). A restart sets the partial bundle aside as a failed attempt
+  and runs the chunk again. Prefer the `STOP` file: it ends the batch between chunks and loses nothing.
 - `run.json` records each invocation: the catalog and MS-Emblator commits (and whether either checkout was
   dirty), the interpreters, the parameter-file and library sha256, the affinity mask, the usage limits
   SIRIUS reports (the allowlisted keys only), and the start, end and outcome.
