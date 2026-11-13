@@ -46,7 +46,7 @@ def main(argv=None) -> int:
     build_parser.add_argument("--campaign", action="append", required=True)
     build_parser.add_argument("--exclude", action="append", default=[])
     build_parser.add_argument("--snapshot", action="store_true")
-    build_parser.add_argument("--name", default="mbpost-devset")
+    build_parser.add_argument("--name")
     build_parser.add_argument("--out", required=True)
     build_parser.add_argument("--force-new-date", action="store_true")
     init_parser = subparsers.add_parser("init", help="Initialize a catalog database")

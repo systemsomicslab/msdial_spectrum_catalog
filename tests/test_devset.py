@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -21,7 +22,7 @@ class DevsetTests(unittest.TestCase):
             CREATE TABLE unit(unit_key TEXT, state TEXT, workspace TEXT,
               catalog_unit_id TEXT, parent_unit_key TEXT, role TEXT,
               repository TEXT, accession TEXT, ion_mode TEXT, instrument TEXT, handoff_path TEXT);
-            CREATE TABLE transition(unit_key TEXT, to_state TEXT, seq INTEGER);
+            CREATE TABLE transition(unit_key TEXT, to_state TEXT, seq INTEGER, at TEXT);
         """)
         for n, key in enumerate(("part", "excluded", "pending")):
             unit = self.root / key
@@ -35,7 +36,7 @@ class DevsetTests(unittest.TestCase):
             self.writer.execute("INSERT INTO unit VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                 (key, state, str(unit), "parent", "parent", "part",
                                  "synthetic", "S1", "Both", "Invented", None))
-            self.writer.execute("INSERT INTO transition VALUES (?, ?, ?)", (key, state, n))
+            self.writer.execute("INSERT INTO transition VALUES (?, ?, ?, '2026-11-13T00:00:00Z')", (key, state, n))
         self.writer.commit()
         self.addCleanup(self.writer.close)
 
@@ -65,7 +66,8 @@ class DevsetTests(unittest.TestCase):
 
     def test_live_wal_requires_snapshot_and_snapshot_sees_done(self):
         self.writer.execute("PRAGMA journal_mode=WAL")
-        self.writer.execute("INSERT INTO transition VALUES ('part', 'done', 100)")
+        self.writer.execute("UPDATE unit SET state='done' WHERE unit_key='pending'")
+        self.writer.execute("INSERT INTO transition VALUES ('pending', 'done', 100, '2026-11-13T01:00:00Z')")
         self.writer.commit()
         self.assertGreater(ledger_state(self.ledger)["wal_bytes"], 0)
         with self.assertRaisesRegex(ValueError, "--snapshot"):
@@ -73,10 +75,43 @@ class DevsetTests(unittest.TestCase):
         before = ledger_state(self.ledger)
         result = self.build(snapshot=True, name="stage3b-snapshot")
         self.assertEqual(result["campaigns"][0]["read_mode"], "ro-snapshot")
-        self.assertEqual(result["campaigns"][0]["ledger_state"], before)
+        self.assertEqual(result["campaigns"][0]["ledger_state"],
+                         dict(before, after=before, max_transition_seq=100,
+                              latest_transition_at='2026-11-13T01:00:00Z'))
         self.assertEqual(before, ledger_state(self.ledger))
-        self.assertEqual({u["unit_key"] for u in result["units"]}, {"part", "excluded"})
+        self.assertEqual({u["unit_key"] for u in result["units"]}, {"part", "excluded", "pending"})
         self.assertNotIn("subsets", result)
+
+    def test_unknown_or_not_done_exclusion_raises_without_output(self):
+        for key in ("truncated", "pending"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "exclusions"):
+                self.build(exclusions={key: "invented reason"})
+        self.assertFalse((self.root / "set.json").exists())
+
+    def test_done_unit_without_transition_is_error(self):
+        self.writer.execute("DELETE FROM transition WHERE unit_key='part'")
+        self.writer.commit()
+        with self.assertRaisesRegex(ValueError, "no transition"):
+            read_done_units(self.ledger)
+
+    def test_snapshot_requires_explicit_name_and_never_has_subsets(self):
+        with self.assertRaisesRegex(ValueError, "--name"):
+            self.build(snapshot=True)
+        self.assertFalse((self.root / "set.json").exists())
+        self.assertNotIn("subsets", self.build(snapshot=True, name="mbpost-devset"))
+
+    def test_snapshot_digest_ignores_heartbeat_mtime(self):
+        self.writer.execute("PRAGMA journal_mode=WAL")
+        self.writer.execute("UPDATE unit SET instrument='Invented instrument'")
+        self.writer.commit()
+        first = self.build(snapshot=True, name="stage3b-snapshot")
+        wal = Path(str(self.ledger) + "-wal")
+        stat = wal.stat()
+        os.utime(wal, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1000000000))
+        second = self.build("again.json", snapshot=True, name="stage3b-snapshot")
+        self.assertNotEqual(first["campaigns"][0]["ledger_state"]["wal_mtime"],
+                            second["campaigns"][0]["ledger_state"]["wal_mtime"])
+        self.assertEqual(first["content_sha256"], second["content_sha256"])
 
     def test_state_disagreement_is_error(self):
         self.writer.execute("UPDATE unit SET state='running' WHERE unit_key='part'")

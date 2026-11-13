@@ -39,8 +39,10 @@ Read these rules before editing. Sources are the annotation roadmap charter
   `0fa0a96b…4804f`, `MSMS-Private-neg-VS21.msp` `7e2581ab…dc4d132f`.
   GLACIER-VS15 and campaign `Msp20261013094720_NCDK-TUAT-LC25_no-unknown-db.lbm2`
   follow the same rules; the public Zenodo LBM2 is a different file.
-- Never publish private-library content, hit names, InChIKeys, SMILES, library
-  records or library paths in commits, fixtures, PRs, issues or shared logs/reports.
+- Charter O2 permits publishing hit identities on experimental spectra, citing
+  the library by name and sha256. Private reference spectra, record text, library
+  files and library paths never leave the machine. WS1 commits, fixtures, PRs
+  and shared logs/reports carry counts only, with no hit identities.
   Never send private reference spectra to SIRIUS. Private catalogs are local only
   and end in `.local-vs21.sqlite`.
 - Only `linkage.read_annotator_settings` opens `msp_annotator_settings.tsv`.
@@ -62,7 +64,7 @@ Read these rules before editing. Sources are the annotation roadmap charter
 
 - One worktree per agent (C10); never switch or modify another checkout. Add
   detached build pins only from your worktree, under
-  `D:\0_SourceCode\msdial_spectrum_catalog-pins\<sha>` (WS0 dispatch override).
+  `D:\0_SourceCode\msdial_spectrum_catalog-pin-<sha>` (charter C10).
   Build from committed, pushed pins and record commit and pin path in run.json.
 - C7 outputs live at `annotation\<ws-short-name>\<run-id>\` with run.json
   recording input checksums, code commit, environment and parameters. WS1 writes

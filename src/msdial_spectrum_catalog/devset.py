@@ -25,6 +25,16 @@ def sha256_file(path):
 
 
 def canonical_digest(value):
+    if isinstance(value, dict) and "campaigns" in value:
+        # File mtimes are operational observations, not selection identity:
+        # runner heartbeats can update them without changing a transition.
+        def without_mtimes(item):
+            if isinstance(item, dict):
+                return {k: without_mtimes(v) for k, v in item.items()
+                        if k not in {"ledger_mtime", "wal_mtime"}}
+            return item
+        value = dict(value, campaigns=[dict(c, ledger_state=without_mtimes(c.get("ledger_state")))
+                                      for c in value["campaigns"]])
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
                                     separators=(",", ":")).encode("utf-8")).hexdigest()
 
@@ -65,18 +75,20 @@ def read_done_units(path, *, snapshot=False):
         try:
             connection.execute("BEGIN")
             transitions = connection.execute(
-                "SELECT unit_key, to_state FROM transition ORDER BY seq").fetchall()
+                "SELECT unit_key, to_state, seq, at FROM transition ORDER BY seq").fetchall()
             units = connection.execute("SELECT * FROM unit ORDER BY unit_key").fetchall()
-            return dict((r[0], r[1]) for r in transitions), [dict(r) for r in units]
+            logical_state = dict(max_transition_seq=transitions[-1][2] if transitions else None,
+                                 latest_transition_at=transitions[-1][3] if transitions else None)
+            return dict((r[0], r[1]) for r in transitions), [dict(r) for r in units], logical_state
         finally:
             connection.close()
     read_mode = "ro-snapshot" if snapshot else "ro"
     try:
-        latest, units = read(uri)
+        latest, units, logical_state = read(uri)
     except sqlite3.OperationalError:
         if snapshot or ledger_state(path)["wal_bytes"]:
             raise
-        latest, units = read(uri + "&immutable=1")
+        latest, units, logical_state = read(uri + "&immutable=1")
         read_mode = "ro-immutable"
     after = ledger_state(path)
     if before != after:
@@ -87,11 +99,13 @@ def read_done_units(path, *, snapshot=False):
         raise ValueError("transition references an absent unit")
     for unit in units:
         state = latest.get(unit["unit_key"])
+        if state is None and unit.get("state") == "done":
+            raise ValueError("done unit has no transition")
         if state is not None and unit.get("state") != state:
             raise ValueError("unit.state disagrees with latest transition")
         if state == "done":
             selected.append(unit)
-    return selected, read_mode, before if snapshot else None
+    return selected, read_mode, dict(before, after=after, **logical_state) if snapshot else None
 
 
 def describe_unit(campaign, unit):
@@ -129,7 +143,10 @@ def describe_unit(campaign, unit):
 
 
 def build_devset(campaigns_root, campaigns, out, *, exclusions=None, snapshot=False,
-                 name="mbpost-devset", force_new_date=False, command=None):
+                 name=None, force_new_date=False, command=None):
+    if snapshot and not name:
+        raise ValueError("--snapshot requires --name")
+    name = name or "mbpost-devset"
     out = Path(out)
     refuse_analysis_output(out)
     if out.exists() and not force_new_date:
@@ -151,11 +168,13 @@ def build_devset(campaigns_root, campaigns, out, *, exclusions=None, snapshot=Fa
             seen.add(key)
             if key not in exclusions:
                 units.append(describe_unit(campaign, unit))
+    if set(exclusions) - seen:
+        raise ValueError("exclusions do not match selected done units")
     units.sort(key=lambda u: (u["campaign_id"], u["unit_key"]))
     content = dict(campaigns=campaign_rows,
                    exclusions=[dict(unit_key=k, reason=v) for k, v in sorted(exclusions.items())],
                    units=units)
-    if name == "mbpost-devset":
+    if name == "mbpost-devset" and not snapshot:
         content["subsets"] = {"smoke": [k for k in SMOKE if k in seen and k not in exclusions],
                               "small": [k for k in SMALL if k in seen and k not in exclusions]}
     result = dict(schema="msdial-annotation-devset.v1", name=name,
