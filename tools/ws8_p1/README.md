@@ -46,6 +46,9 @@ rechecked in both families; if confidence becomes nonmonotone, the next common p
 used. If an axis has no passing value it is null; partial estimability is explicit. Global axes are
 the maxima over estimable k, with missing k listed; no value is invented for an unestimable axis.
 The evidence objects identify family-specific support on the written cumulative curves.
+Truth-fraction diagnostics show thresholds through 1.0; the final point bin also counts values
+above 1.0, for which containment is impossible. Library structure rejection counts refer to
+unique raw-SMILES/adduct representatives; unusable-spectrum counts refer to input records.
 
 All real-data row files stay beneath the assigned run directory. Combined scratch files and every
 VS21 row artifact have `.local-vs21.` in the filename. Deterministic sets artifacts exclude timing;

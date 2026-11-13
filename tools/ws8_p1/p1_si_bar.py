@@ -29,6 +29,31 @@ FAMILIES = ("spectral_nn", "spectral_nn_any", "spectral_nn_scaffold", "same_form
 BAR_FAMILIES = ("spectral_nn", "same_formula_db_random")
 BINS = ("4-15", "16-25", "26-40", "41-80")
 THREAD_VARS = ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+METHOD_PARAMETERS = {
+    "standardisation": {"largest_fragment": "heavy atom count; canonical SMILES tie break",
+                        "neutralisation": "rdMolStandardize.Uncharger defaults", "remove_stereo": True,
+                        "remove_isotopes": True, "remove_explicit_hydrogens": True, "reject_radicals": True,
+                        "allowed_elements": ["C", "H", "N", "O", "P", "S", "F", "Cl", "Br", "I", "Si", "B", "Se"],
+                        "min_heavy_atoms": 4, "max_heavy_atoms": 80},
+    "truths": {"key": "recomputed InChIKey constitution block", "representative": "most usable peaks",
+               "adducts": ["[M+H]+", "[M-H]-"], "heavy_atom_bins": list(BINS),
+               "lipid": "structure DB LIPID MAPS ID or shorthand prefix", "vs21_exclude_all_vs20_truths": True},
+    "morgan": {"radius": 2, "bits": 2048, "metric": "Tanimoto"},
+    "sets": {"k": [2, 3, 4, 5], "nested": True, "truth_excluded": True,
+             "families": list(FAMILIES), "random_fallback": ["same_formula", "nominal_mass_0", "nominal_mass_plus_minus_1"],
+             "scaffold": "Murcko; empty or truth-identical makes set unavailable"},
+    "chance": {"quantile": 0.95, "quantile_method": "linear", "formula_sampling": "uniform within heavy-atom bin",
+               "minimum_formula_members": "k+1", "member_sampling": "uniform without replacement"},
+    "curves": {"atomic_point_bins": "1..30,31..40,41..60,61..80", "atomic_thresholds": "1..80",
+               "fraction_step": 0.05, "fraction_overflow": "truth fraction >=1 shares final point bin",
+               "exclude_timeouts": True, "exclude_empty": True, "exclude_motif_oversample": True,
+               "timeout_flag_above": 0.02, "interval": "Wilson 95%, z=1.959963984540054"},
+    "bar": {"families": list(BAR_FAMILIES), "strictly_above_matched_chance95": True,
+            "recheck_both_families_at_final_bar": True, "global": "maximum over estimable k; list unavailable k"},
+    "pilot_fraction": 0.05,
+    "rejection_count_units": {"db": "input rows", "library_structure": "unique raw SMILES/adduct representatives",
+                              "unusable_spectrum": "input records"},
+}
 for _var in THREAD_VARS:
     os.environ[_var] = "1"
 
@@ -782,6 +807,7 @@ def main(argv=None):
                         "matchms": matchms.__version__, "numpy": np.__version__},
         "parameters": {"pilot": args.pilot, "sources": args.sources, "workers": args.workers, "seed": args.seed,
                        "per_stratum_cap": args.cap, "target": args.target, "n_min": args.n_min,
+                       "method": METHOD_PARAMETERS,
                        "unconditional_per_cell": 50 if args.pilot else 1000, "motif_extra_cap": 8 if args.pilot else 150,
                        "spectral": {"class": "matchms.similarity.ModifiedCosineGreedy", "tolerance": 0.02,
                                     "mz_power": 0, "intensity_power": 1, "min_matches": 6, "score_floor": 0.6,
@@ -808,6 +834,9 @@ def main(argv=None):
             if stage == "prepare" and args.reuse_prepare:
                 import shutil
                 previous = json.loads((args.reuse_prepare / "run.json").read_text(encoding="utf-8"))
+                expected_sampling = {"pilot": args.pilot, "per_stratum_cap": args.cap, "sources": args.sources, "seed": args.seed}
+                if any(previous["parameters"].get(k) != value for k, value in expected_sampling.items()):
+                    raise ValueError("Prepared inputs have different truth-sampling parameters")
                 for path in args.reuse_prepare.iterdir():
                     if path.name.startswith(("prepared.", "libraries.", "truths.")):
                         shutil.copyfile(path, args.out / path.name)
