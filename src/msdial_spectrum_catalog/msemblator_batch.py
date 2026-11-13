@@ -32,7 +32,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .msemblator_driver import EXIT_OK, EXIT_REFUSED, git_commit, git_dirty, sha256, subscription_limits
+from .msemblator_driver import (EXIT_OK, EXIT_REFUSED, git_commit, git_dirty, parse_log, rankers, sha256,
+                                subscription_limits)
 from .msemblator_export import export_unit
 
 PLAN_SCHEMA = "msemblator-batch-plan.v1"
@@ -536,6 +537,31 @@ def throughput(plan_path: Path, targets: dict[str, int], first: int | None = Non
     return result
 
 
+def backfill_rankers(plan_path: Path, msemblator_root: Path) -> list[str]:
+    """Add `rankers` to chunk records written before the driver recorded it, from each chunk's own log.
+
+    The record says it was backfilled, by which code and when; nothing else in it changes. The model files
+    are hashed as installed now, so run this only while the same asset set is installed.
+    """
+    run_dir = plan_path.parent
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    changed = []
+    for chunk in plan["chunks"]:
+        output = run_dir / chunk["output_dir"]
+        record = read_record(output)
+        log = output / "msemblator.log"
+        if record is None or "rankers" in record or not log.is_file():
+            continue
+        loaded = parse_log(log.read_text(encoding="utf-8").splitlines())["ranker_models"]
+        record["rankers"] = rankers(loaded, msemblator_root.resolve())
+        record["rankers_backfilled"] = {"from": "msemblator.log", "at": now(),
+                                        "by_catalog_commit": git_commit(Path(__file__).resolve().parents[2])}
+        (output / "msemblator_run.json").write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n",
+                                                    encoding="utf-8")
+        changed.append(chunk["chunk_id"])
+    return changed
+
+
 # ----------------------------------------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
@@ -566,6 +592,10 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--model-assets", help="key=value,... identifying the installed model/library asset "
                                                    "set (e.g. zenodo_record=...,file=...,md5=...)")
 
+    backfill_parser = commands.add_parser("backfill-rankers", help="Add the rankers field to older records")
+    backfill_parser.add_argument("--plan", required=True, type=Path)
+    backfill_parser.add_argument("--msemblator-root", required=True, type=Path)
+
     status_parser = commands.add_parser("status", help="Summarise plan.json against the chunk records")
     status_parser.add_argument("--plan", required=True, type=Path)
 
@@ -590,6 +620,9 @@ def main(argv: list[str] | None = None) -> int:
                          max_attempts=args.max_attempts, stop_after=args.stop_after,
                          chunk_timeout=args.chunk_timeout, hash_libraries=not args.no_library_hash,
                          sirius_directory=root / "external" / "sirius", model_assets=args.model_assets)
+    if args.command == "backfill-rankers":
+        print(json.dumps(backfill_rankers(args.plan, args.msemblator_root), indent=2))
+        return 0
     if args.command == "status":
         print(json.dumps(status(args.plan), indent=2))
         return 0

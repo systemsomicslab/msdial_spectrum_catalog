@@ -96,7 +96,9 @@ chunk's sha256), `input_records`, `manifest`, `parameter_file_sha256`, `started_
 `duration_seconds`, `exit_code`, `error`, `login_ok`, `failed_steps` (for example
 `["structure:MetFrag"]`; `[]` when clean), `stage_seconds` (`formula.sirius`, `formula.msfinder`,
 `formula.msbuddy`, `formula.summary`, `formula.total`, `structure.sirius`, `structure.metfrag`,
-`structure.msfinder`, `structure.summary`), `service_error_lines`, `name_map_ok`, `name_map`
+`structure.msfinder`, `structure.summary`), `rankers` (per step, the ranking model MS-Emblator loaded:
+`file`, `ranker` as `xgboost`, `catboost` or `lgbm`, and `sha256`; a score's identity is
+`msemblator.<step>.rank_score.<ranker>`), `service_error_lines`, `name_map_ok`, `name_map`
 (`records`, `sent_to_structure`, `skipped_no_formula`, `problems`), `metfrag_files`, `harvest`
 (`{relative path: {sha256, bytes}}`), `canopus_summary_files`, `outputs` (`{csv: sha256}`) and
 `environment` (MS-Emblator commit and dirty flag, model sha256, library DB size and mtime, Python, affinity

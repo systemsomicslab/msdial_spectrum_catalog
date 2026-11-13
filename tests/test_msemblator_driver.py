@@ -59,6 +59,7 @@ def main():
         print(f"{tool} processing start")
         time.sleep(0.01)
         print(f"{tool} processing complete")
+    print("Formula ranking model: xgbranker_final_all.pkl")
     print("Processing completed in 0.5 seconds.")
     print("Logged in as: someone@example.org")
     print('{"sid": "abc123", "subscriberId": "x"}')
@@ -122,6 +123,7 @@ def make_stub_root(base: Path) -> Path:
     (root / "external" / "metfrag" / "MetFragCommandLine-2.5.0.jar").write_bytes(b"jar")
     (root / "models" / "formula").mkdir(parents=True)
     (root / "models" / "formula" / "pipeline_sirius_score.pkl").write_bytes(b"model")
+    (root / "models" / "formula" / "xgbranker_final_all.pkl").write_bytes(b"ranker")
     (root / "library").mkdir()
     (root / "library" / "metfrag_StructureDB.txt").write_text("InChIKey1\n", encoding="utf-8")
     return root
@@ -185,6 +187,9 @@ class DriverTest(unittest.TestCase):
         self.assertIn("formula.sirius", record["stage_seconds"])
         self.assertIn("formula.total", record["stage_seconds"])
         self.assertEqual(record["environment"]["model_assets"], {"zenodo_record": "123", "md5": "abc"})
+        self.assertEqual(record["rankers"]["formula"],
+                         {"file": "xgbranker_final_all.pkl", "ranker": "xgboost",
+                          "sha256": driver.sha256(self.root / "models" / "formula" / "xgbranker_final_all.pkl")})
         self.assertIn("third_party_data", record["environment"])
         self.assertEqual(record["environment"]["model_sha256"]["formula/pipeline_sirius_score.pkl"],
                          driver.sha256(self.root / "models" / "formula" / "pipeline_sirius_score.pkl"))
@@ -264,6 +269,7 @@ class ParseLogTest(unittest.TestCase):
             "2026-11-13T00:00:00.000000+00:00 Running formula elucidation",
             "2026-11-13T00:00:01.000000+00:00 SIRIUS processing start",
             "2026-11-13T00:00:05.000000+00:00 SIRIUS processing complete",
+            "2026-11-13T00:00:05.500000+00:00 Formula ranking model: xgbranker_final_all.pkl",
             "2026-11-13T00:00:06.000000+00:00 Processing completed in 6.0 seconds.",
             "2026-11-13T00:00:07.000000+00:00 Running structure elucidation",
             "2026-11-13T00:00:08.000000+00:00 2026-11-13 09:00:08 - INFO - SIRIUS processing time: 30.00 seconds",
@@ -277,6 +283,7 @@ class ParseLogTest(unittest.TestCase):
         self.assertEqual(parsed["stage_seconds"]["structure.sirius"], 30.0)
         self.assertEqual(parsed["failed_steps"], ["formula:SIRIUS", "formula:msbuddy"])
         self.assertEqual(parsed["service_error_lines"], 1)
+        self.assertEqual(parsed["ranker_models"], {"formula": "xgbranker_final_all.pkl"})
 
     def test_third_party_data_records_msbuddy_files_with_their_source(self):
         import importlib

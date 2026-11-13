@@ -201,6 +201,21 @@ class BatchTest(unittest.TestCase):
             batch.make_plan(self.units, target, "run", chunk_size=3, chunk_size_origin="test")
         self.assertFalse((target / "plan.json").exists())
 
+    def test_backfill_rankers_marks_the_record(self):
+        self._run(limit=1)
+        output = self.run_dir / self.plan["chunks"][0]["output_dir"]
+        (output / "msemblator.log").write_text(
+            "2026-11-13T00:00:00.000000+00:00 Structure ranking model: catboostranker_final_all.pkl\n",
+            encoding="utf-8")
+        (self.msemblator / "models" / "structure").mkdir(parents=True)
+        (self.msemblator / "models" / "structure" / "catboostranker_final_all.pkl").write_bytes(b"m")
+        changed = batch.backfill_rankers(self.run_dir / "plan.json", self.msemblator)
+        self.assertEqual(changed, [self.plan["chunks"][0]["chunk_id"]])
+        record = json.loads((output / "msemblator_run.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["rankers"]["structure"]["ranker"], "catboost")
+        self.assertEqual(record["rankers_backfilled"]["from"], "msemblator.log")
+        self.assertEqual(batch.backfill_rankers(self.run_dir / "plan.json", self.msemblator), [])
+
     def test_throughput_and_chunk_size(self):
         self._run()
         result = batch.throughput(self.run_dir / "plan.json", {"devset": 94849})

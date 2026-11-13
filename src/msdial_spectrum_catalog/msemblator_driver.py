@@ -64,6 +64,7 @@ _FAILED_STEPS = re.compile(r"(formula|structure) elucidation completed with fail
                            re.IGNORECASE)
 _STAGE_MARK = re.compile(r"^(SIRIUS|MS-FINDER|MetFrag|msbuddy) processing (start|complete)\s*$")
 _STAGE_TIME = re.compile(r"(SIRIUS|MetFrag|MSFinder|Summary generation) (?:processing )?time: ([0-9.]+) seconds")
+_RANKER = re.compile(r"(Formula|Structure) ranking model: (\S+)")
 _FORMULA_TOTAL = re.compile(r"Processing completed in ([0-9.]+) seconds")
 _LOG_STAMP = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+\+00:00) (.*)$")
 
@@ -199,6 +200,24 @@ def third_party_data() -> dict:
     return {"msbuddy": {"version": package_version, "data_folder": "site-packages/msbuddy/data", "files": files}}
 
 
+RANKER_KINDS = {"xgbranker": "xgboost", "catboostranker": "catboost", "lgbmranker": "lgbm"}
+
+
+def rankers(loaded: dict[str, str], root: Path) -> dict:
+    """{step: {file, ranker, sha256}} for the ranking model each step loaded, as its log line names it.
+
+    MS-Emblator takes the first of xgbranker, catboostranker and lgbmranker it finds, so the score's
+    identity (rank_score.<ranker>) comes from the run, never from an assumption.
+    """
+    result = {}
+    for step, name in sorted(loaded.items()):
+        path = root / "models" / step / name
+        stem = name.split("_", 1)[0]
+        result[step] = {"file": name, "ranker": RANKER_KINDS.get(stem, stem),
+                        "sha256": sha256(path) if path.is_file() else None}
+    return result
+
+
 def parse_assets(text: str | None) -> dict:
     """`key=value,key=value` describing the model and library asset set (e.g. its Zenodo record and md5)."""
     assets = {}
@@ -296,6 +315,7 @@ def parse_log(lines: list[str]) -> dict:
     stages: dict[str, float] = {}
     measured: dict[str, float] = {}  # the times MS-Emblator logs itself win over the start/complete marks
     failed: list[str] = []
+    rankers: dict[str, str] = {}
     service_errors = 0
     formula_tool_end = None
     for raw in lines:
@@ -334,12 +354,17 @@ def parse_log(lines: list[str]) -> dict:
             if formula_tool_end is not None:
                 stages["formula.summary"] = round((stamp - formula_tool_end).total_seconds(), 3)
             continue
+        ranker = _RANKER.search(text)
+        if ranker:
+            rankers[ranker.group(1).lower()] = ranker.group(2)
+            continue
         failed_match = _FAILED_STEPS.search(text)
         if failed_match:
             step = failed_match.group(1).lower()
             failed += [f"{step}:{tool.strip()}" for tool in failed_match.group(2).split(",") if tool.strip()]
     stages.update(measured)
-    return {"stage_seconds": stages, "failed_steps": failed, "service_error_lines": service_errors}
+    return {"stage_seconds": stages, "failed_steps": failed, "service_error_lines": service_errors,
+            "ranker_models": rankers}
 
 
 def read_msp_names(path: Path) -> list[tuple[str, dict[str, str]]]:
@@ -557,6 +582,7 @@ def run(args: argparse.Namespace) -> int:
     record["stage_seconds"] = parsed["stage_seconds"]
     record["failed_steps"] = parsed["failed_steps"]
     record["service_error_lines"] = parsed["service_error_lines"]
+    record["rankers"] = rankers(parsed["ranker_models"], root)
     record["metfrag_files"] = copy_metfrag(root, output, started.timestamp() - 1)
 
     rows, problems = build_name_map(args.input, output / "work", args.manifest)

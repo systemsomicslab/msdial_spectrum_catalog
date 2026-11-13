@@ -41,8 +41,9 @@ from pathlib import Path
 TOOL_FORMULA = "msemblator.formula"
 TOOL_STRUCTURE = "msemblator.structure"
 TOOL_CANOPUS = "sirius.canopus"
-SCORE_FORMULA = "msemblator.formula.rank_score.catboost"
-SCORE_STRUCTURE = "msemblator.structure.rank_score.catboost"
+# score_type is msemblator.<step>.rank_score.<ranker>, the ranker taken from the run records (WS0 ruling,
+# 2026-11-13): MS-Emblator loads the first of xgbranker, catboostranker, lgbmranker it finds.
+SCORE_TEMPLATE = "msemblator.{step}.rank_score.{ranker}"
 POSTERIOR_MSEMBLATOR = "msemblator.softmax_top10"
 POSTERIOR_CANOPUS = "sirius.canopus.posterior"
 
@@ -286,6 +287,7 @@ def evaluate(run: Path, icd: Path, databases: list[str]) -> tuple[list[dict], di
     smiles_cache: dict[str, str] = {}
     rows: list[dict] = []
     not_run: list[str] = []
+    rankers_seen: dict[str, set] = defaultdict(set)
     canopus_columns: dict[str, list[str]] = {}
     for export in plan["exports"]:
         if export["selection"] != "benchmark":
@@ -320,6 +322,8 @@ def evaluate(run: Path, icd: Path, databases: list[str]) -> tuple[list[dict], di
                     if name and name not in canopus:
                         canopus[name] = row
             exit_code = (outputs.record or {}).get("exit_code")
+            for step, ranker in ((outputs.record or {}).get("rankers") or {}).items():
+                rankers_seen[step].add((ranker.get("ranker"), ranker.get("file"), ranker.get("sha256")))
             chunk_names = [line[5:].strip() for line in
                            (run / chunk["chunk"]).read_text(encoding="utf-8").splitlines()
                            if line.upper().startswith("NAME:")]
@@ -400,6 +404,7 @@ def evaluate(run: Path, icd: Path, databases: list[str]) -> tuple[list[dict], di
                 })
     context = {"plan": plan, "databases": db_described, "canopus_columns": canopus_columns,
                "not_run": len(not_run),
+               "rankers": {step: sorted(values, key=str) for step, values in rankers_seen.items()},
                "icd": {"file": icd.name, "sha256": sha256(icd), "rows": len(full)}}
     return rows, context
 
@@ -425,8 +430,17 @@ def denominators(rows: list[dict]) -> dict[str, list[dict]]:
     }
 
 
+def score_type(context: dict, step: str) -> str:
+    """The step's score identity; 'unknown' or 'mixed' when the records do not name exactly one ranker."""
+    seen = {ranker for ranker, _, _ in context.get("rankers", {}).get(step, [])}
+    if len(seen) == 1:
+        return SCORE_TEMPLATE.format(step=step, ranker=next(iter(seen)))
+    return SCORE_TEMPLATE.format(step=step, ranker="mixed" if seen else "unknown")
+
+
 def summarise(rows: list[dict], context: dict, benchmark_id: str, citation: dict) -> dict:
     groups = denominators(rows)
+    score_formula, score_structure = score_type(context, "formula"), score_type(context, "structure")
     structure = {name: rates(group, "rank_structure", STRUCTURE_K) for name, group in groups.items()}
     formula = {name: rates(group, "rank_formula", FORMULA_K) for name, group in groups.items()}
     baselines = {
@@ -498,10 +512,12 @@ def summarise(rows: list[dict], context: dict, benchmark_id: str, citation: dict
             "with_reference_direct_parent": len(with_parent),
             "icd_coverage": wilson(len(with_parent), len(rows)),
             "skipped_no_formula": sum(r["structure_step"] == "skipped_no_formula" for r in rows)},
-        "structure": {"tool": TOOL_STRUCTURE, "score_type": SCORE_STRUCTURE,
+        "rankers": {step: [{"ranker": r, "file": f, "sha256": h} for r, f, h in values]
+                    for step, values in context.get("rankers", {}).items()},
+        "structure": {"tool": TOOL_STRUCTURE, "score_type": score_structure,
                       "posterior_type": POSTERIOR_MSEMBLATOR, "match": "first InChIKey block (RDKit from SMILES)",
                       "denominators": structure},
-        "formula": {"tool": TOOL_FORMULA, "score_type": SCORE_FORMULA, "posterior_type": POSTERIOR_MSEMBLATOR,
+        "formula": {"tool": TOOL_FORMULA, "score_type": score_formula, "posterior_type": POSTERIOR_MSEMBLATOR,
                     "match": "Hill-normalised neutral formula, minimum rank across adduct groups",
                     "denominators": formula},
         "baselines": baselines,
@@ -516,7 +532,7 @@ def summarise(rows: list[dict], context: dict, benchmark_id: str, citation: dict
             "structure_hit@5": round(sum(unit_rates5) / len(unit_rates5), 4) if unit_rates5 else None,
             "formula_hit@1": round(sum(unit_formula) / len(unit_formula), 4) if unit_formula else None},
         "strata": strata,
-        "closure_by_top1_margin": {"tool": TOOL_STRUCTURE, "score_type": SCORE_STRUCTURE,
+        "closure_by_top1_margin": {"tool": TOOL_STRUCTURE, "score_type": score_structure,
                                    "margin": "rank_score(top1) - rank_score(top2)", "rows": closure},
         "caveats": [
             "Q3: CANOPUS is conditional on MS-Emblator's top-1 formula; class agreement with a wrong formula is "
