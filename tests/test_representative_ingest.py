@@ -29,6 +29,7 @@ class RepresentativeTests(unittest.TestCase):
         validation = validate_run(self.db, report.run_id)
         self.assertTrue(validation.valid, validation.errors)
         self.assertEqual(validation.counts["sample_spectra"], 0)
+        self.assertNotIn("No sample deconvoluted spectrum contains fragment peaks", validation.warnings)
         with closing(sqlite3.connect(self.db)) as c, c:
             self.assertEqual(c.execute("SELECT COUNT(*) FROM msdial_annotation_result WHERE subject_kind='feature'").fetchone()[0], 0)
             self.assertEqual(c.execute("SELECT COUNT(*) FROM alignment_feature WHERE representative_feature_id IS NOT NULL").fetchone()[0], 2)

@@ -207,7 +207,7 @@ def validate_run(database, run_id: str) -> ValidationReport:
                 f"{disagreeing_winners} alignment features name a different winner in .mdalign and in the candidate set"
             )
 
-        if report.counts["sample_ms2_spectra"] == 0:
+        if report.counts["sample_ms2_spectra"] == 0 and not representative:
             report.warnings.append("No sample deconvoluted spectrum contains fragment peaks")
         if report.counts["consensus_ms2_spectra"] == 0:
             report.warnings.append("No alignment consensus spectrum contains fragment peaks")
