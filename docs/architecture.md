@@ -90,7 +90,9 @@ of the provenance/output manifests and campaign record. The directory and unit
 identifiers must agree before writing. Optional handoff attributes and reviewed
 sample TSVs are stored separately from artifacts; their labeled checksums do not
 affect run identity. Reviewed rows join by sample stem first, then the basename
-of analysis_files.csv file_path, recording the rule. Export phenotype data with
+of analysis_files.csv file_path, comparing both against reviewed sample_id and
+recording the rule. All remaining phenotype columns keep their verbatim headers.
+Export phenotype data with
 `export-sample-attributes DB --out FILE.tsv [--unit ID]`.
 
 Only linkage.read_annotator_settings projects the three allowed settings columns.

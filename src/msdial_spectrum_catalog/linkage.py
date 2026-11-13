@@ -215,11 +215,11 @@ def ingest_unit(database, unit_dir, *, granularity="full", members=True, mztab="
         matched = set()
         for sample in connection.execute("SELECT sample_id, sample_name FROM sample WHERE analysis_unit_id=?", (unit_id,)).fetchall():
             stem = sample["sample_name"]
-            matches = [(i, row) for i, row in enumerate(sample_rows) if row.get("sample_id") == stem or row.get("raw_file") == stem]
+            matches = [(i, row) for i, row in enumerate(sample_rows) if row.get("sample_id") == stem]
             rule = "stem"
             if not matches:
                 basename = ntpath.basename(analysis.get(stem, {}).get("file_path", ""))
-                matches = [(i, row) for i, row in enumerate(sample_rows) if basename and row.get("raw_file") == basename]
+                matches = [(i, row) for i, row in enumerate(sample_rows) if basename and row.get("sample_id") == basename]
                 rule = "analysis_csv_basename"
             if len(matches) != 1:
                 report.warnings.append("sample metadata unmatched or ambiguous")
@@ -232,7 +232,7 @@ def ingest_unit(database, unit_dir, *, granularity="full", members=True, mztab="
                 (row.get("sample_id"), row.get("class_id"), row.get("source_name"),
                  row.get("raw_file_paired_by"), rule, sample["sample_id"]))
             for key, value in row.items():
-                if " / " in key and value:
+                if key not in {"sample_id", "source_name", "raw_file", "raw_file_paired_by", "class_id"} and value:
                     connection.execute("INSERT OR REPLACE INTO sample_attribute VALUES (?, ?, ?, 'sample_metadata_reviewed')",
                                        (sample["sample_id"], key, value))
         if len(matched) < len(sample_rows):

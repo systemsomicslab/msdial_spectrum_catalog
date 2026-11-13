@@ -25,7 +25,7 @@ class LinkageTests(unittest.TestCase):
             self.assertEqual(c.execute("SELECT metadata_matched_by FROM sample ORDER BY sample_name").fetchall(),
                              [("stem",), ("analysis_csv_basename",)])
             self.assertEqual(c.execute("SELECT repository_sample_id, class_id FROM sample ORDER BY sample_name").fetchall(),
-                             [("sample_a", "Case"), ("repo_b", "Control")])
+                             [("sample_a", "Case"), ("sample_b.d", "Control")])
             self.assertEqual(c.execute("SELECT COUNT(*) FROM sample_attribute").fetchone()[0], 2)
             self.assertEqual(c.execute("SELECT COUNT(*) FROM run_metadata_source").fetchone()[0], 4)
             self.assertEqual(c.execute("SELECT COUNT(*) FROM artifact WHERE relative_path LIKE '%manifest%' OR relative_path LIKE '%metadata_reviewed%' OR relative_path LIKE '%annotator_settings%'").fetchone()[0], 0)

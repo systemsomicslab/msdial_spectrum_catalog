@@ -50,7 +50,7 @@ def write_unit(root, *, key="unit-a", private=False):
     (out / "SYN001_sample_metadata_reviewed.tsv").write_text(
         "sample_id\tsource_name\traw_file\traw_file_paired_by\tclass_id\tsample / Species\n"
         "sample_a\tInvented A\tsample_a\tstem\tCase\tInvented species\n"
-        "repo_b\tInvented B\tsample_b.d\tbasename\tControl\tInvented species\n", encoding="utf-8-sig")
+        "sample_b.d\tInvented B\tarchive-entry\tbasename\tControl\tInvented species\n", encoding="utf-8-sig")
     (out / "msp_annotator_settings.tsv").write_bytes(
         (Path(__file__).parent / "fixtures/ws1/annotator_settings.tsv").read_bytes())
     return unit
