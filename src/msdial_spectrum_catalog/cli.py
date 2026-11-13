@@ -204,6 +204,15 @@ def main(argv=None) -> int:
     show_ambiguity_parser.add_argument("database")
     show_ambiguity_parser.add_argument("reference_spectrum_id")
 
+    msemblator_parser = subparsers.add_parser(
+        "msemblator-export", help="Write one unit's selected representative MS/MS as MS-Emblator input"
+    )
+    msemblator_parser.add_argument("output_directory", help="The unit's MS-DIAL output directory")
+    msemblator_parser.add_argument("destination")
+    msemblator_parser.add_argument("--unit-id", required=True)
+    msemblator_parser.add_argument("--selection", choices=("unresolved", "benchmark"), default="unresolved")
+    msemblator_parser.add_argument("--max-spectra", type=int)
+
     args = parser.parse_args(argv)
     foundation_result = dispatch(args)
     if foundation_result is not None:
@@ -223,6 +232,15 @@ def main(argv=None) -> int:
                               command=list(sys.argv[1:] if argv is None else argv))
         print(json.dumps({k: result[k] for k in ("name", "content_sha256", "totals", "campaigns")},
                          indent=2))
+        return 0
+    if args.command == "msemblator-export":
+        from pathlib import Path
+
+        from .msemblator_export import export_unit
+
+        summary = export_unit(Path(args.output_directory), args.unit_id, Path(args.destination),
+                              args.selection, args.max_spectra)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
     if args.command == "init":
         initialize(args.database)

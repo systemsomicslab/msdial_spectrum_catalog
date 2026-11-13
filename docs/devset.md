@@ -3,11 +3,14 @@
 Run `-B -m msdial_spectrum_catalog.cli devset build --campaigns-root ROOT
 --campaign ID [--campaign ID ...] --exclude UNIT=REASON --out FILE` with the
 absolute interpreter and PYTHONPATH documented in AGENTS.md. Builds use a
-committed, pushed detached pin. The JSON records that commit.
+committed, pushed detached pin. The JSON records that commit with a `-dirty`
+suffix if Git reports tracked or untracked changes. Charter C10 uses
+`msdial_spectrum_catalog-pin-<sha>`; this dispatch authorizes the sandbox path
+`msdial_spectrum_catalog-pins/<sha>` instead.
 
 The generator enumerates the ledger's unit table and cross-checks its state with
 the latest transition. Campaign manifests are not consulted, so split parts are
-included. Only done units are selected. Acquisition types determine DIA flags;
+included. Only done units are selected. Nonblank acquisition types determine DIA flags;
 the ledger determines the Both ion-mode flag. Alignment MSP headers supply total
 and nonempty record counts; sample count comes from mdpeak files.
 
