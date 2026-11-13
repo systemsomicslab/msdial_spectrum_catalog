@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from msdial_spectrum_catalog.devset import build_devset, ledger_state, read_done_units
+from msdial_spectrum_catalog.devset import build_devset, git_commit, ledger_state, read_done_units
 
 
 class DevsetTests(unittest.TestCase):
@@ -45,6 +45,8 @@ class DevsetTests(unittest.TestCase):
             return build_devset(self.root, ["campaign"], self.root / filename, **kwargs)
 
     def test_split_absent_from_manifest_exclusion_flags_counts(self):
+        (self.root / "campaign" / "campaign-manifest.json").write_text(
+            json.dumps({"units": [{"unit_id": "parent"}]}), encoding="utf-8")
         result = self.build(exclusions={"excluded": "synthetic exclusion"})
         self.assertEqual(result["totals"], dict(units=1, samples=1, representative_spectra_nonempty=1))
         unit = result["units"][0]
@@ -139,3 +141,23 @@ class DevsetTests(unittest.TestCase):
             with patch("msdial_spectrum_catalog.devset.git_commit", return_value="synthetic"):
                 build_devset(self.root, ["campaign"],
                              self.root / "MSDIAL_Public_Reanalysis/analysis/set.json")
+
+    def test_refuses_both_windows_analysis_roots_case_insensitively(self):
+        from msdial_spectrum_catalog.devset import refuse_analysis_output
+        for root in (r"D:\13_MSDIAL_Public_Reanalysis\analysis",
+                     r"F:\MSDIAL_Public_Reanalysis\analysis"):
+            for path in (root, root.upper() + r"\nested\set.json"):
+                with self.subTest(path=path), self.assertRaisesRegex(ValueError, "analysis root"):
+                    refuse_analysis_output(path)
+
+    def test_blank_acquisition_is_not_dia(self):
+        (self.root / "part/output/analysis_files.csv").write_text(
+            'acquisition_type\n""\nDDA\n"   "\n', encoding="utf-8")
+        result = self.build(exclusions={"excluded": "synthetic"})
+        self.assertFalse(result["units"][0]["dia"])
+
+    def test_git_commit_marks_dirty_tree(self):
+        for status, expected in (("", "abc"), (" M file.py\n", "abc-dirty")):
+            with patch("msdial_spectrum_catalog.devset.subprocess.check_output",
+                       side_effect=["abc\n", status]):
+                self.assertEqual(git_commit(), expected)

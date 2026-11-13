@@ -45,11 +45,11 @@ Read these rules before editing. Sources are the annotation roadmap charter
   and shared logs/reports carry counts only, with no hit identities.
   Never send private reference spectra to SIRIUS. Private catalogs are local only
   and end in `.local-vs21.sqlite`.
-- Only `linkage.read_annotator_settings` opens `msp_annotator_settings.tsv`.
+- Only `annotator_settings.read_annotator_settings` opens `msp_annotator_settings.tsv`.
   It takes annotator_id, evidence_tier and library_kind by column name only.
   Never read, store, log or hash msp_file_path. Never register the settings file
-  as an artifact or run_metadata_source. Share this reader with the export when
-  both implementations reach main.
+  as an artifact or run_metadata_source. Linkage and msemblator export share
+  this allowlisted reader.
 - Only whitelisted manifest fields enter the database; refuse path-like values.
   Never parse workflow-settings.json, method.txt or
   MS_DIAL_Materials_and_Methods.txt into the database.
@@ -65,6 +65,7 @@ Read these rules before editing. Sources are the annotation roadmap charter
 - One worktree per agent (C10); never switch or modify another checkout. Add
   detached build pins only from your worktree, under
   `D:\0_SourceCode\msdial_spectrum_catalog-pin-<sha>` (charter C10).
+  This dispatch's sandbox override is `D:\0_SourceCode\msdial_spectrum_catalog-pins\<sha>`.
   Build from committed, pushed pins and record commit and pin path in run.json.
 - C7 outputs live at `annotation\<ws-short-name>\<run-id>\` with run.json
   recording input checksums, code commit, environment and parameters. WS1 writes

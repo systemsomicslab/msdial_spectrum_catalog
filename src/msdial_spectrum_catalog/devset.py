@@ -40,14 +40,18 @@ def canonical_digest(value):
 
 
 def git_commit():
-    return subprocess.check_output(["git", "-C", str(Path(__file__).resolve().parents[2]),
-                                    "rev-parse", "HEAD"], text=True).strip()
+    command = ["git", "-C", str(Path(__file__).resolve().parents[2])]
+    commit = subprocess.check_output(command + ["rev-parse", "HEAD"], text=True).strip()
+    dirty = subprocess.check_output(command + ["status", "--porcelain"], text=True).strip()
+    return commit + ("-dirty" if dirty else "")
 
 
 def refuse_analysis_output(path):
     # Windows paths must also be recognised by POSIX-hosted callers.
     resolved = str(Path(path).resolve()).replace("\\", "/").casefold()
-    if "/msdial_public_reanalysis/analysis/" in resolved + "/":
+    if any(root in resolved + "/" for root in (
+            "/msdial_public_reanalysis/analysis/",
+            "/13_msdial_public_reanalysis/analysis/")):
         raise ValueError("refusing output under the analysis root")
 
 
@@ -137,7 +141,7 @@ def describe_unit(campaign, unit):
                                        records_nonempty=nonempty),
                   sample_count=len(list(output.glob("*.mdpeak"))),
                   acquisition_types=dict(sorted(acquisitions.items())),
-                  dia=any(a.casefold() != "dda" for a in acquisitions),
+                  dia=any(a.strip() and a.strip().casefold() != "dda" for a in acquisitions),
                   ion_mode_both=str(unit.get("ion_mode", "")).casefold() == "both")
     return result
 
