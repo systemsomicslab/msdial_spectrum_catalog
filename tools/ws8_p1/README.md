@@ -65,3 +65,17 @@ determines whether they may bypass the size rule. The file is suitable for byte-
 Tests: the repository unittest suite uses its Python 3.14 interpreter (chemistry skips without RDKit);
 `tests.test_ws8_p1` uses D5. P1-A4 additionally requires a pilot rerun; compare deterministic sets bytes
 and curve bytes, and list timeout differences if any. P1-A6 shortfalls appear in the chance CSV.
+
+After a completed full run and its pilot rerun, use the lightweight audit (no spectral scoring or MCS):
+
+```powershell
+& 'D:\13_MSDIAL_Public_Reanalysis\envs\annotation-py312\Scripts\python.exe' -B -m tools.ws8_p1.audit_p1 --out <full-run-directory> --pilot <pilot-directory> --rerun <pilot-rerun-directory>
+```
+
+The audit checks frozen artifact hashes, source splits, truth exclusion, timeout rejection, every
+written correctness/chance statistic against measured rows, and per-k/stratum/global threshold choices
+against the CSVs. It recomputes motif counts and pilot curve differences. Supplemental aggregate reports,
+the SI checksum sidecar, and `claim-rules-v1.source.json` stay in the run directory. `finalization.json`
+records their hashes and the audit code identity; the measurement `run.json` and `si_bar.json` remain
+unchanged. A timeout exception is reported explicitly when measured pilot files differ. A null size
+bar remains unavailable to the claim builder; it must never be interpreted as a zero threshold.

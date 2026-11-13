@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from tools.ws8_p1 import mcs_core as core
 from tools.ws8_p1 import p1_si_bar as p1
+from tools.ws8_p1 import audit_p1 as audit
 
 HAS_RDKIT = importlib.util.find_spec("rdkit") is not None
 
@@ -91,6 +92,20 @@ class StatisticsTests(unittest.TestCase):
                                 r["axis"] == ("heavy_atoms" if axis == "heavy_atoms" else "fraction_smallest") and float(r["threshold"]) == x]
                     self.assertTrue(all(int(r["n"]) >= 100 and float(r["wilson_lo"]) >= 0.95 for r in selected))
             self.assertEqual(result["global"]["heavy_atoms"], 6)
+            audit.audit_bars(out, p1.read_csv(out / "curves_correctness.csv"), p1.read_csv(out / "curves_chance.csv"))
+
+    def test_audit_rejects_invented_bar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            result = {k: None for k in ("label", "run_id", "target", "interval", "n_min", "chance_quantile",
+                                       "families_used_for_bar", "mcs_params", "mcs_params_sha256", "motifs_file_sha256",
+                                       "global", "strata_above_pooled", "motifs", "inputs")}
+            result.update(target=0.95, n_min=100, by_stratum={}, by_k={"2": {
+                "heavy_atoms": 6, "fraction": None, "chance95_atoms": 5, "chance95_fraction": 0.5,
+                "axis_status": {"heavy_atoms": "estimable", "fraction": "not_estimable"}}})
+            p1.write_json(out / "si_bar.json", result)
+            with self.assertRaisesRegex(AssertionError, "independently searched"):
+                audit.audit_bars(out, [], [])
 
 
 @unittest.skipUnless(HAS_RDKIT, "RDKit is optional; use the D5 interpreter")
