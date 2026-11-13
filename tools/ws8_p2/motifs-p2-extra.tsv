@@ -1,0 +1,5 @@
+motif_id	name	smarts	linked_shift_label	source
+pentopyranoside	O-pentopyranoside	[O;X2]-[C;R]1[O;R][CH2;R][C;R]([O;H1])[C;R]([O;H1])[C;R]1[O;H1]	132.042	Public pyranoside definition; methyl beta-D-xylopyranoside (PubChem); C5 constrained to CH2; stereochemistry ignored
+carnitine	Carnitine backbone	[N+](C)(C)(C)-[CH2]-[CH]([O])-[CH2]-[C](=[O])-[O]		Public carnitine definition; L-carnitine PubChem CID 10917; ester and free carboxyl forms
+taurine_conjugate	N-acyl taurine	[C](=[O])-[N;H1]-[CH2]-[CH2]-[S](=[O])(=[O])-[O;H1,-1]		Public N-acyl taurine definition; N-acetyltaurine PubChem CID 159482; free taurine excluded
+adenine	Adenine ring	[N;H2]-c1ncnc2[nH,n]cnc12		Public adenine definition; adenine PubChem CID 190; adenosine CID 60961; stereochemistry ignored
