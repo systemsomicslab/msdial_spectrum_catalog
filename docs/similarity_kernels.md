@@ -29,7 +29,9 @@ source revision, 7bff7bf9c). Paths are relative to that repository.
   The convention is `cosine`. No implicit filtering is applied by this kernel.
 * `entropy.li2021`: the existing unweighted entropy_similarity, equal to
   1 - (2 H((a+b)/2) - H(a) - H(b))/2 in bits, using fixed bins. No precursor
-  shift; empty inputs return None rather than C#'s -1. Convention:
+  shift; empty inputs, nonpositive total intensity, or any nonfinite intensity
+  in either spectrum return None (not comparable) rather than C#'s -1. This
+  includes NaNs from MN normalization of all-zero spectra. Convention:
   `entropy_similarity`. This wrapper does not change similarity.py.
 
 The non-mutating MS-DIAL matcher ports lines 991-1046. The smaller precursor is
@@ -51,15 +53,30 @@ optimal assignments may have different matched counts; only their score is a
 parity contract. Zero full norm returns 0. Scores are not clamped. Nonfinite peak weights
 (for example, MN zero/zero normalization) return NaN with zero assigned
 pairs rather than entering the Hungarian solver; matchms/SciPy does not
-support nonfinite costs. This is an explicit degenerate-input extension.
+support nonfinite costs. This is a Python-only degenerate-input extension,
+and its fixture expectations are tagged `python` until C# supports it.
 The specified zero-norm guard also differs from the pinned greedy helper,
 which divides unconditionally and may raise or return NaN under numba.
 The optional reference test recognises only this degenerate discrepancy.
+
+Modified-cosine symmetry within 1e-12 is tested away from tolerance-window
+boundaries and assignment ties. Floating-point window endpoints can change
+candidate membership when arguments are swapped, as in matchms 0.34.0, so
+there is no global symmetry guarantee at a boundary. For example, equal
+precursors with single peaks at 0.01 and 0.035 and tol=0.025 give 1 forward
+and 0 in reverse for both assignments: 0.01+0.025 rounds to 0.035, while
+0.035-0.025 rounds above 0.01. Shifted windows can have the same effect.
 
 ## Preprocessing
 
 MN defaults (`MSDIAL_MN_V1`) follow MsScanMatching.cs 1048-1093 and
 `Algorithm/Function/SpectrumHandler.cs` 129-162, 63-70 and 26-30:
+
+`preprocess` requires finite input intensities and raises ValueError before
+filtering if any intensity is NaN or infinite, regardless of input order.
+This explicit input restriction avoids Python max's order-dependent NaN
+behavior; .NET Enumerable.Max skips NaNs. Finite all-zero inputs remain valid
+and preserve the C# zero/zero normalization below.
 
 1. Take the base intensity before filtering. Keep mz in [0,10000], mz <= P+0.05,
    I >= 0 and I >= base*1*0.01. The precursor stays; isotope removal is off.
@@ -113,8 +130,8 @@ the base, not a parameter. The full canonical string is the storage method;
 
 `similarity-fixtures/README.md` defines the versioned parity files, public
 provenance, bounded input precision and deterministic regeneration. Optimal,
-precwin and topk expectations are tagged Python only. Other expectations are
-for Python and C#. Fixtures include raw and MN-processed comparisons.
+precwin, topk and the nonfinite-weight guard are tagged Python only. Other
+expectations are for Python and C#. Fixtures include raw and MN-processed comparisons.
 
 `python -m msdial_spectrum_catalog.similarity_mn_tools smoke --msp PATH`
 retains only precursor, peaks and COMMENT PEAKID during parsing, emitting only
@@ -124,13 +141,13 @@ MN defaults. K4's square root is an explicit assumption, not verified GNPS
 behavior. K5 is entropy with prep none. Quantiles use linear interpolation;
 null/nonfinite scores are excluded from quantiles and threshold fractions and
 counted separately. Matched-one fractions use all eligible pairs; entropy
-reports 0 matched because that wrapper does not define peak assignment.
+reports null for this fraction because it does not define peak assignment.
 
 The optional matchms test makes filtering explicit where supported. All finite
-fixture pairs and 200 random pairs are compared; nonfinite MN weights are
-outside the reference solver domain. Source was checked directly at GitHub
-tag 0.34.0; executing the optional cross-check remains a WS4 check. matchms
-is not a runtime dependency and is never installed by this module.
+fixture pairs and 200 random pairs are compared, along with the boundary
+asymmetry above; nonfinite MN weights are outside the reference solver domain.
+Source was checked directly at GitHub tag 0.34.0. matchms is not a runtime
+dependency and is never installed by this module.
 
 Bonanza preserves C#'s `(P + Ua) + Ub` expression. With nonintegral or very
 large intensities, swapping unequal-precursor inputs can change the last bit

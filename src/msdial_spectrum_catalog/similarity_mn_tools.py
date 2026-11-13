@@ -73,7 +73,8 @@ def _expectations(a, b, tol=0.025, swap=True):
         result = mn.score(identity, _spectrum(a), _spectrum(b))
         entry = {"kernel_id": identity, "score": _encoded_score(result.score),
                  "abs_tol": 1e-9, "swap_invariant": swap,
-                 "implementations": ["python"] if "assign=optimal" in identity else ["python", "csharp"]}
+                 "implementations": ["python"] if ("assign=optimal" in identity
+                     or result.details.get("nonfinite_weights")) else ["python", "csharp"]}
         if "assign=optimal" not in identity:
             entry["matched_peak_count"] = result.matched_peak_count
         if identity.startswith("msdial."):
@@ -195,6 +196,9 @@ These synthetic and public fixtures are shared unchanged with WS3 C# tests.
 Each JSON case file has format, format_version, kind and cases. The manifest
 pins the SHA256 and case count of all four case files (not itself or README).
 UTF-8, ensure_ascii=True, indent=1, LF, trailing newline; no timestamps.
+The repository's .gitattributes disables text conversion for this directory,
+preserving the pinned bytes even with core.autocrlf=true. fixtures-check
+reports CRLF line endings explicitly before checking hashes.
 
 Run `python -m msdial_spectrum_catalog.similarity_mn_tools fixtures-check
 similarity-fixtures`. `fixtures-write DIR` rebuilds synthetic definitions and
@@ -224,6 +228,12 @@ Compare matched counts only when present: optimal assignment can tie.
 Implementations are attached to each expectation; optimal and prep cases
 using precwin/topk are Python-only until C# supports them. swap_invariant
 false permits the documented equal-precursor MS-DIAL role asymmetry.
+The nonfinite-weight modified-cosine guard (NaN score, zero assigned pairs)
+is Python-only too, including MN-prepped all-zero inputs. Entropy returns
+null if either spectrum has nonpositive total intensity or any nonfinite intensity;
+this not-comparable rule also applies after MN zero/zero normalization.
+MN preprocessing rejects nonfinite input intensities with ValueError before
+filtering, regardless of peak order; finite all-zero inputs still produce NaN.
 prep.json uses a prep_id query without a base or tol. kernel-ids.json maps
 input to canonical or error. All kernel identities are used verbatim across
 languages. Cases with zero intensities also pin legacy NaN behavior.
@@ -296,9 +306,18 @@ def _equal(actual, expected, tolerance):
     return math.isfinite(actual) and abs(actual - expected) <= tolerance
 
 
+def _read_fixture(path):
+    data = path.read_bytes()
+    if b"\r\n" in data:
+        raise ValueError("CRLF line endings in " + path.name
+                         + "; fixtures require LF (check .gitattributes)")
+    return data
+
+
 def check_fixtures(directory):
     directory = Path(directory)
-    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads(_read_fixture(directory / "manifest.json"))
+    _read_fixture(directory / "README.md")
     if (manifest.get("format"), manifest.get("format_version"), manifest.get("kernels_version")) != (FORMAT, 1, mn.KERNELS_VERSION):
         raise ValueError("invalid manifest version")
     names = [entry["path"] for entry in manifest["files"]]
@@ -306,7 +325,7 @@ def check_fixtures(directory):
         raise ValueError("invalid manifest file set")
     total = expectations = 0
     for entry in manifest["files"]:
-        data = (directory / entry["path"]).read_bytes()
+        data = _read_fixture(directory / entry["path"])
         if hashlib.sha256(data).hexdigest() != entry["sha256"]:
             raise ValueError("manifest drift: " + entry["path"])
         value = json.loads(data)
@@ -436,7 +455,8 @@ def smoke(path, max_dprec=400):
                [("min", 0), ("p05", 0.05), ("p25", 0.25), ("p50", 0.5), ("p75", 0.75), ("p95", 0.95), ("max", 1)]},
             "fraction_ge_0_7": sum(x >= 0.7 for x in finite) / n if n else None,
             "fraction_ge_0_9": sum(x >= 0.9 for x in finite) / n if n else None,
-            "fraction_matched_1": matched_one / count if count else None})
+            "fraction_matched_1": matched_one / count
+                if count and not identity.startswith("entropy.li2021?") else None})
     return {"records": len(records), "records_with_peaks": len(spectra), "pair_count": count,
             "max_dprec": max_dprec, "kernels": summaries,
             "fraction_k1_ge_0_95_and_k3_lt_0_5": defect / count if count else None,

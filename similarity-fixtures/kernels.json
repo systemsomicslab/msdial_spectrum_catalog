@@ -2882,8 +2882,7 @@
      "abs_tol": 1e-09,
      "swap_invariant": true,
      "implementations": [
-      "python",
-      "csharp"
+      "python"
      ],
      "matched_peak_count": 0
     },
@@ -2898,7 +2897,7 @@
     },
     {
      "kernel_id": "entropy.li2021?bin=0.05&prep=mn&prep.above=0.05&prep.abs=0&prep.frame=1&prep.maxmz=10000&prep.minmz=0&prep.pow=0.5&prep.precwin=0&prep.rel=1&prep.scale=100&prep.topk=0&prep.topkwin=50&weighting=none",
-     "score": 1.0,
+     "score": null,
      "abs_tol": 1e-09,
      "swap_invariant": true,
      "implementations": [

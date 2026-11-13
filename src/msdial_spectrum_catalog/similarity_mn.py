@@ -77,7 +77,9 @@ def _divide(numerator, denominator):
 
 
 def preprocess(spectrum: Spectrum, prep: MnPrep = MSDIAL_MN_V1) -> Spectrum:
-    """Refine, optional window/top-k, frame, then power-normalise in that order."""
+    """Refine, window/top-k, frame, normalise; reject nonfinite input intensities."""
+    if any(not math.isfinite(intensity) for _, intensity in spectrum.peaks):
+        raise ValueError("preprocess requires finite input intensities")
     base = max((p[1] for p in spectrum.peaks), default=0.0)
     peaks = [(mz, intensity) for mz, intensity in spectrum.peaks
              if not (mz < prep.minmz or mz > prep.maxmz
@@ -320,7 +322,10 @@ def entropy_li2021(a: Spectrum, b: Spectrum, bin: float = 0.05) -> KernelResult:
     identity = format_kernel_id("entropy.li2021", {"prep": "none", "bin": bin, "weighting": "none"})
     pa: Peaks = list(a.peaks)
     pb: Peaks = list(b.peaks)
-    return KernelResult(identity, entropy_similarity(pa, pb, bin), "entropy_similarity", 0, {})
+    comparable = all(all(math.isfinite(intensity) for _, intensity in peaks)
+                     and _sum(intensity for _, intensity in peaks) > 0 for peaks in (pa, pb))
+    value = entropy_similarity(pa, pb, bin) if comparable else None
+    return KernelResult(identity, value, "entropy_similarity", 0, {})
 
 
 _BASE_KEYS = {

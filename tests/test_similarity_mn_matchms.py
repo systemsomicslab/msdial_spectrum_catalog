@@ -88,6 +88,15 @@ class MatchmsParity(unittest.TestCase):
                     with self.subTest(index=index, assign=assign, mzpow=mzpow):
                         self.compare(*spectra, {"tol": .025, "assign": assign, "mzpow": mzpow, "ipow": ipow})
 
+    def test_tolerance_boundary_asymmetry(self):
+        a = mn.Spectrum(200, ((0.01, 1),))
+        b = mn.Spectrum(200, ((0.035, 1),))
+        for assign in ("greedy", "optimal"):
+            params = {"tol": .025, "assign": assign, "mzpow": 0, "ipow": 1}
+            with self.subTest(assign=assign):
+                self.compare(a, b, params)
+                self.compare(b, a, params)
+
 
 if __name__ == "__main__":
     unittest.main()

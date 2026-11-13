@@ -47,6 +47,33 @@ class FixtureChecks(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "score drift"):
                 mt.check_fixtures(target)
 
+    def test_crlf_is_reported_explicitly_for_every_fixture_file(self):
+        with tempfile.TemporaryDirectory(prefix="mn-crlf-", dir=TESTS) as tmp:
+            target = Path(tmp)
+            for original in FIXTURES.iterdir():
+                with self.subTest(file=original.name):
+                    mt.write_fixtures(target)
+                    path = target / original.name
+                    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+                    with self.assertRaisesRegex(ValueError, "CRLF line endings in " + original.name):
+                        mt.check_fixtures(target)
+
+    def test_degenerate_fixture_contracts(self):
+        value = json.loads((FIXTURES / "kernels.json").read_bytes())
+        case = next(c for c in value["cases"] if c["id"] == "moddot-zero-nan")
+        guarded = [e for e in case["expected"]
+                   if e["kernel_id"].startswith("gnps.") and "prep=mn&" in e["kernel_id"]]
+        self.assertEqual(len(guarded), 2)
+        for expected in guarded:
+            self.assertEqual(expected["implementations"], ["python"])
+            self.assertEqual(expected["score"], "NaN")
+            if "assign=greedy" in expected["kernel_id"]:
+                self.assertEqual(expected["matched_peak_count"], 0)
+        entropy = [e for e in case["expected"] if e["kernel_id"].startswith("entropy.")]
+        self.assertEqual(len(entropy), 2)
+        for expected in entropy:
+            self.assertIsNone(expected["score"])
+
     def test_json_encoding_and_precision_contract(self):
         def precision(spectrum):
             for mz in [spectrum["precursor_mz"]] + [p[0] for p in spectrum["peaks"]]:
@@ -98,7 +125,11 @@ class FixtureChecks(unittest.TestCase):
             self.assertEqual((a["records"], a["records_with_peaks"], a["pair_count"]), (3, 2, 1))
             self.assertEqual(a["fraction_k1_ge_0_95_and_k3_lt_0_5"], 0)
             self.assertAlmostEqual(a["kernels"][0]["min"], 1, delta=1e-12)
-            self.assertEqual(mt.smoke(path, max_dprec=1)["pair_count"], 0)
+            self.assertEqual(a["kernels"][0]["fraction_matched_1"], 0)
+            self.assertIsNone(a["kernels"][-1]["fraction_matched_1"])
+            empty = mt.smoke(path, max_dprec=1)
+            self.assertEqual(empty["pair_count"], 0)
+            self.assertTrue(all(k["fraction_matched_1"] is None for k in empty["kernels"]))
             self.assertNotIn("PEAKID", first.stdout)
             self.assertNotIn("discard", first.stdout)
 

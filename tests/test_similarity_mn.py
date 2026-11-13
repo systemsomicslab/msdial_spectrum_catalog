@@ -46,6 +46,20 @@ class KernelAnchors(unittest.TestCase):
             result = mn.modified_cosine(a, b, tol=.25, assign=assign)
             self.assertEqual((result.score, result.matched_peak_count), (1, 1))
 
+    def test_modified_cosine_boundary_asymmetry_matches_matchms(self):
+        # Inclusive floating-point endpoints need not survive argument reversal.
+        # The same candidate-window arithmetic is used by matchms 0.34.0.
+        a = mn.Spectrum(200, ((0.01, 1),))
+        b = mn.Spectrum(200, ((0.035, 1),))
+        self.assertEqual(0.01 + 0.025, 0.035)
+        self.assertGreater(0.035 - 0.025, 0.01)
+        for assign in ("greedy", "optimal"):
+            with self.subTest(assign=assign):
+                forward = mn.modified_cosine(a, b, tol=.025, assign=assign)
+                reverse = mn.modified_cosine(b, a, tol=.025, assign=assign)
+                self.assertEqual((forward.score, forward.matched_peak_count), (1, 1))
+                self.assertEqual((reverse.score, reverse.matched_peak_count), (0, 0))
+
     def test_small_shift_does_not_add_shifted_candidates(self):
         a, b = mn.Spectrum(200, ((100, 10),)), mn.Spectrum(200.02, ((100.04, 10),))
         self.assertEqual(mn.modified_cosine(a, b, tol=.025, assign="greedy").matched_peak_count, 0)
@@ -90,6 +104,16 @@ class KernelAnchors(unittest.TestCase):
         self.assertAlmostEqual(greedy.score, 100 / 181)
         self.assertAlmostEqual(optimal.score, 180 / 181)
         self.assertGreater(optimal.score - greedy.score, .05)
+
+    def test_entropy_zero_and_nonfinite_intensities_are_not_comparable(self):
+        invalid = [mn.Spectrum(200, ((100, 0),)),
+                   mn.preprocess(mn.Spectrum(200, ((100, 0),)))]
+        invalid += [mn.Spectrum(200, ((100, 1), (150, value)))
+                    for value in (math.nan, math.inf, -math.inf)]
+        for spectrum in invalid:
+            for a, b in ((spectrum, spectrum), (spectrum, self.a), (self.a, spectrum)):
+                with self.subTest(peaks=a.peaks, other=b.peaks):
+                    self.assertIsNone(mn.entropy_li2021(a, b).score)
 
     def test_greedy_ties_reverse_stable_candidate_order(self):
         a = mn.Spectrum(200, ((100, 1), (100.01, 1)))
@@ -139,6 +163,13 @@ class Preprocessing(unittest.TestCase):
         result = mn.preprocess(mn.Spectrum(200, ((100, 0),)))
         self.assertTrue(math.isnan(result.peaks[0][1]))
 
+    def test_nonfinite_input_intensities_are_rejected_before_filtering(self):
+        for intensity in (math.nan, math.inf, -math.inf):
+            # Invalid peaks must be rejected even above the precursor cutoff.
+            for peaks in (((250, intensity), (100, 1)), ((100, 1), (250, intensity))):
+                with self.subTest(peaks=peaks), self.assertRaisesRegex(ValueError, "finite input intensities"):
+                    mn.preprocess(mn.Spectrum(200, peaks))
+
     def test_frozen_spectrum_copies_mutable_inputs(self):
         peaks = [[100, 1]]
         spectrum = mn.Spectrum(200, peaks)
@@ -153,6 +184,8 @@ class KernelProperties(unittest.TestCase):
         for _ in range(500):
             # Distinct integral intensities avoid tied assignment products and keep
             # C# argument-ordered Bonanza sums exact in the bitwise parity check.
+            # The m/z grid also stays away from tolerance-window boundaries;
+            # the boundary asymmetry has a separate anchor above.
             aa = sorted(rng.sample(range(10, 30), rng.randrange(2, 9)))
             bb = sorted(rng.sample(range(10, 30), rng.randrange(2, 9)))
             a = mn.Spectrum(400, [(x * 10, rng.randrange(1, 100000)) for x in aa])

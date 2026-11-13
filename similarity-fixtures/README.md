@@ -4,6 +4,9 @@ These synthetic and public fixtures are shared unchanged with WS3 C# tests.
 Each JSON case file has format, format_version, kind and cases. The manifest
 pins the SHA256 and case count of all four case files (not itself or README).
 UTF-8, ensure_ascii=True, indent=1, LF, trailing newline; no timestamps.
+The repository's .gitattributes disables text conversion for this directory,
+preserving the pinned bytes even with core.autocrlf=true. fixtures-check
+reports CRLF line endings explicitly before checking hashes.
 
 Run `python -m msdial_spectrum_catalog.similarity_mn_tools fixtures-check
 similarity-fixtures`. `fixtures-write DIR` rebuilds synthetic definitions and
@@ -33,6 +36,12 @@ Compare matched counts only when present: optimal assignment can tie.
 Implementations are attached to each expectation; optimal and prep cases
 using precwin/topk are Python-only until C# supports them. swap_invariant
 false permits the documented equal-precursor MS-DIAL role asymmetry.
+The nonfinite-weight modified-cosine guard (NaN score, zero assigned pairs)
+is Python-only too, including MN-prepped all-zero inputs. Entropy returns
+null if either spectrum has nonpositive total intensity or any nonfinite intensity;
+this not-comparable rule also applies after MN zero/zero normalization.
+MN preprocessing rejects nonfinite input intensities with ValueError before
+filtering, regardless of peak order; finite all-zero inputs still produce NaN.
 prep.json uses a prep_id query without a base or tol. kernel-ids.json maps
 input to canonical or error. All kernel identities are used verbatim across
 languages. Cases with zero intensities also pin legacy NaN behavior.
