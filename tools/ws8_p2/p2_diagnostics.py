@@ -165,6 +165,12 @@ def instrument_bin(value):
     return "QTOF-type" if "TOF" in s else "Orbitrap/FT" if any(t in s for t in ("ORBITRAP", "FT", "Q EXACTIVE", "Q-EXACTIVE")) else "other"
 
 
+def ion_mode(value, fallback):
+    """MSP libraries use both long labels and the P/N abbreviations."""
+    s = value.strip().lower()
+    return {"p": "pos", "positive": "pos", "pos": "pos", "n": "neg", "negative": "neg", "neg": "neg", "": fallback}.get(s)
+
+
 def energy_bin(value):
     """Single explicit energies only. Keep normalized energy apart from eV."""
     s = value.strip().lower()
@@ -362,8 +368,8 @@ def prepare(args, run):
                 except ValueError:
                     counts[prefix + "precursor"] += 1
                     continue
-                actual_mode = meta.get("ionmode", mode).lower()
-                if actual_mode not in (mode, "positive" if mode == "pos" else "negative"):
+                actual_mode = ion_mode(meta.get("ionmode", ""), mode)
+                if actual_mode != mode:
                     counts[prefix + "mode_mismatch"] += 1
                     continue
                 adduct = meta.get("precursortype", "").replace(" ", "")
@@ -779,6 +785,7 @@ def main():
                parameters=dict(sources=args.sources, workers=args.workers, limit=args.limit, priority=priority_name,
                                threads={v: os.environ[v] for v in THREAD_VARS}, variants=VARIANTS, rule=RULE,
                                resolution="all peaks within 0.001 Da of integer OR all lexical m/z <2 decimals",
+                               ion_mode_aliases="P/Positive/pos => pos; N/Negative/neg => neg; blank uses file mode",
                                representative="most positive finite peaks after resolution gate, earliest record tie",
                                pooling="one unit per first block/mode/precursor type, summed across types",
                                formula_gate="heavy-element residue counts; H ignored", electron_mass=0.000549,

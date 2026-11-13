@@ -50,7 +50,8 @@ matched and mined; only the stricter motif is linked to the curated 132-Da loss.
 Preparation excludes records with no usable peaks, invalid precursor m/z, mismatched
 mode, missing precursor type, nominal peaks (every m/z within 0.001 Da of an
 integer, or every lexical m/z having fewer than two decimal places), or rejected
-structures. The representative is the eligible record with most positive finite
+structures. IONMODE accepts P/Positive/pos and N/Negative/neg; an empty field uses
+the file mode. The representative is the eligible record with most positive finite
 peaks per recomputed first block, mode and precursor type; ties keep the earliest
 record. VS21 is removed by first block against *all* standardizable VS20 structures,
 including nominal or otherwise spectrally excluded records. Exclusion counts

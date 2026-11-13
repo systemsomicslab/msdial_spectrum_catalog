@@ -76,6 +76,14 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(p2.instrument_bin("LC-ESI-QTOF"), "QTOF-type")
         self.assertEqual(p2.instrument_bin("LC-ESI-ITFT"), "Orbitrap/FT")
 
+    def test_ion_mode_long_labels_and_abbreviations(self):
+        for value in ['P', 'Positive', 'pos', ' p ']:
+            self.assertEqual(p2.ion_mode(value, 'pos'), 'pos')
+        for value in ['N', 'Negative', 'neg', ' n ']:
+            self.assertEqual(p2.ion_mode(value, 'neg'), 'neg')
+        self.assertEqual(p2.ion_mode('', 'neg'), 'neg')
+        self.assertIsNone(p2.ion_mode('unknown', 'pos'))
+
 
 class StatisticsTests(unittest.TestCase):
     def test_statistics_independent_values(self):
@@ -248,7 +256,7 @@ class ChemistryTests(unittest.TestCase):
             neg.write_text("", encoding="utf-8")
             (root / "MSMS-Private-pos-VS21.msp").write_text(
                 record("CCCC", [(100.12, 10)]) + record("CCCCC", [(100.12, 10)]) +
-                record("CCCCCC", [(100.12, 10)]), encoding="utf-8")
+                record("CCCCCC", [(100.12, 10)], mode="P"), encoding="utf-8")
             (root / "MSMS-Private-neg-VS21.msp").write_text("", encoding="utf-8")
             out = root / "output"
             out.mkdir()
