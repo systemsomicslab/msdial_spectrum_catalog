@@ -100,7 +100,17 @@ chunk's sha256), `input_records`, `manifest`, `parameter_file_sha256`, `started_
 (`records`, `sent_to_structure`, `skipped_no_formula`, `problems`), `metfrag_files`, `harvest`
 (`{relative path: {sha256, bytes}}`), `canopus_summary_files`, `outputs` (`{csv: sha256}`) and
 `environment` (MS-Emblator commit and dirty flag, model sha256, library DB size and mtime, Python, affinity
-mask, logical CPUs).
+mask, logical CPUs, `model_assets` as given with `--model-assets`, for example the Zenodo record and md5
+of the installed model set, and `third_party_data`: the data files msbuddy fetches into its package folder
+on first use, with size, sha256, source URL and fetch time).
+
+**Models must match the code.** MS-Emblator's rankers check feature names: a model set from an older
+release fails on newer code with a CatBoost "should be feature with name ..." error. Install the asset
+set the README of the checked-out commit names, and pass its identity with `--model-assets`.
+
+**First use downloads data.** msbuddy fetches about 0.86 GB from its GitHub releases into
+`site-packages/msbuddy/data` the first time it runs. Run once on a small input before a batch, so the
+fetch is a known event rather than a side effect of the first chunk.
 
 `name_map.tsv` reads only `name`, `unit_id` and `alignment_id` from the manifest, never a `reference_*`
 column. `structure_step` is `sent`, or `skipped_no_formula` when MS-Emblator chose no formula and so left

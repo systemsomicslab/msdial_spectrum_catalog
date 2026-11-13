@@ -320,7 +320,7 @@ def update_run_json(run_dir: Path, invocation: dict) -> None:
 def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None, driver: Path | None = None,
               lock_path: Path | None = None, limit: int | None = None, max_attempts: int = 2,
               stop_after: int = 3, chunk_timeout: float | None = 6 * 3600, hash_libraries: bool = True,
-              sirius_directory: Path | None = None) -> int:
+              sirius_directory: Path | None = None, model_assets: str | None = None) -> int:
     run_dir = plan_path.parent
     _refuse_analysis_root(run_dir)
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -347,6 +347,7 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
         "library_sha256": library_hashes(root) if hash_libraries else "not computed",
         "host_logical_cpus": os.cpu_count(),
         "plan_sha256": sha256(plan_path),
+        "model_assets": model_assets,
     }
     try:
         from .msemblator_driver import affinity_mask
@@ -379,6 +380,8 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
                 command = [str(python), str(driver), "--msemblator-root", str(root),
                            "--input", str(run_dir / chunk["chunk"]), "--output", str(output), "--mode", "2",
                            "--manifest", str(run_dir / chunk["manifest"])]
+                if model_assets:
+                    command += ["--model-assets", model_assets]
                 started = now()
                 environment = dict(os.environ, PYTHONIOENCODING="utf-8")
                 process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -560,6 +563,8 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--stop-after", type=int, default=3)
     run_parser.add_argument("--chunk-timeout", type=float, default=6 * 3600)
     run_parser.add_argument("--no-library-hash", action="store_true")
+    run_parser.add_argument("--model-assets", help="key=value,... identifying the installed model/library asset "
+                                                   "set (e.g. zenodo_record=...,file=...,md5=...)")
 
     status_parser = commands.add_parser("status", help="Summarise plan.json against the chunk records")
     status_parser.add_argument("--plan", required=True, type=Path)
@@ -584,7 +589,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_batch(args.plan, root, args.python, lock_path=args.lock, limit=args.limit,
                          max_attempts=args.max_attempts, stop_after=args.stop_after,
                          chunk_timeout=args.chunk_timeout, hash_libraries=not args.no_library_hash,
-                         sirius_directory=root / "external" / "sirius")
+                         sirius_directory=root / "external" / "sirius", model_assets=args.model_assets)
     if args.command == "status":
         print(json.dumps(status(args.plan), indent=2))
         return 0

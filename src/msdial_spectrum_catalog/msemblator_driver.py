@@ -165,6 +165,50 @@ def affinity_mask() -> str | None:
     return None
 
 
+_DATA_URL = re.compile(r"https://[^\s'\"]+\.joblib")
+
+
+def third_party_data() -> dict:
+    """Data files MS-Emblator's dependencies fetch on first use, with their source URL.
+
+    msbuddy downloads its formula database and model from its GitHub releases into its own package folder
+    the first time it runs; nothing in MS-Emblator records them. The file's mtime is when it was fetched.
+    """
+    import importlib.util  # noqa: PLC0415
+
+    spec = importlib.util.find_spec("msbuddy")
+    if spec is None or not spec.submodule_search_locations:
+        return {}
+    package = Path(next(iter(spec.submodule_search_locations)))
+    urls = {}
+    loader = package / "load.py"
+    if loader.is_file():
+        urls = {url.rsplit("/", 1)[-1]: url for url in _DATA_URL.findall(loader.read_text(encoding="utf-8"))}
+    try:
+        from importlib.metadata import version  # noqa: PLC0415
+
+        package_version = version("msbuddy")
+    except Exception:
+        package_version = None
+    files = []
+    for path in sorted((package / "data").glob("*.joblib")):
+        stat = path.stat()
+        files.append({"file": path.name, "bytes": stat.st_size, "sha256": sha256(path),
+                      "source_url": urls.get(path.name),
+                      "fetched_at_file_mtime": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()})
+    return {"msbuddy": {"version": package_version, "data_folder": "site-packages/msbuddy/data", "files": files}}
+
+
+def parse_assets(text: str | None) -> dict:
+    """`key=value,key=value` describing the model and library asset set (e.g. its Zenodo record and md5)."""
+    assets = {}
+    for part in (text or "").split(","):
+        key, sep, value = part.partition("=")
+        if sep and key.strip():
+            assets[key.strip()] = value.strip()
+    return assets
+
+
 def environment(root: Path) -> dict:
     """What the run depended on, apart from the input: code, models, databases, interpreter, CPUs."""
     models = {}
@@ -462,6 +506,11 @@ def run(args: argparse.Namespace) -> int:
             record["environment"] = environment(root)
         except Exception as error:  # a missing fact about the environment must not cost the run
             record["environment"] = {"error": scrub(f"{type(error).__name__}: {error}")}
+        record["environment"]["model_assets"] = parse_assets(args.model_assets)
+        try:
+            record["environment"]["third_party_data"] = third_party_data()
+        except Exception as error:
+            record["environment"]["third_party_data"] = {"error": scrub(f"{type(error).__name__}: {error}")}
         jdk = root / "external" / "jdk21" / "bin"
         if jdk.is_dir():
             os.environ["PATH"] = str(jdk) + os.pathsep + os.environ.get("PATH", "")
@@ -547,6 +596,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", type=Path,
                         help="The export manifest; only its name, unit_id and alignment_id columns are read")
     parser.add_argument("--log", type=Path, help="Default: <output>/msemblator.log")
+    parser.add_argument("--model-assets", help="key=value,... identifying the model/library asset set, e.g. "
+                                               "zenodo_record=23721007,file=<zip>,md5=<md5>")
     return run(parser.parse_args(argv))
 
 

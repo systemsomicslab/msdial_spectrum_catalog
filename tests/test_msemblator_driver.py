@@ -157,7 +157,8 @@ class DriverTest(unittest.TestCase):
     def _run(self, **env):
         environment = dict(os.environ, PYTHONIOENCODING="utf-8", **env)
         command = [sys.executable, "-B", str(DRIVER), "--msemblator-root", str(self.root), "--input", str(self.msp),
-                   "--output", str(self.output), "--mode", "2", "--manifest", str(self.manifest)]
+                   "--output", str(self.output), "--mode", "2", "--manifest", str(self.manifest),
+                   "--model-assets", "zenodo_record=123,md5=abc"]
         return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", env=environment,
                               timeout=120)
 
@@ -183,6 +184,8 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(record["stage_seconds"]["structure.metfrag"], 1.25)
         self.assertIn("formula.sirius", record["stage_seconds"])
         self.assertIn("formula.total", record["stage_seconds"])
+        self.assertEqual(record["environment"]["model_assets"], {"zenodo_record": "123", "md5": "abc"})
+        self.assertIn("third_party_data", record["environment"])
         self.assertEqual(record["environment"]["model_sha256"]["formula/pipeline_sirius_score.pkl"],
                          driver.sha256(self.root / "models" / "formula" / "pipeline_sirius_score.pkl"))
         # work/ moved out of the checkout; MetFrag copied, the checkout's own files left behind
@@ -274,6 +277,37 @@ class ParseLogTest(unittest.TestCase):
         self.assertEqual(parsed["stage_seconds"]["structure.sirius"], 30.0)
         self.assertEqual(parsed["failed_steps"], ["formula:SIRIUS", "formula:msbuddy"])
         self.assertEqual(parsed["service_error_lines"], 1)
+
+    def test_third_party_data_records_msbuddy_files_with_their_source(self):
+        import importlib
+
+        with tempfile.TemporaryDirectory() as folder:
+            package = Path(folder) / "msbuddy"
+            (package / "data").mkdir(parents=True)
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "load.py").write_text(
+                "URL = 'https://github.com/example/msbuddy/releases/download/v1/formula_db_v1.joblib'\n",
+                encoding="utf-8")
+            (package / "data" / "formula_db_v1.joblib").write_bytes(b"db")
+            sys.path.insert(0, folder)
+            importlib.invalidate_caches()
+            sys.modules.pop("msbuddy", None)
+            try:
+                data = driver.third_party_data()
+            finally:
+                sys.path.remove(folder)
+                sys.modules.pop("msbuddy", None)
+        files = data["msbuddy"]["files"]
+        self.assertEqual(files[0]["file"], "formula_db_v1.joblib")
+        self.assertEqual(files[0]["bytes"], 2)
+        self.assertEqual(files[0]["source_url"],
+                         "https://github.com/example/msbuddy/releases/download/v1/formula_db_v1.joblib")
+        self.assertEqual(len(files[0]["sha256"]), 64)
+        self.assertIn("fetched_at_file_mtime", files[0])
+
+    def test_parse_assets(self):
+        self.assertEqual(driver.parse_assets("zenodo_record=1, md5=ab"), {"zenodo_record": "1", "md5": "ab"})
+        self.assertEqual(driver.parse_assets(None), {})
 
     def test_scrub(self):
         text = driver.scrub('Logged in as: a.b@c-d.ac.jp "sid": "xyz" refresh_token=abc')
