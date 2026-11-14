@@ -1,0 +1,5 @@
+msp_file_path	library_kind	annotator_id	evidence_tier
+SENTINEL_DO_NOT_READ	acquired	msp_high_quality	high_quality
+SENTINEL_DO_NOT_READ		msp_low_quality	low_quality
+SENTINEL_DO_NOT_READ	predicted	msp_in_silico	other
+SENTINEL_DO_NOT_READ		missing	other

@@ -119,9 +119,9 @@ class ValidatorGuardTests(unittest.TestCase):
     def _minimal_run(self, database: Path, *, has_source_peak: int, mz, ms2_scan_index) -> None:
         storage.initialize(database)
         with storage.transaction(database) as connection:
-            connection.execute("INSERT INTO study VALUES ('s', 'test', 'A', NULL)")
+            connection.execute("INSERT INTO study(study_id, repository, accession, title) VALUES ('s', 'test', 'A', NULL)")
             connection.execute(
-                "INSERT INTO analysis_unit VALUES ('u', 's', 'unit', NULL, NULL, NULL)"
+                "INSERT INTO analysis_unit(analysis_unit_id, study_id, external_unit_id, separation_type, ion_mode, acquisition_type) VALUES ('u', 's', 'unit', NULL, NULL, NULL)"
             )
             connection.execute(
                 "INSERT INTO analysis_run(run_id, analysis_unit_id, run_fingerprint, output_directory)"
@@ -135,10 +135,15 @@ class ValidatorGuardTests(unittest.TestCase):
                 " VALUES ('af', ?, 0)", (self.RUN,)
             )
             connection.execute(
+                "INSERT INTO artifact(artifact_id, run_id, artifact_type, relative_path, source_path, sha256, byte_size)"
+                " VALUES (1, ?, 'alignment_provenance', 'Invented.mdprovenance.tsv', '.', 'synthetic', 0)",
+                (self.RUN,),
+            )
+            connection.execute(
                 """INSERT INTO alignment_member(
                     alignment_member_id, alignment_feature_id, sample_id, file_id,
-                    is_representative, has_source_peak, mz, ms2_scan_index
-                ) VALUES ('am', 'af', 'sm', 0, 1, ?, ?, ?)""",
+                    is_representative, has_source_peak, mz, ms2_scan_index, source_artifact_id
+                ) VALUES ('am', 'af', 'sm', 0, 1, ?, ?, ?, 1)""",
                 (has_source_peak, mz, ms2_scan_index),
             )
 

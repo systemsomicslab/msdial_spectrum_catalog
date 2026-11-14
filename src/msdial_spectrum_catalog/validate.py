@@ -23,11 +23,13 @@ def validate_run(database, run_id: str) -> ValidationReport:
     report = ValidationReport(run_id)
     connection = connect(database)
     try:
-        if connection.execute("SELECT 1 FROM analysis_run WHERE run_id = ?", (run_id,)).fetchone() is None:
+        run = connection.execute("SELECT ingest_granularity FROM analysis_run WHERE run_id = ?", (run_id,)).fetchone()
+        if run is None:
             report.errors.append("Run does not exist")
             return report
+        representative = run[0] == "representative"
         queries = {
-            "samples": "SELECT COUNT(DISTINCT sample_id) FROM feature WHERE run_id = ?",
+            "samples": "SELECT COUNT(*) FROM sample WHERE analysis_unit_id=(SELECT analysis_unit_id FROM analysis_run WHERE run_id=?)",
             "features": "SELECT COUNT(*) FROM feature WHERE run_id = ?",
             "sample_spectra": "SELECT COUNT(*) FROM spectrum WHERE run_id = ? AND spectrum_kind = 'deconvoluted'",
             "sample_ms2_spectra": "SELECT COUNT(*) FROM spectrum WHERE run_id = ? AND spectrum_kind = 'deconvoluted' AND peak_count > 0",
@@ -42,31 +44,39 @@ def validate_run(database, run_id: str) -> ValidationReport:
             "mztab_small_molecule_summaries": "SELECT COUNT(*) FROM mztab_record WHERE run_id = ? AND section = 'SML'",
         }
         report.counts = {name: connection.execute(query, (run_id,)).fetchone()[0] for name, query in queries.items()}
+        report.counts["metadata_sources"] = connection.execute(
+            "SELECT COUNT(*) FROM run_metadata_source WHERE run_id=?", (run_id,)).fetchone()[0]
+        if not report.counts["metadata_sources"]:
+            report.warnings.append("Run has no metadata linkage (no run_metadata_source rows)")
 
         missing_sample_links = connection.execute(
             "SELECT COUNT(*) FROM spectrum WHERE run_id = ? AND spectrum_kind = 'deconvoluted' AND feature_id IS NULL",
             (run_id,),
         ).fetchone()[0]
-        if missing_sample_links:
+        if missing_sample_links and not representative:
             report.errors.append(f"{missing_sample_links} sample spectra are not linked to mdpeak features")
 
         missing_member_links = connection.execute(
             """SELECT COUNT(*) FROM alignment_member
                WHERE has_source_peak = 1 AND feature_id IS NULL
+               AND (? = 0 OR is_representative = 1)
                AND alignment_feature_id IN (SELECT alignment_feature_id FROM alignment_feature WHERE run_id = ?)""",
-            (run_id,),
+            (int(representative), run_id),
         ).fetchone()[0]
         if missing_member_links:
             report.errors.append(f"{missing_member_links} alignment members reference missing sample features")
 
-        # A member with a source peak must carry a usable m/z. This check exists because an earlier
+        # Detailed provenance exports m/z; the peak-ID matrix deliberately does not.
+        # A provenance member with a source peak must carry a usable m/z. An earlier
         # MS-DIAL provenance export read the column from the chromatogram axis instead of the peak mass,
         # so every member that DID have a source peak stored a sentinel and only the gap-filled ones
         # stored a real value. That run validated clean while being systematically wrong, which is the
         # failure this check makes impossible to repeat.
         unusable_member_mz = connection.execute(
             """SELECT COUNT(*) FROM alignment_member
-               WHERE has_source_peak = 1 AND (mz IS NULL OR mz <= 0)
+               JOIN artifact ON artifact.artifact_id = alignment_member.source_artifact_id
+               WHERE artifact.artifact_type = 'alignment_provenance'
+               AND has_source_peak = 1 AND (mz IS NULL OR mz <= 0)
                AND alignment_feature_id IN (SELECT alignment_feature_id FROM alignment_feature WHERE run_id = ?)""",
             (run_id,),
         ).fetchone()[0]
@@ -74,6 +84,16 @@ def validate_run(database, run_id: str) -> ValidationReport:
             report.errors.append(
                 f"{unusable_member_mz} alignment members have a source peak but no usable m/z"
             )
+        report.counts["member_mz_not_exported"] = connection.execute(
+            """SELECT COUNT(*) FROM alignment_member m JOIN artifact a
+               ON a.artifact_id=m.source_artifact_id
+               WHERE a.artifact_type='alignment_peak_id_matrix' AND m.mz IS NULL
+               AND m.alignment_feature_id IN
+                   (SELECT alignment_feature_id FROM alignment_feature WHERE run_id=?)""",
+            (run_id,),
+        ).fetchone()[0]
+        if report.counts["member_mz_not_exported"]:
+            report.warnings.append(f"{report.counts['member_mz_not_exported']} member m/z not exported")
 
         # The mirror image: a member with no source peak has no source spectrum either, so a scan index
         # on such a row points at a spectrum belonging to something else.
@@ -97,8 +117,15 @@ def validate_run(database, run_id: str) -> ValidationReport:
             )""",
             (run_id,),
         ).fetchone()[0]
-        if bad_representatives:
+        member_count = report.counts["alignment_members"]
+        if bad_representatives and member_count:
             report.errors.append(f"{bad_representatives} alignments do not have exactly one representative member")
+        if representative:
+            missing = connection.execute("""SELECT COUNT(*) FROM alignment_feature
+                WHERE run_id=? AND representative_sample_id IS NOT NULL AND representative_feature_id IS NULL""",
+                (run_id,)).fetchone()[0]
+            if missing:
+                report.errors.append(f"{missing} alignments lack their representative feature")
 
         if report.counts["alignments"] != report.counts["consensus_spectra"]:
             report.errors.append(
@@ -184,20 +211,28 @@ def validate_run(database, run_id: str) -> ValidationReport:
         # The two artifacts describe the same decision from different sides, so the winner must agree.
         # .mdalign renders the representative with MS-DIAL's "no MS2: " and "low score: " prefixes, which
         # candidate_name has already stripped, and the sidecar publishes the raw reference name.
-        disagreeing_winners = connection.execute(
-            """SELECT COUNT(*) FROM msdial_annotation_candidate c
+        winners = connection.execute(
+            """SELECT c.name, c.name_at_supported_level, r.candidate_name
+               FROM msdial_annotation_candidate c
                JOIN msdial_annotation_result r
                  ON r.run_id = c.run_id AND r.subject_kind = c.subject_kind AND r.subject_id = c.subject_id
                WHERE c.run_id = ? AND c.candidate_rank = 1 AND r.rank = 1
-                 AND IFNULL(c.name, '') != IFNULL(r.candidate_name, '')""",
+                 """,
             (run_id,),
-        ).fetchone()[0]
+        )
+        # Preserve the raw dual lipid name. Current exporters publish one half;
+        # newer sidecars state the supported name explicitly, which takes priority.
+        disagreeing_winners = sum(
+            (supported != (published or "")) if supported else
+            ((published or "") not in {name or "", *(name or "").split("|")})
+            for name, supported, published in winners
+        )
         if disagreeing_winners:
             report.errors.append(
                 f"{disagreeing_winners} alignment features name a different winner in .mdalign and in the candidate set"
             )
 
-        if report.counts["sample_ms2_spectra"] == 0:
+        if report.counts["sample_ms2_spectra"] == 0 and not representative:
             report.warnings.append("No sample deconvoluted spectrum contains fragment peaks")
         if report.counts["consensus_ms2_spectra"] == 0:
             report.warnings.append("No alignment consensus spectrum contains fragment peaks")

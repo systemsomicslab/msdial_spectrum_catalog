@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 13
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -730,4 +730,76 @@ MIGRATIONS: tuple[Migration, ...] = (
             AddColumn("msdial_annotation_result", "measured_terms", "TEXT"),
         ),
     ),
+    Migration(11, "ingest granularity, unit linkage and candidate evidence", (
+        AddColumn("analysis_run", "ingest_granularity", "TEXT NOT NULL DEFAULT 'full' CHECK(ingest_granularity IN ('full','representative'))"),
+        AddColumn("analysis_run", "campaign_id", "TEXT"),
+        AddColumn("analysis_run", "manifest_digest", "TEXT"),
+        *(AddColumn("analysis_unit", name, "TEXT") for name in (
+            "catalog_unit_id", "parent_unit_key", "unit_role", "source_subrecord_id", "target_omics_applied")),
+        *(AddColumn("study", name, "TEXT") for name in ("description", "public_url", "license")),
+        *(AddColumn("sample", name, "TEXT") for name in (
+            "class_id", "source_name", "raw_file_paired_by", "metadata_matched_by")),
+        AddColumn("msdial_annotation_candidate", "evidence_source", "TEXT"),
+        AddColumn("msdial_annotation_candidate", "measured_terms", "TEXT"),
+        AddColumn("msdial_annotation_candidate", "name_at_supported_level", "TEXT"),
+        AddColumn("msdial_annotation_candidate", "is_lipid_chains_match", "INTEGER"),
+        RunSql("""CREATE TABLE IF NOT EXISTS sample_attribute (
+            sample_id TEXT NOT NULL REFERENCES sample, attribute_key TEXT NOT NULL,
+            attribute_value TEXT, source TEXT NOT NULL,
+            PRIMARY KEY(sample_id, attribute_key, source))"""),
+        RunSql("""CREATE TABLE IF NOT EXISTS analysis_unit_attribute (
+            analysis_unit_id TEXT NOT NULL REFERENCES analysis_unit, attribute_key TEXT NOT NULL,
+            attribute_value TEXT, source TEXT NOT NULL,
+            PRIMARY KEY(analysis_unit_id, attribute_key, source))"""),
+        RunSql("""CREATE TABLE IF NOT EXISTS run_metadata_source (
+            run_id TEXT NOT NULL REFERENCES analysis_run, role TEXT NOT NULL,
+            relative_label TEXT NOT NULL, sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL,
+            PRIMARY KEY(run_id, role))"""),
+    )),
+    Migration(12, "tool-run libraries, kernel identity, scope and annotator tiers", (
+        AddColumn("annotation_tool_run", "kernel_identity", "TEXT"),
+        RunSql("""CREATE TABLE IF NOT EXISTS annotation_tool_run_library (
+            tool_run_id TEXT NOT NULL REFERENCES annotation_tool_run,
+            library_name TEXT NOT NULL, sha256 TEXT NOT NULL CHECK(length(sha256)=64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+            role TEXT NOT NULL DEFAULT '', library_kind TEXT, distribution TEXT,
+            library_version TEXT, license TEXT, library_id TEXT REFERENCES reference_library,
+            PRIMARY KEY(tool_run_id, sha256, role))"""),
+        RunSql("""CREATE TABLE IF NOT EXISTS annotation_tool_run_scope (
+            tool_run_id TEXT NOT NULL REFERENCES annotation_tool_run,
+            run_id TEXT NOT NULL REFERENCES analysis_run, PRIMARY KEY(tool_run_id, run_id))"""),
+        RunSql("""CREATE TABLE IF NOT EXISTS run_annotator (
+            run_id TEXT NOT NULL REFERENCES analysis_run, annotator_id TEXT NOT NULL,
+            evidence_tier TEXT, library_kind TEXT,
+            tier TEXT NOT NULL CHECK(tier IN ('strict','relaxed','in_silico','unknown')),
+            library_name TEXT, library_sha256 TEXT, PRIMARY KEY(run_id, annotator_id))"""),
+    )),
+    Migration(13, "shared class ontology predictions and structure assignments", (
+        RunSql("""CREATE TABLE IF NOT EXISTS class_ontology (
+            ontology_id TEXT NOT NULL CHECK(ontology_id IN ('classyfire.chemont','npclassifier')),
+            ontology_version TEXT NOT NULL, source_note TEXT,
+            PRIMARY KEY(ontology_id, ontology_version))"""),
+        RunSql("""CREATE TABLE IF NOT EXISTS class_term (
+            term_id TEXT PRIMARY KEY, ontology_id TEXT NOT NULL, ontology_version TEXT NOT NULL,
+            level TEXT NOT NULL, name TEXT NOT NULL, native_id TEXT,
+            FOREIGN KEY(ontology_id, ontology_version) REFERENCES class_ontology,
+            UNIQUE(ontology_id, ontology_version, level, name))"""),
+        RunSql("""CREATE TABLE IF NOT EXISTS class_term_parent (
+            term_id TEXT NOT NULL REFERENCES class_term, parent_term_id TEXT NOT NULL REFERENCES class_term,
+            CHECK(term_id != parent_term_id), PRIMARY KEY(term_id, parent_term_id))"""),
+        RunSql("""CREATE TABLE IF NOT EXISTS class_prediction (
+            class_prediction_id TEXT PRIMARY KEY, tool_run_id TEXT NOT NULL REFERENCES annotation_tool_run,
+            subject_kind TEXT NOT NULL CHECK(subject_kind IN ('spectrum','alignment_feature')),
+            subject_id TEXT NOT NULL, term_id TEXT NOT NULL REFERENCES class_term, level TEXT NOT NULL,
+            posterior REAL CHECK(posterior BETWEEN 0 AND 1), rank INTEGER NOT NULL DEFAULT 1 CHECK(rank>0),
+            is_most_specific INTEGER NOT NULL DEFAULT 0 CHECK(is_most_specific IN (0,1)),
+            formula_context TEXT, formula_rank INTEGER, source_row_ref TEXT,
+            UNIQUE(tool_run_id, subject_kind, subject_id, term_id, formula_context))"""),
+        RunSql("CREATE INDEX IF NOT EXISTS idx_class_prediction_subject ON class_prediction(subject_kind, subject_id)"),
+        RunSql("""CREATE TABLE IF NOT EXISTS structure_class_assignment (
+            structure_key TEXT NOT NULL, structure_key_kind TEXT NOT NULL
+              CHECK(structure_key_kind IN ('inchikey','inchikey_first_block')),
+            term_id TEXT NOT NULL REFERENCES class_term, tool_run_id TEXT NOT NULL REFERENCES annotation_tool_run,
+            source_kind TEXT NOT NULL CHECK(source_kind IN ('lookup','library_field','predicted')),
+            PRIMARY KEY(structure_key, structure_key_kind, term_id, tool_run_id))"""),
+    )),
 )

@@ -1,3 +1,5 @@
+from contextlib import closing
+from msdial_spectrum_catalog.annotation import ToolRunInput, record_tool_run
 import sqlite3
 import tempfile
 import unittest
@@ -513,3 +515,30 @@ class ForeignKeyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FoundationMigrationTests(unittest.TestCase):
+    def test_main_v10_upgrade_preserves_all_rows_and_legacy_tool_id(self):
+        fixture = Path(__file__).parent / "fixtures/ws1/v10.sql"
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "catalog.sqlite"
+            with closing(sqlite3.connect(db)) as c:
+                c.executescript(fixture.read_text(encoding="utf-8"))
+                self.assertEqual(storage.read_schema_version(c), 10)
+                old = c.execute("SELECT tool_run_id FROM annotation_tool_run").fetchone()[0]
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM feature").fetchone()[0], 1)
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM msdial_annotation_candidate").fetchone()[0], 2)
+                before = {row[0]: ([col[1] for col in c.execute('PRAGMA table_info("' + row[0] + '")')],
+                                   [tuple(r) for r in c.execute('SELECT * FROM "' + row[0] + '"')])
+                          for row in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name != 'catalog_meta'").fetchall()}
+            storage.initialize(db)
+            with closing(storage.connect(db)) as c:
+                self.assertEqual(storage.read_schema_version(c), 13)
+                for table, (columns, rows) in before.items():
+                    actual = [tuple(r) for r in c.execute('SELECT ' + ','.join('"' + col + '"' for col in columns) + ' FROM "' + table + '"')]
+                    for row in rows:
+                        self.assertIn(row, actual, table)
+                self.assertEqual(c.execute("SELECT ingest_granularity FROM analysis_run").fetchone()[0], "full")
+                self.assertEqual(c.execute("PRAGMA foreign_key_check").fetchall(), [])
+            new = record_tool_run(db, ToolRunInput("invented", tool_version="1", parameters={"key": 4}), run_id="r")
+            self.assertEqual(old, new)
