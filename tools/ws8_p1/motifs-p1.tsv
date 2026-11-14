@@ -1,0 +1,16 @@
+motif_id	name	smarts	linked_shift_label	source
+glucuronide	Glucuronide	[O;X2]-[C;R]1[O;R][C;R]([C](=O)[O;H1,-1])[C;R]([O;H1])[C;R]([O;H1])[C;R]1[O;H1]	176.032	Public functional-group definition; stereochemistry ignored
+sulfate_ester	Sulfate ester	[C]-[O;X2]-[S](=[O])(=[O])-[O;H1,-1]	SO3	Public functional-group definition
+phosphate_ester	Phosphate ester	[C]-[O;X2]-[P](=[O])([O;H1,-1])-[O]	HPO3	Public functional-group definition
+hexoside	Hexoside	[O;X2]-[C;R]1[O;R][C;R]([C;!R]-[O;H1])[C;R]([O;H1])[C;R]([O;H1])[C;R]1[O;H1]	162.053	Public pyranoside definition; stereochemistry ignored
+pentoside	Pentoside	[O;X2]-[C;R]1[O;R][C;R][C;R]([O;H1])[C;R]([O;H1])[C;R]1[O;H1]	132.042	Public pyranoside definition; stereochemistry ignored
+deoxyhexoside	Deoxyhexoside	[O;X2]-[C;R]1[O;R][C;R]([CH3])[C;R]([O;H1])[C;R]([O;H1])[C;R]1[O;H1]	146.058	Public pyranoside definition; stereochemistry ignored
+indole	Indole	c1ccc2[nH,n]ccc2c1		Public ring-system definition
+catechol	Catechol	[O;H1]-c1ccccc1-[O;H1]		Public functional-group definition
+steroid	Steroid nucleus	[#6]1~[#6]~[#6]~[#6]2~[#6](~[#6]1)~[#6]~[#6]~[#6]1~[#6]3~[#6]~[#6]~[#6]~[#6]3~[#6]~[#6]~[#6]~1~2		Public 6-6-6-5 fused-carbon ring definition
+flavone	Flavone core	O=c1cc(-c2ccccc2)oc2ccccc12		Public ring-system definition
+gpc	Glycerophosphocholine	[O]-[CH2]-[CH]([O])-[CH2]-[O]-[P](=[O])([O])-[O]-[CH2]-[CH2]-[N+](C)(C)C		Public head-group definition
+gpe	Glycerophosphoethanolamine	[O]-[CH2]-[CH]([O])-[CH2]-[O]-[P](=[O])([O])-[O]-[CH2]-[CH2]-[N;H2,H3+]		Public head-group definition
+gps	Glycerophosphoserine	[O]-[CH2]-[CH]([O])-[CH2]-[O]-[P](=[O])([O])-[O]-[CH2]-[CH]([N;H2,H3+])-[C](=[O])-[O]		Public head-group definition
+gpi	Glycerophosphoinositol	[O]-[CH2]-[CH]([O])-[CH2]-[O]-[P](=[O])([O])-[O]-[C]1[C]([O])[C]([O])[C]([O])[C]([O])[C]1[O]		Public head-group definition
+gpg	Glycerophosphoglycerol	[O]-[CH2]-[CH]([O])-[CH2]-[O]-[P](=[O])([O])-[O]-[CH2]-[CH]([O])-[CH2]-[O]		Public head-group definition
