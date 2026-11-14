@@ -19,6 +19,7 @@ from .parsers import (
     split_refs,
 )
 from .storage import initialize, transaction
+from .devset import refuse_analysis_output
 
 
 @dataclass
@@ -32,6 +33,11 @@ class IngestReport:
     msdial_annotation_results: int = 0
     msdial_annotation_candidates: int = 0
     mztab_sme_linked: int = 0
+    granularity: str = "full"
+    representative_spectra_nonempty: int = 0
+    db_bytes_after: int = 0
+    library_identity_unresolved: int = 0
+    metadata_matched: int = 0
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -150,8 +156,12 @@ _CANDIDATE_TEXT_COLUMNS = (
     ("smiles", "smiles"),
     ("reference_adduct", "reference_adduct"),
     ("annotation_tag", "annotation_tag_vs1"),
+    ("evidence_source", "evidence_source"),
+    ("measured_terms", "measured_terms"),
+    ("name_at_supported_level", "name_at_supported_level"),
 )
 _CANDIDATE_FLAG_COLUMNS = (
+    "is_lipid_chains_match",
     "is_reference_matched",
     "is_annotation_suggested",
     "is_precursor_mz_match",
@@ -221,6 +231,9 @@ def _candidate_block(row: dict[str, str]) -> tuple[dict[str, object], list[str]]
         name: _text_or_none(folded_value(folded, column))
         for name, column in _CANDIDATE_TEXT_COLUMNS
     }
+    for name in ("evidence_source", "measured_terms"):
+        value = row.get(name)
+        block[name] = value if value and value.strip() else None
     for name in _CANDIDATE_FLAG_COLUMNS:
         block[name] = _flag_or_none(folded_value(folded, name))
     for name in _CANDIDATE_INTEGER_COLUMNS:
@@ -438,7 +451,13 @@ def ingest_run(
     interactive_version: str | None = None,
     analysis_files_csv: str | Path | None = None,
     parameter_file: str | Path | None = None,
+    granularity: str = "full",
+    members: bool = True,
+    mztab: str = "all",
 ) -> IngestReport:
+    if granularity not in {"full", "representative"} or mztab not in {"all", "none"}:
+        raise ValueError("invalid ingest granularity or mzTab mode")
+    refuse_analysis_output(database)
     initialize(database)
     run_dir = Path(run_directory).resolve()
     files = sorted(path for path in run_dir.iterdir() if path.is_file())
@@ -446,6 +465,10 @@ def ingest_run(
     for optional_path in (analysis_files_csv, parameter_file):
         if optional_path:
             resolved = Path(optional_path).resolve()
+            if (resolved.name.lower() == "msp_annotator_settings.tsv"
+                    or resolved.suffix.lower() == ".json"
+                    or resolved.name.lower().endswith("_sample_metadata_reviewed.tsv")):
+                raise ValueError("metadata/settings cannot be registered as an artifact")
             if resolved not in relevant:
                 relevant.append(resolved)
     relevant.sort()
@@ -459,9 +482,17 @@ def ingest_run(
     study_id = make_id("study", repository, accession)
     unit_id = make_id("unit", repository, accession, analysis_unit)
     run_id = make_id("run", repository, accession, analysis_unit, fingerprint[:20])
-    report = IngestReport(run_id=run_id)
+    report = IngestReport(run_id=run_id, granularity=granularity)
 
     with transaction(database) as connection:
+        existing = connection.execute("SELECT ingest_granularity FROM analysis_run WHERE run_id=?",
+                                      (run_id,)).fetchone()
+        if existing and existing[0] == "full" and granularity == "representative":
+            report.granularity = "full"
+            report.warnings.append("already full")
+            _report_counts(connection, report, unit_id)
+            report.db_bytes_after = Path(database).stat().st_size
+            return report
         connection.execute(
             "INSERT OR IGNORE INTO study(study_id, repository, accession, title) VALUES (?, ?, ?, ?)",
             (study_id, repository, accession, study_title),
@@ -474,6 +505,8 @@ def ingest_run(
             "INSERT OR IGNORE INTO analysis_run(run_id, analysis_unit_id, run_fingerprint, output_directory, msdial_version, interactive_version) VALUES (?, ?, ?, ?, ?, ?)",
             (run_id, unit_id, fingerprint, str(run_dir), msdial_version, interactive_version),
         )
+        connection.execute("UPDATE analysis_run SET ingest_granularity=? WHERE run_id=?",
+                           (granularity, run_id))
 
         artifact_ids: dict[Path, int] = {}
         for path in relevant:
@@ -486,6 +519,28 @@ def ingest_run(
             ).fetchone()[0]
 
         alignment_stems = {path.stem for path in relevant if path.suffix.lower() == ".mdalign"}
+        # Resolve representative peak keys before loading features. Detailed provenance wins,
+        # exactly as in the member pass below; compact matrices remain supported.
+        representative_names = {}
+        for path in relevant:
+            if path.suffix.lower() == ".mdalign":
+                for _, row in read_tsv(path, "Alignment ID\t"):
+                    representative_names[parse_number(row.get("Alignment ID"), int)] = row.get(
+                        "Spectrum reference file name", "").strip()
+        representative_keys = set()
+        for path in relevant:
+            if path.name.lower().endswith(".mdpeakid.tsv"):
+                for _, row in read_tsv(path):
+                    name = representative_names.get(parse_number(row.get("alignment_master_id"), int))
+                    peak = parse_number(row.get(name), int) if name else None
+                    if peak is not None and peak >= 0:
+                        representative_keys.add((name, peak))
+            if path.name.lower().endswith(".mdprovenance.tsv"):
+                for _, row in read_tsv(path):
+                    if row.get("is_representative", "").lower() == "true":
+                        peak = parse_number(row.get("source_master_peak_id"), int)
+                        if peak is not None and peak >= 0:
+                            representative_keys.add((row.get("file_name", ""), peak))
         samples: dict[str, str] = {}
         features: dict[tuple[str, int], str] = {}
         analysis_metadata = {}
@@ -509,6 +564,8 @@ def ingest_run(
                 peak_id = parse_number(row.get("Peak ID"), int)
                 if peak_id is None:
                     continue
+                if granularity == "representative" and (sample_name, peak_id) not in representative_keys:
+                    continue
                 feature_id = make_id("feature", run_id, sample_name, peak_id)
                 features[(sample_name, peak_id)] = feature_id
                 connection.execute(
@@ -524,7 +581,7 @@ def ingest_run(
                     ),
                 )
                 block = _annotation_block(row)
-                if block is not None:
+                if block is not None and granularity == "full":
                     _insert_annotation_result(
                         connection, run_id, "feature", feature_id, block,
                         artifact_ids[peak_path], row_number,
@@ -534,7 +591,7 @@ def ingest_run(
             path for path in relevant
             if path.suffix.lower() == ".mdmsp" and path.stem not in alignment_stems
         ]
-        for msp_path in sample_msp_paths:
+        for msp_path in sample_msp_paths if granularity == "full" else []:
             sample_name = msp_path.stem
             sample_id = samples.get(sample_name)
             if sample_id is None:
@@ -651,11 +708,17 @@ def ingest_run(
                     source_peak_id = parse_number(raw_peak_id, int)
                     has_source_peak = source_peak_id is not None and source_peak_id >= 0
                     feature_id = features.get((sample_name, source_peak_id)) if has_source_peak else None
-                    if has_source_peak and feature_id is None:
+                    is_representative = sample_name == representative_name
+                    if has_source_peak and feature_id is None and (granularity == "full" or is_representative):
                         report.errors.append(
                             f"Alignment {alignment_id}, {sample_name} references missing peak {source_peak_id}"
                         )
                     is_representative = sample_name == representative_name
+                    if not members:
+                        if is_representative:
+                            connection.execute("UPDATE alignment_feature SET representative_sample_id=?, representative_feature_id=? WHERE alignment_feature_id=?",
+                                               (sample_id, feature_id, alignment_feature_id))
+                        continue
                     member_id = make_id("alignment-member", run_id, alignment_id, sample_name)
                     connection.execute(
                         """INSERT INTO alignment_member(
@@ -700,9 +763,15 @@ def ingest_run(
                 source_peak_id = parse_number(row.get("source_master_peak_id"), int)
                 feature_id = features.get((sample_name, source_peak_id)) if source_peak_id is not None and source_peak_id >= 0 else None
                 has_source_peak = row.get("has_source_peak", "").lower() == "true"
-                if has_source_peak and feature_id is None:
+                is_representative = row.get("is_representative", "").lower() == "true"
+                if has_source_peak and feature_id is None and (granularity == "full" or is_representative):
                     report.errors.append(f"Alignment {alignment_id}, {sample_name} references missing peak {source_peak_id}")
                 member_id = make_id("alignment-member", run_id, alignment_id, sample_name)
+                if not members:
+                    if is_representative:
+                        connection.execute("UPDATE alignment_feature SET representative_sample_id=?, representative_feature_id=? WHERE alignment_feature_id=?",
+                                           (sample_id, feature_id, alignment_feature_id))
+                    continue
                 existing_member = connection.execute(
                     "SELECT source_master_peak_id FROM alignment_member WHERE alignment_feature_id = ? AND sample_id = ?",
                     (alignment_feature_id, sample_id),
@@ -780,7 +849,17 @@ def ingest_run(
             for row_number, row in read_tsv(candidate_path):
                 alignment_id = parse_number(row.get("alignment_master_id"), int)
                 alignment_feature_id = alignments.get(alignment_id) if alignment_id is not None else None
-                if alignment_feature_id is None:
+                subject_kind = row.get("subject_kind", "alignment_feature")
+                subject_id = alignment_feature_id
+                if subject_kind == "feature":
+                    if granularity != "full":
+                        continue
+                    subject_id = features.get((row.get("file_name", ""), parse_number(row.get("peak_id"), int)))
+                    alignment_feature_id = None
+                elif subject_kind != "alignment_feature":
+                    report.errors.append("unsupported candidate subject kind")
+                    continue
+                if subject_id is None:
                     report.errors.append(f"Unknown alignment ID {alignment_id} in {candidate_path.name}")
                     continue
                 rank = parse_number(row.get("candidate_rank"), int)
@@ -797,22 +876,22 @@ def ingest_run(
                     )
                 columns = ", ".join(_CANDIDATE_FIELDS)
                 placeholders = ", ".join("?" for _ in _CANDIDATE_FIELDS)
-                candidate_id = make_id("msdial-candidate", run_id, "alignment_feature", alignment_feature_id, rank)
+                candidate_id = make_id("msdial-candidate", run_id, subject_kind, subject_id, rank)
                 connection.execute(
                     f"""INSERT OR IGNORE INTO msdial_annotation_candidate(
                         msdial_annotation_candidate_id, run_id, subject_kind, subject_id,
                         alignment_feature_id, candidate_rank, candidate_count, is_representative,
                         {columns}, source_artifact_id, source_row
-                    ) VALUES (?, ?, 'alignment_feature', ?, ?, ?, ?, ?, {placeholders}, ?, ?)""",
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, {placeholders}, ?, ?)""",
                     (
-                        candidate_id, run_id, alignment_feature_id, alignment_feature_id, rank, count,
+                        candidate_id, run_id, subject_kind, subject_id, alignment_feature_id, rank, count,
                         int(row.get("is_representative", "").strip().lower() == "true"),
                         *(block[name] for name in _CANDIDATE_FIELDS),
                         artifact_ids[candidate_path], row_number,
                     ),
                 )
 
-        for mztab_path in (path for path in relevant if path.name.lower().endswith(".mztab")):
+        for mztab_path in (path for path in relevant if mztab == "all" and path.name.lower().endswith(".mztab")):
             smf_to_alignment: dict[str, str] = {}
             sme_to_alignment: dict[str, str] = {}
             sme_owner: dict[str, str] = {}
@@ -895,4 +974,20 @@ def ingest_run(
         }
         for field_name, (query, parameter) in counts.items():
             setattr(report, field_name, connection.execute(query, (parameter,)).fetchone()[0])
+        report.representative_spectra_nonempty = connection.execute(
+            "SELECT COUNT(*) FROM spectrum WHERE run_id=? AND spectrum_kind='alignment_consensus' AND peak_count>0",
+            (run_id,)).fetchone()[0]
+    report.db_bytes_after = Path(database).stat().st_size
     return report
+
+
+def _report_counts(connection, report, unit_id):
+    for field, table in (("features", "feature"), ("spectra", "spectrum"),
+                         ("alignments", "alignment_feature"),
+                         ("msdial_annotation_results", "msdial_annotation_result"),
+                         ("msdial_annotation_candidates", "msdial_annotation_candidate")):
+        setattr(report, field, connection.execute(f"SELECT COUNT(*) FROM {table} WHERE run_id=?",
+                                                  (report.run_id,)).fetchone()[0])
+    report.samples = connection.execute("SELECT COUNT(*) FROM sample WHERE analysis_unit_id=?", (unit_id,)).fetchone()[0]
+    report.alignment_members = connection.execute("SELECT COUNT(*) FROM alignment_member WHERE alignment_feature_id IN (SELECT alignment_feature_id FROM alignment_feature WHERE run_id=?)", (report.run_id,)).fetchone()[0]
+    report.representative_spectra_nonempty = connection.execute("SELECT COUNT(*) FROM spectrum WHERE run_id=? AND spectrum_kind='alignment_consensus' AND peak_count>0", (report.run_id,)).fetchone()[0]

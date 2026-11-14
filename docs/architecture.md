@@ -68,3 +68,74 @@ than no product-ion spectrum to compare with.
 SQLite stores searchable metadata and compressed spectrum payloads in v0.1.
 When corpus size warrants it, `spectrum_blob` can move to repository/run shards
 or Parquet without changing any logical identifier or provenance table.
+## Ingest granularity and linkage
+
+Migrations v11-v13 extend existing databases without replacing their rows. v11
+adds ingest granularity, campaign linkage, reviewed sample/unit attributes and
+candidate evidence_source/measured_terms. v12 adds library identities, kernel
+identity, multi-run scope and run_annotator. v13 supplies the shared class model
+described in [class_ontology.md](class_ontology.md).
+Declared v11 deviation: `name_at_supported_level` and `is_lipid_chains_match`
+also preserve MS-DIAL's optional columns (MsdialWorkbench #898).
+Blank candidate evidence_source/measured_terms become NULL; nonblank values
+remain verbatim.
+MS-DIAL tables use plain tab-separated cells. The reader preserves literal quotes
+and supports exported spectrum cells larger than the CSV module's 128-KiB
+default; reviewed metadata CSV/TSV readers retain their own quoting semantics.
+Member m/z validation applies to detailed provenance rows. Peak-ID matrix rows
+do not export m/z and contribute a coverage count instead. Winner reconciliation
+accepts the full dual lipid name or either exact half separated by `|`; when exported,
+`name_at_supported_level` takes priority. The candidate keeps its raw record name
+and the optional `is_lipid_chains_match` flag.
+
+`ingest-run --granularity representative` preserves every alignment consensus
+(empty records included), alignment candidates, sample identities and only the
+features referenced by representatives. Per-sample spectra and feature annotation
+results are omitted. `--no-members` and `--mztab none` independently reduce size.
+Artifacts and fingerprints are identical across modes; full upgrades add rows
+under the same run_id, and representative over full is a no-op. Validation reads
+granularity and permits missing nonrepresentative features. Representatives
+remain resolvable even when member rows are omitted.
+
+`ingest-unit DB UNIT_DIR` obtains identifiers and linkage from allowlisted fields
+of the provenance/output manifests and campaign record. The directory and unit
+identifiers must agree before writing. Optional handoff attributes and reviewed
+sample TSVs are stored separately from artifacts; their labeled checksums do not
+affect run identity. Reviewed rows join by sample stem first, then the basename
+of analysis_files.csv file_path, comparing both against reviewed sample_id and
+recording the rule. All remaining phenotype columns keep their verbatim headers.
+Export phenotype data with
+`export-sample-attributes DB --out FILE.tsv [--unit ID]`.
+
+Only annotator_settings.read_annotator_settings opens the settings file and
+projects the three allowed columns for linkage and msemblator export.
+The export hashes its spectrum and candidate inputs, excluding the settings
+file because its unselected cells include library paths. Selection and exported
+MSP/manifest content retain their existing behaviour.
+Generic msp_high_quality/msp_low_quality names resolve to the unique acquired MSP
+in output-manifest libraries; msp_in_silico resolves to the unique predicted MSP.
+Named MSP:/LbmDB: IDs resolve by role and exact file name/stem, with recognised
+high/low suffixes. Ambiguous or absent identities remain NULL and are counted.
+All identities come from the manifest, never the settings path column.
+`validate-run` reports metadata_sources and warns when no run_metadata_source
+rows exist, exposing an ingest interrupted before linkage. Direct legacy ingests
+remain valid with that warning.
+
+Each linked run seeds msdial.console with campaign libraries_as_run, enriched by
+SHA-256 from output-manifest libraries; set differences are warnings. Library
+names/hashes, parameters and provenance determine tool identity. Empty new
+fields retain the baseline hash. Explicit scopes participate in identity and
+link a multi-run tool without changing the similarity key.
+
+`ingest-devset DB DEVSET --granularity representative` preflights all units and
+private-library naming before creating outputs, then ingests and validates each
+sequentially. Failures are isolated and counted in run.json. It records commit,
+pin directory, Python version, selection digest/checksum, parameters, reports and
+database checksum/size. Builds refuse existing outputs and analysis-root writes.
+`size-probe --unit-dir UNIT [--unit-dir UNIT ...] --out FILE` measures four variants
+after VACUUM, reports row counts and dbstat bytes when available, and deletes its
+exact scratch database files. `privacy-scan DB` returns counts only for forbidden
+library paths in TEXT columns, with the three specified path-column exemptions.
+`build-report DB [--devset FILE] [--out FILE]` produces a counts-only handback,
+validates every run, scans privacy and independently reconciles representative
+candidate counts against the source sidecars of the supplied selection.

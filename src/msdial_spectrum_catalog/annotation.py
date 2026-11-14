@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import re
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass, field
 
 from .identifiers import make_id, short_hash
 from .storage import connect, initialize, transaction
@@ -25,6 +27,24 @@ IN_SILICO_LIBRARY_KIND = "in_silico_predicted"
 
 
 @dataclass(frozen=True)
+class LibraryIdentity:
+    library_name: str
+    sha256: str
+    role: str = ""
+    library_kind: str | None = None
+    distribution: str | None = None
+    library_version: str | None = None
+    license: str | None = None
+    library_id: str | None = None
+
+    def __post_init__(self):
+        if not self.library_name or re.search(r"[\\/]|^[A-Za-z]:", self.library_name):
+            raise ValueError("library_name must be a name, never a path")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.sha256):
+            raise ValueError("library sha256 must be 64 lowercase hexadecimal characters")
+
+
+@dataclass(frozen=True)
 class ToolRunInput:
     tool_name: str
     tool_version: str | None = None
@@ -34,6 +54,9 @@ class ToolRunInput:
     status: str = "completed"
     started_at: str | None = None
     finished_at: str | None = None
+    libraries: tuple[LibraryIdentity, ...] = ()
+    kernel_identity: str | None = None
+    scope_run_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -135,10 +158,15 @@ def _resolve(vocabulary, axis: str, token: str, mode: str):
     return term
 
 
-def record_tool_run(database, tool_run: ToolRunInput, *, run_id: str | None = None) -> str:
-    initialize(database)
-    identity = _canonical(
-        {
+def record_tool_run(database, tool_run: ToolRunInput, *, run_id: str | None = None,
+                    connection=None) -> str:
+    """Record a tool run, optionally within the caller's initialized transaction."""
+    scope_ids = set(tool_run.scope_run_ids) | ({run_id} if run_id else set())
+    if len(scope_ids) > 1:
+        run_id = None
+    if connection is None:
+        initialize(database)
+    identity_fields = {
             "tool_name": tool_run.tool_name,
             "tool_version": tool_run.tool_version,
             "run_id": run_id,
@@ -146,11 +174,17 @@ def record_tool_run(database, tool_run: ToolRunInput, *, run_id: str | None = No
             "provenance": tool_run.provenance,
             "input_fingerprint": tool_run.input_fingerprint,
         }
-    )
+    if tool_run.libraries or tool_run.kernel_identity:
+        identity_fields["libraries"] = [asdict(library) for library in sorted(
+            tool_run.libraries, key=lambda lib: (lib.sha256, lib.role))]
+        identity_fields["kernel_identity"] = tool_run.kernel_identity
+    if tool_run.scope_run_ids:
+        identity_fields["scope_run_ids"] = sorted(scope_ids)
+    identity = _canonical(identity_fields)
     tool_run_id = make_id(
         "tool-run", tool_run.tool_name, tool_run.tool_version or "unversioned", short_hash(identity)
     )
-    with transaction(database) as connection:
+    with (transaction(database) if connection is None else nullcontext(connection)) as connection:
         connection.execute(
             """INSERT INTO annotation_tool_run(
                    tool_run_id, run_id, tool_name, tool_version, tool_provenance_json,
@@ -178,6 +212,18 @@ def record_tool_run(database, tool_run: ToolRunInput, *, run_id: str | None = No
                 tool_run.status,
             ),
         )
+        connection.execute("UPDATE annotation_tool_run SET kernel_identity=? WHERE tool_run_id=?",
+                           (tool_run.kernel_identity, tool_run_id))
+        for library in tool_run.libraries:
+            connection.execute("""INSERT OR IGNORE INTO annotation_tool_run_library
+                (tool_run_id, library_name, sha256, role, library_kind, distribution,
+                 library_version, license, library_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (tool_run_id, library.library_name, library.sha256, library.role,
+                 library.library_kind, library.distribution, library.library_version,
+                 library.license, library.library_id))
+        for scope in sorted(scope_ids):
+            connection.execute("INSERT OR IGNORE INTO annotation_tool_run_scope VALUES (?, ?)",
+                               (tool_run_id, scope))
     return tool_run_id
 
 

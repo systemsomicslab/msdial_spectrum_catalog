@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import asdict
 
 from .ambiguity import ClassDefinition, ambiguity_class_for, compute_ambiguity_classes
 from .annotation import list_assertions, load_assertion, validate_annotations
@@ -31,6 +32,9 @@ def _report_dict(report):
         "spectra": report.spectra,
         "alignments": report.alignments,
         "alignment_members": report.alignment_members,
+        "granularity": report.granularity,
+        "representative_spectra_nonempty": report.representative_spectra_nonempty,
+        "db_bytes_after": report.db_bytes_after,
         "errors": report.errors,
         "warnings": report.warnings,
     }
@@ -39,6 +43,8 @@ def _report_dict(report):
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="MS-DIAL spectrum provenance catalog")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    from .foundation_cli import add_ingest_options, add_parsers, dispatch
+    add_parsers(subparsers)
     devset_parser = subparsers.add_parser("devset", help="Build a read-only campaign selection")
     devset_sub = devset_parser.add_subparsers(dest="devset_command", required=True)
     build_parser = devset_sub.add_parser("build")
@@ -66,6 +72,8 @@ def main(argv=None) -> int:
     ingest_parser.add_argument("--interactive-version")
     ingest_parser.add_argument("--analysis-files", help="analysis_files.csv used by MS-DIAL")
     ingest_parser.add_argument("--parameter-file", help="MS-DIAL method/parameter file used by the run")
+    ingest_parser.add_argument("--unit-dir")
+    add_ingest_options(ingest_parser)
 
     show_parser = subparsers.add_parser("show-run", help="Show registered run counts")
     show_parser.add_argument("database")
@@ -206,6 +214,9 @@ def main(argv=None) -> int:
     msemblator_parser.add_argument("--max-spectra", type=int)
 
     args = parser.parse_args(argv)
+    foundation_result = dispatch(args)
+    if foundation_result is not None:
+        return foundation_result
     if args.command == "devset":
         from .devset import build_devset
         import sys
@@ -236,12 +247,28 @@ def main(argv=None) -> int:
         print(args.database)
         return 0
     if args.command == "ingest-run":
+        if args.unit_dir:
+            from .linkage import ingest_unit
+            from pathlib import Path
+            if Path(args.run_directory).resolve() != (Path(args.unit_dir) / "output").resolve():
+                parser.error("run directory disagrees with unit output")
+            report = ingest_unit(args.database, args.unit_dir, granularity=args.granularity,
+                                 members=not args.no_members, mztab=args.mztab,
+                                 expected={"repository": args.repository, "accession": args.accession,
+                                           "analysis_unit_id": args.analysis_unit,
+                                           "title": args.study_title, "separation": args.separation_type,
+                                           "ion_mode": args.ion_mode, "acquisition_mode": args.acquisition_type,
+                                           "msdial_console_version": args.msdial_version,
+                                           "msdial_interactive_version": args.interactive_version})
+            print(json.dumps(asdict(report), indent=2))
+            return 0 if report.valid else 2
         report = ingest_run(
             args.database, args.run_directory, args.repository, args.accession, args.analysis_unit,
             study_title=args.study_title, separation_type=args.separation_type, ion_mode=args.ion_mode,
             acquisition_type=args.acquisition_type, msdial_version=args.msdial_version,
             interactive_version=args.interactive_version,
             analysis_files_csv=args.analysis_files, parameter_file=args.parameter_file,
+            granularity=args.granularity, members=not args.no_members, mztab=args.mztab,
         )
         print(json.dumps(_report_dict(report), ensure_ascii=False, indent=2))
         return 0 if report.valid else 2
