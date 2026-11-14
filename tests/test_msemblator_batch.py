@@ -35,11 +35,21 @@ codes = [int(c) for c in os.environ.get("FAKE_EXITS", "0").split(",")]
 code = codes[min(calls, len(codes) - 1)]
 if out.exists() and any(out.iterdir()):
     sys.exit(3)
+if os.environ.get("FAKE_REFUSE"):  # the real driver refuses (busy work folder) before writing anything
+    sys.exit(3)
 out.mkdir(parents=True, exist_ok=True)
-record = {"exit_code": code, "input_sha256": hashlib.sha256(inp.read_bytes()).hexdigest(),
+priority = None
+if sys.platform == "win32":
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    priority = kernel32.GetPriorityClass(ctypes.c_void_p(kernel32.GetCurrentProcess()))
+if code:
+    sys.stderr.write("login for someone@example.org failed\n")
+record = {"exit_code": code, "input_sha256": hashlib.sha256(inp.read_bytes()).hexdigest(), "priority": priority,
           "started_at": "2026-11-13T00:00:%02d+00:00" % calls, "finished_at": "2026-11-13T00:00:%02d.5+00:00" % calls,
           "duration_seconds": 0.5, "failed_steps": [], "login_ok": os.environ.get("FAKE_LOGIN") != "bad",
-          "service_error_lines": 0, "stage_seconds": {"structure.sirius": 2.0}, "name_map": {"sent_to_structure": 2},
+          "service_error_lines": int(os.environ.get("FAKE_SERVICE_LINES", "0")), "stage_seconds": {"structure.sirius": 2.0}, "name_map": {"sent_to_structure": 2},
           "error": None if code == 0 else "fake failure"}
 (out / "msemblator_run.json").write_text(json.dumps(record))
 sys.exit(code)
@@ -95,7 +105,7 @@ class BatchTest(unittest.TestCase):
             return batch.run_batch(self.run_dir / "plan.json", self.msemblator, python=Path(sys.executable),
                                    driver=self.fake, hash_libraries=False, **kwargs)
         finally:
-            for name in ("FAKE_COUNTER", "FAKE_EXITS", "FAKE_LOGIN"):
+            for name in ("FAKE_COUNTER", "FAKE_EXITS", "FAKE_LOGIN", "FAKE_SERVICE_LINES", "FAKE_REFUSE"):
                 os.environ.pop(name, None)
 
     def _calls(self):
@@ -157,12 +167,87 @@ class BatchTest(unittest.TestCase):
         self.assertTrue(output.with_name(output.name + ".failed-1").is_dir())
         self.assertEqual(json.loads((output / "msemblator_run.json").read_text())["exit_code"], 0)
 
+    def _invocation(self, index=-1):
+        return json.loads((self.run_dir / "run.json").read_text(encoding="utf-8"))["invocations"][index]
+
     def test_a_chunk_that_fails_twice_is_left_failed(self):
-        self._run(exits="2", limit=1)
+        self.assertEqual(self._run(exits="2", limit=1), batch.EXIT_CHUNKS_FAILED)
         self.assertEqual(self._calls(), 2)
         summary = batch.status(self.run_dir / "plan.json")
         self.assertEqual(summary["chunks"]["failed"], 1)
         self.assertEqual(summary["failures"][0]["reason"], "fake failure")
+        self.assertEqual(summary["failures"][0]["attempts_counted"], 2)
+        self.assertEqual(self._invocation()["chunks_failed"],
+                         [{"chunk_id": self.plan["chunks"][0]["chunk_id"], "exit_code": 2, "service_failure": False}])
+
+    def test_failed_chunks_are_not_reported_as_completed(self):
+        self.assertEqual(self._run(exits="1"), batch.EXIT_CHUNKS_FAILED)
+        self.assertEqual(self._calls(), 12)
+        self.assertEqual(self._invocation()["outcome"], "finished with 6 failed chunks")
+        # a resumed run skips the exhausted chunks, but still says they are failed
+        self.assertEqual(self._run(exits="0"), batch.EXIT_CHUNKS_FAILED)
+        self.assertEqual(self._calls(), 12)
+        self.assertEqual(len(self._invocation()["chunks_exhausted"]), 6)
+        self.assertEqual(self._invocation()["outcome"], "finished with 6 failed chunks")
+
+    def test_an_unexpected_exception_is_recorded_as_a_crash(self):
+        real = batch.set_aside
+
+        def denied(output):
+            raise PermissionError("a handle is still open")
+
+        batch.set_aside = denied
+        try:
+            with self.assertRaises(PermissionError):
+                self._run()
+        finally:
+            batch.set_aside = real
+        self.assertTrue(self._invocation()["outcome"].startswith("crashed: PermissionError"))
+        self.assertFalse((self.root / batch.LOCK_NAME).exists())
+
+    def test_set_aside_takes_the_next_free_index(self):
+        output = self.run_dir / "units" / "x" / "c000"
+        output.mkdir(parents=True)
+        (output / "msemblator.log").write_text("x\n", encoding="utf-8")
+        output.with_name("c000.failed-2").mkdir()  # failed-1 was removed by hand
+        self.assertEqual(batch.set_aside(output).name, "c000.failed-3")
+
+    def test_a_changed_plan_is_refused(self):
+        self._run(limit=1)
+        with (self.run_dir / "plan.json").open("a", encoding="utf-8") as handle:
+            handle.write("\n")
+        self.assertEqual(self._run(), batch.EXIT_REFUSED)
+        self.assertEqual(self._calls(), 1)
+
+    def test_a_done_record_for_another_input_stops_the_batch(self):
+        self._run(limit=1)
+        output = self.run_dir / self.plan["chunks"][0]["output_dir"]
+        record = json.loads((output / "msemblator_run.json").read_text(encoding="utf-8"))
+        record["input_sha256"] = "0" * 64
+        (output / "msemblator_run.json").write_text(json.dumps(record), encoding="utf-8")
+        self.assertEqual(self._run(), batch.EXIT_STOPPED)
+        self.assertEqual(self._calls(), 1)
+        self.assertIn("another input", self._invocation()["outcome"])
+
+    def test_status_counts_an_interrupted_attempt(self):
+        output = self.run_dir / self.plan["chunks"][0]["output_dir"]
+        output.mkdir(parents=True)
+        (output / "msemblator.log").write_text("partial\n", encoding="utf-8")
+        summary = batch.status(self.run_dir / "plan.json")
+        self.assertEqual(summary["partial_bundles"], [self.plan["chunks"][0]["chunk_id"]])
+        self.assertEqual(batch.attempts_used(output), 1)
+
+    def test_driver_runs_below_normal_and_the_events_are_scrubbed(self):
+        self._run(exits="1,0", limit=1)
+        self.assertEqual(self._invocation()["driver_priority"], "below_normal")
+        record = json.loads((self.run_dir / self.plan["chunks"][0]["output_dir"] / "msemblator_run.json")
+                            .read_text(encoding="utf-8"))
+        if sys.platform == "win32":
+            self.assertEqual(record["priority"], batch.BELOW_NORMAL_PRIORITY_CLASS)
+        events = (self.run_dir / "batch_events.jsonl").read_text(encoding="utf-8")
+        self.assertIn("<account>", events)
+        self.assertNotIn("example.org", events)
+        self.assertEqual(list(self.run_dir.glob("*.tmp")), [])
 
     def test_held_lock_refuses_a_second_runner(self):
         lock = self.root / batch.LOCK_NAME
@@ -181,12 +266,151 @@ class BatchTest(unittest.TestCase):
         self.assertEqual(self._run(limit=1), 0)
         self.assertFalse(lock.exists())
 
-    def test_consecutive_login_failures_stop_the_batch(self):
+    def test_stale_lock_with_a_live_driver_is_not_taken_over(self):
+        lock = self.root / batch.LOCK_NAME
+        lock.write_text(json.dumps({"pid": 999999999, "driver_pid": os.getpid(),
+                                    "host": batch.socket.gethostname(), "run_id": "old"}))
+        self.assertEqual(self._run(), batch.EXIT_REFUSED)
+        self.assertEqual(self._calls(), 0)
+        self.assertTrue(lock.exists())
+
+    def test_consecutive_login_failures_stop_the_batch_without_spending_attempts(self):
         os.environ["FAKE_LOGIN"] = "bad"
-        self.assertEqual(self._run(exits="2", max_attempts=1), 1)
-        self.assertEqual(self._calls(), 3)
-        run_json = json.loads((self.run_dir / "run.json").read_text(encoding="utf-8"))
-        self.assertIn("consecutive", run_json["invocations"][-1]["outcome"])
+        self.assertEqual(self._run(exits="2"), batch.EXIT_STOPPED)
+        self.assertEqual(self._calls(), 3, "a login failure must not be retried at once")
+        self.assertIn("consecutive", self._invocation()["outcome"])
+        event = json.loads((self.run_dir / "batch_events.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        self.assertFalse(event["counts_as_attempt"])
+        # after a re-login every chunk runs, the three that failed on login included, even with one attempt
+        self.assertEqual(self._run(exits="0", max_attempts=1), batch.EXIT_OK)
+        self.assertEqual(self._calls(), 9)
+        self.assertEqual(batch.status(self.run_dir / "plan.json")["chunks"]["done"], 6)
+
+    def test_login_failures_count_after_the_free_ones(self):
+        output = self.run_dir / self.plan["chunks"][0]["output_dir"]
+        for run in range(batch.FREE_LOGIN_FAILURES + 1):
+            os.environ["FAKE_LOGIN"] = "bad"
+            self._run(exits="2", limit=1, max_attempts=1)
+            self.assertEqual(batch.attempts_used(output), 0 if run < batch.FREE_LOGIN_FAILURES else 1)
+        events = [json.loads(line) for line in
+                  (self.run_dir / "batch_events.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([e["counts_as_attempt"] for e in events], [False, False, False, True])
+        self._run(exits="0", limit=1, max_attempts=1)  # exhausted now: the next chunk runs instead
+        self.assertEqual(self._calls(), batch.FREE_LOGIN_FAILURES + 2)
+        self.assertIn(self.plan["chunks"][0]["chunk_id"], self._invocation()["chunks_exhausted"])
+
+    def _events(self):
+        return [json.loads(line) for line in
+                (self.run_dir / "batch_events.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    def test_an_incidental_service_line_does_not_exempt_a_real_failure(self):
+        output = self.run_dir / self.plan["chunks"][0]["output_dir"]
+        for invocation in range(2):  # one matching line in an otherwise ordinary failure
+            os.environ["FAKE_SERVICE_LINES"] = "1"
+            self.assertEqual(self._run(exits="1", stop_after=99), batch.EXIT_CHUNKS_FAILED)
+            self.assertEqual(self._calls(), 6 * (invocation + 1), "not retried at once, but run on resume")
+            self.assertEqual(batch.attempts_used(output), invocation + 1, "every such attempt counts")
+        self.assertTrue(all(e["counts_as_attempt"] for e in self._events()))
+        self.assertEqual(self._run(exits="0"), batch.EXIT_CHUNKS_FAILED)
+        self.assertEqual(self._calls(), 12, "exhausted chunks are not rerun")
+        self.assertEqual(len(self._invocation()["chunks_exhausted"]), 6)
+
+    def test_a_web_service_outage_does_not_spend_every_attempt_at_once(self):
+        os.environ["FAKE_SERVICE_LINES"] = "3"  # login valid, the web service failing
+        self.assertEqual(self._run(exits="2"), batch.EXIT_STOPPED)
+        self.assertEqual(self._calls(), 3, "one attempt per chunk before --stop-after fires")
+        self.assertIn("consecutive", self._invocation()["outcome"])
+        output = self.run_dir / self.plan["chunks"][0]["output_dir"]
+        self.assertEqual(batch.attempts_used(output), 1)
+        # after recovery each of those chunks still has an attempt left
+        self.assertEqual(self._run(exits="0"), batch.EXIT_OK)
+        self.assertEqual(self._calls(), 9)
+
+    def test_a_refusal_before_any_output_is_not_counted(self):
+        os.environ["FAKE_REFUSE"] = "1"
+        self.assertEqual(self._run(), batch.EXIT_STOPPED)
+        event = self._events()[-1]
+        self.assertEqual(event["exit_code"], batch.EXIT_REFUSED)
+        self.assertFalse(event["counts_as_attempt"])
+        self.assertEqual(batch.attempts_used(self.run_dir / self.plan["chunks"][0]["output_dir"]), 0)
+
+    def test_a_locked_rename_is_retried_and_a_failed_record_still_frees_the_lock(self):
+        real_replace, calls = batch.os.replace, []
+
+        def flaky(source, target):
+            calls.append(target)
+            if len(calls) <= 2:
+                raise PermissionError("held open by a reader")
+            return real_replace(source, target)
+
+        batch.os.replace, batch.REPLACE_PAUSE_SECONDS = flaky, 0
+        try:
+            self.assertEqual(self._run(limit=1), 0)
+        finally:
+            batch.os.replace, batch.REPLACE_PAUSE_SECONDS = real_replace, 0.2
+        self.assertEqual(self._invocation()["outcome"], "stopped: --limit 1")
+        self.assertEqual(list(self.run_dir.glob("*.tmp")), [])
+        real_update = batch.update_run_json
+
+        def final_write_fails(run_dir, invocation):
+            if "finished_at" in invocation:
+                raise PermissionError("run.json held open")
+            return real_update(run_dir, invocation)
+
+        batch.update_run_json = final_write_fails
+        try:
+            with self.assertRaises(PermissionError):
+                self._run(limit=1)
+        finally:
+            batch.update_run_json = real_update
+        self.assertFalse((self.root / batch.LOCK_NAME).exists(), "the lock must be freed anyway")
+
+    def test_write_json_retries_then_gives_up_cleanly(self):
+        target = self.base / "record.json"
+        real_replace, calls = batch.os.replace, []
+
+        def flaky(source, destination):
+            calls.append(1)
+            if len(calls) <= 3:
+                raise PermissionError("held open")
+            return real_replace(source, destination)
+
+        batch.REPLACE_PAUSE_SECONDS = 0
+        try:
+            batch.os.replace = flaky
+            batch.write_json(target, {"version": 1})
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"version": 1})
+            self.assertEqual(len(calls), 4)
+
+            def always(source, destination):
+                raise PermissionError("held open")
+
+            batch.os.replace = always
+            with self.assertRaises(PermissionError):
+                batch.write_json(target, {"version": 2})
+        finally:
+            batch.os.replace, batch.REPLACE_PAUSE_SECONDS = real_replace, 0.2
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"version": 1}, "the old file stays whole")
+        self.assertEqual(list(self.base.glob("record.json.*.tmp")), [], "the temporary file is removed")
+
+    def test_failing_to_note_the_driver_does_not_end_the_batch(self):
+        real_write = batch.write_json
+
+        def lock_busy(path, data):
+            if path.name == batch.LOCK_NAME:
+                raise PermissionError("a second runner is reading the lock")
+            return real_write(path, data)
+
+        batch.write_json = lock_busy
+        try:
+            self.assertEqual(self._run(), batch.EXIT_OK)
+        finally:
+            batch.write_json = real_write
+        self.assertEqual(batch.status(self.run_dir / "plan.json")["chunks"]["done"], 6)
+
+    def test_stderr_is_scrubbed_before_it_is_cut(self):
+        tail = batch.stderr_tail(b"error: sid=SECRETVALUE123", 16)
+        self.assertNotIn("SECRET", tail)
 
     def test_an_interrupt_is_recorded_and_a_restart_resumes(self):
         first = self.run_dir / self.plan["chunks"][0]["output_dir"]
@@ -224,10 +448,38 @@ class BatchTest(unittest.TestCase):
         event = json.loads((self.run_dir / "batch_events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
         self.assertIsNone(event["exit_code"])
         self.assertIn("interrupted", event["reason"])
+        self.assertTrue(event["counts_as_attempt"], "this interrupt left a bundle")
         # a restart sets the partial bundle aside and reruns the chunk as its second attempt
         self.assertEqual(self._run(), 0)
         self.assertTrue(first.with_name(first.name + ".failed-1").is_dir())
         self.assertEqual(batch.status(self.run_dir / "plan.json")["chunks"]["done"], 6)
+
+    def test_an_interrupt_before_any_output_is_not_counted(self):
+        class InterruptedAtOnce:  # Ctrl+C right after the driver started, before it wrote anything
+            pid = 0
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def communicate(self, timeout=None):
+                raise KeyboardInterrupt
+
+        real_popen, real_kill = batch.subprocess.Popen, batch.kill_tree
+
+        def popen(command, *args, **kwargs):
+            if str(self.fake.resolve()) in [str(c) for c in command]:
+                return InterruptedAtOnce()
+            return real_popen(command, *args, **kwargs)
+
+        batch.subprocess.Popen, batch.kill_tree = popen, lambda process: None
+        try:
+            self.assertEqual(self._run(), batch.EXIT_STOPPED)
+        finally:
+            batch.subprocess.Popen, batch.kill_tree = real_popen, real_kill
+        event = self._events()[-1]
+        self.assertIsNone(event["exit_code"])
+        self.assertFalse(event["counts_as_attempt"])
+        self.assertEqual(batch.attempts_used(self.run_dir / self.plan["chunks"][0]["output_dir"]), 0)
 
     def test_refused_driver_stops_the_batch(self):
         self.assertEqual(self._run(exits="3"), 1)
@@ -259,13 +511,24 @@ class BatchTest(unittest.TestCase):
         listed = self.base / "installed-models-sha256.txt"
         listed.write_text(f"{sha256(model)} *models/structure/catboostranker_final_all.pkl\n", encoding="utf-8")
         changed = batch.backfill_rankers(self.run_dir / "plan.json", self.msemblator, listed)
-        self.assertEqual(changed, [self.plan["chunks"][0]["chunk_id"]])
+        self.assertEqual(changed["backfilled"], [self.plan["chunks"][0]["chunk_id"]])
         record = json.loads((output / "msemblator_run.json").read_text(encoding="utf-8"))
         self.assertEqual(record["rankers"]["structure"]["ranker"], "catboost")
         self.assertEqual(record["rankers_backfilled"]["from"], "msemblator.log")
         self.assertEqual(record["rankers_backfilled"]["verified_against_sha256"], sha256(listed))
         self.assertTrue(record["rankers_backfilled"]["match"])
-        self.assertEqual(batch.backfill_rankers(self.run_dir / "plan.json", self.msemblator, listed), [])
+        self.assertEqual(batch.backfill_rankers(self.run_dir / "plan.json", self.msemblator, listed)["backfilled"], [])
+
+    def test_backfill_leaves_a_record_whose_log_names_no_model(self):
+        self._run(limit=1)
+        output = self.run_dir / self.plan["chunks"][0]["output_dir"]
+        (output / "msemblator.log").write_text("2026-11-13T00:00:00.000000+00:00 nothing here\n", encoding="utf-8")
+        listed = self.base / "installed-models-sha256.txt"
+        listed.write_text("", encoding="utf-8")
+        result = batch.backfill_rankers(self.run_dir / "plan.json", self.msemblator, listed)
+        self.assertEqual(result, {"backfilled": [], "no_model_in_log": [self.plan["chunks"][0]["chunk_id"]]})
+        record = json.loads((output / "msemblator_run.json").read_text(encoding="utf-8"))
+        self.assertNotIn("rankers_backfilled", record)
 
     def test_throughput_and_chunk_size(self):
         self._run()

@@ -59,28 +59,51 @@ number of compounds. Measure `t_struct`, the SIRIUS structure seconds per spectr
 python -m msdial_spectrum_catalog.msemblator_batch run --plan <run>\plan.json --msemblator-root <msemblator>
 ```
 
-- One SIRIUS at a time: the runner takes `<root>\.sirius.lock` (pid, host, run id) and refuses while a
-  live process holds it. MS-Emblator's `work\` folder is shared state, and the driver also refuses a
-  non-empty one.
+- One SIRIUS at a time: the runner takes `<root>\.sirius.lock` (pid, host, run id, and the pid of the
+  driver it last started) and refuses while a live process holds it. The lock is stale only when
+  neither the runner nor that driver is alive. **The lock covers only runners that use the same lock
+  file:** two annotation roots, or two MS-Emblator installs, each with its own default lock, can run
+  SIRIUS at the same time against one login. Keep one root per machine, or give every runner the same
+  `--lock`. MS-Emblator's `work\` folder is shared state, and the driver also refuses a non-empty one.
 - Each chunk runs `<msemblator>\.venv\Scripts\python.exe <this checkout>\src\msdial_spectrum_catalog\msemblator_driver.py`
-  into `<run>\units\<unit_key>\<selection>\cNNN\`.
-- Resume: a chunk whose `msemblator_run.json` says exit 0 is skipped. A failed chunk is moved to
-  `cNNN.failed-<n>` and run again, up to `--max-attempts` (2) in all.
+  into `<run>\units\<unit_key>\<selection>\cNNN\`, at below-normal priority (charter C8). SIRIUS's Java
+  and MS-FINDER inherit the priority class from the driver.
+- Resume: a chunk whose `msemblator_run.json` says exit 0 is skipped, after its `input_sha256` is checked
+  against the plan's `chunk_sha256`. A mismatch stops the batch, and a `plan.json` whose sha256 differs
+  from the one `run.json` recorded is refused. A failed chunk is moved to the next free
+  `cNNN.failed-<n>` and run again, up to `--max-attempts` (2) in all. An attempt counts when it left a
+  bundle (an interrupted one included), except a failure of SIRIUS's stored login (`login_ok: false`):
+  the first three per chunk do not count and are not retried at once, so after a re-login a new
+  invocation runs the chunk again; later ones count. Other failures count even when the log has lines
+  that look like web-service errors (`service_error_lines`), which may be incidental. Such a failure is
+  not retried in the same invocation (a quota or an outage would fail again at once), and it feeds the
+  `--stop-after` rule. `counts_as_attempt` in each event follows the same rule.
 - Stops: after `--stop-after` (3) consecutive chunks failing on login or the web service; when the driver
   refuses (exit 3); when `<run>\STOP` exists; after `--limit` chunks.
+- Exit codes: 0 when every chunk the runner reached is done; 5 when it went through but some chunks are
+  left failed (`run.json` lists them under `chunks_failed` and, for chunks whose attempts an earlier
+  invocation used up, `chunks_exhausted`); 1 when it stopped (STOP file, refusing driver, consecutive
+  service failures, interrupt, a record for another input); 3 when it refused to start (lock held, plan
+  changed). An unexpected exception is recorded as the outcome `crashed: <type>: <message>` and
+  re-raised.
 - Interrupts: on Ctrl+C or Ctrl+Break the runner kills the running chunk's process tree, moves
   MS-Emblator's `work\` into that chunk's bundle, appends an event with `exit_code: null`, writes the
   outcome `interrupted during <chunk_id>` to `run.json` and frees the lock before anything slow (the usage
   limits are not queried after an interrupt). A restart sets the partial bundle aside as a failed attempt
   and runs the chunk again. Prefer the `STOP` file: it ends the batch between chunks and loses nothing.
 - `run.json` records each invocation: the catalog and MS-Emblator commits (and whether either checkout was
-  dirty), the interpreters, the parameter-file and library sha256, the affinity mask, the usage limits
-  SIRIUS reports (the allowlisted keys only), and the start, end and outcome.
-- Every chunk attempt is appended to `batch_events.jsonl`.
+  dirty), the interpreters, the parameter-file and library sha256, the affinity mask, the driver priority,
+  `max_attempts`, the usage limits SIRIUS reports (the allowlisted keys only), the start, end and outcome,
+  and the failed and exhausted chunks. It is written through a temporary file and a rename, so a kill
+  mid-write leaves the previous version whole. The rename is retried for about two seconds while another
+  process holds the file open, and the lock is freed even when the last write fails.
+- Every chunk attempt is appended to `batch_events.jsonl`, with `counts_as_attempt` and the end of the
+  driver's stderr, from which account details are removed.
 
 Run a long batch from a checkout that does not change while it runs (a detached worktree at the pushed
 commit), and outside any process that may be closed under it. On Windows, `start /affinity FFFF` caps it
-at 16 logical CPUs; the Java and MS-FINDER children inherit the mask.
+at 16 logical CPUs; the Java and MS-FINDER children inherit the mask. Add `/belownormal` to `start` so the
+runner itself also runs at below-normal priority.
 
 ## What a chunk keeps (one importable bundle)
 
@@ -138,7 +161,14 @@ python -m msdial_spectrum_catalog.msemblator_batch status --plan <run>\plan.json
 python -m msdial_spectrum_catalog.msemblator_batch throughput --plan <run>\plan.json --target devset=<spectra>
 ```
 
-`status` counts chunks done, failed and pending, with failure reasons, seconds and bytes per spectrum,
-and any overlapping chunk intervals (there must be none). `throughput` writes `throughput.json`: seconds
+`status` counts chunks done, failed and pending, with failure reasons, the attempts each failed chunk has
+used (`attempts`, all bundles; `attempts_counted`, those that count against `--max-attempts`), the
+pending chunks that hold a partial bundle from an interrupted attempt (`partial_bundles`), seconds and
+bytes per spectrum, and any overlapping chunk intervals (there must be none). Take final counts from
+`status`, which reads every chunk record.
+
+`backfill-rankers --plan <run>\plan.json --msemblator-root <msemblator> --expected-sha256 <list>` adds
+`rankers` to records written before the driver recorded it. It writes nothing for a record whose log names
+no ranking model, and lists those chunks under `no_model_in_log`. `throughput` writes `throughput.json`: seconds
 per spectrum per stage, bytes per spectrum (`work`, SIRIUS projects, whole bundle), the proposed chunk size
 and the extrapolation to each target.

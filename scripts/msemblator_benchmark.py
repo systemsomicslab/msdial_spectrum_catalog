@@ -19,6 +19,11 @@ Outputs, in --out:
 - benchmark_summary.json and benchmark_summary.md: aggregates, which may be shared. When they name
   reference identities they cite the library by file name and sha256.
 
+A chunk whose driver exit is not 0, or that reports a failed step (for example formula:msbuddy), is left
+out of every rate and listed under excluded_chunks; its spectra keep their rows, with the reason in
+`excluded`. A spectrum whose reference formula (charged or unparseable) or InChIKey (empty) cannot be
+evaluated is left out of that metric's rates and counted.
+
 The script ends with a self-check over the shareable outputs: absolute paths, MSP record text and account
 details must not appear (`leak hits: 0`), and every shareable file that names a reference identity must
 carry the library citation (`citation: ok`).
@@ -75,15 +80,20 @@ def names_reference(text: str, identities: list[str]) -> bool:
     return any(identity and identity in text for identity in identities)
 
 
-def self_check(files: list[Path], identities: list[str], citation_marker: str) -> tuple[int, list[str], dict]:
-    """(leak hit count, files naming a reference identity without the citation, hits per file)."""
+def self_check(files: list[Path], identities: list[str],
+               citation_marker: str | None) -> tuple[int, list[str], dict]:
+    """(leak hit count, files naming a reference identity without the citation, hits per file).
+
+    citation_marker is None when no reference library was recorded: then any file that names a reference
+    identity is uncited, whatever fallback text it carries.
+    """
     total, uncited, detail = 0, [], {}
     for path in files:
         text = path.read_text(encoding="utf-8")
         hits = leak_hits(text)
         detail[path.name] = hits
         total += sum(hits.values())
-        if names_reference(text, identities) and citation_marker not in text:
+        if names_reference(text, identities) and (citation_marker is None or citation_marker not in text):
             uncited.append(path.name)
     return total, uncited, detail
 
@@ -271,6 +281,19 @@ def smiles_to_block(smiles: str, cache: dict) -> str:
     return block
 
 
+def chunk_exclusion(record: dict) -> str:
+    """Why a chunk's spectra stay out of the main numbers ('' when they count): a non-zero driver exit, or a
+    step that failed (for example formula:msbuddy), which leaves the ranking without that tool's evidence.
+    Counting such spectra as misses would measure the failure, not the prediction."""
+    exit_code = record.get("exit_code")
+    steps = record.get("failed_steps") or []
+    if exit_code != 0:
+        return f"driver exit {exit_code}" + (f"; failed steps {', '.join(steps)}" if steps else "")
+    if steps:
+        return f"degraded: failed steps {', '.join(steps)}"
+    return ""
+
+
 def min_rank(rows: list[dict], matches) -> float:
     ranks = [number(column(row, "rank")) for row in rows if matches(row)]
     ranks = [rank for rank in ranks if rank is not None]
@@ -287,6 +310,7 @@ def evaluate(run: Path, icd: Path, databases: list[str]) -> tuple[list[dict], di
     smiles_cache: dict[str, str] = {}
     rows: list[dict] = []
     not_run: list[str] = []
+    excluded: list[dict] = []
     rankers_seen: dict[str, set] = defaultdict(set)
     canopus_columns: dict[str, list[str]] = {}
     for export in plan["exports"]:
@@ -330,6 +354,11 @@ def evaluate(run: Path, icd: Path, databases: list[str]) -> tuple[list[dict], di
             if outputs.record is None:
                 not_run.extend(chunk_names)
                 continue
+            exclusion = chunk_exclusion(outputs.record)
+            if exclusion:
+                excluded.append({"chunk_id": chunk["chunk_id"], "exit_code": exit_code,
+                                 "failed_steps": outputs.record.get("failed_steps") or [],
+                                 "spectra": len(chunk_names), "reason": exclusion})
             for name in chunk_names:
                 spectrum = manifest[name]
                 reference_formula = hill(spectrum.get("reference_formula", ""))
@@ -371,6 +400,9 @@ def evaluate(run: Path, icd: Path, databases: list[str]) -> tuple[list[dict], di
                     "alignment_id": spectrum.get("alignment_id"),
                     "chunk_id": chunk["chunk_id"],
                     "chunk_exit_code": exit_code,
+                    "excluded": exclusion,
+                    "formula_evaluable": reference_formula is not None,
+                    "structure_evaluable": bool(reference_block),
                     "ion_mode": spectrum.get("ion_mode") or unit.get("ion_mode") or "unknown",
                     "instrument_family": instrument_family(unit.get("instrument")),
                     "precursor_mz": precursor_mz,
@@ -386,8 +418,8 @@ def evaluate(run: Path, icd: Path, databases: list[str]) -> tuple[list[dict], di
                     "rank_structure": rank_structure,
                     "top1_structure_score": number(column(top, "rank_score")),
                     "top1_structure_margin": number(column(top, "margin_score")),
-                    "top1_structure_probability": number(column(top, "probability", "softmax_probability",
-                                                                "Probability")),
+                    "top1_structure_probability": number(column(top, "softmax_score", "probability",
+                                                                "softmax_probability")),
                     "sirius_formula_rank": sirius_formula_rank,
                     "sirius_structure_rank": sirius_structure_rank,
                     "reference_direct_parent": parent[0] if parent else "",
@@ -403,7 +435,7 @@ def evaluate(run: Path, icd: Path, databases: list[str]) -> tuple[list[dict], di
                     {t.casefold() for t in all_classes},
                 })
     context = {"plan": plan, "databases": db_described, "canopus_columns": canopus_columns,
-               "not_run": len(not_run),
+               "not_run": len(not_run), "excluded_chunks": excluded,
                "rankers": {step: sorted(values, key=str) for step, values in rankers_seen.items()},
                "icd": {"file": icd.name, "sha256": sha256(icd), "rows": len(full)}}
     return rows, context
@@ -439,20 +471,28 @@ def score_type(context: dict, step: str) -> str:
 
 
 def summarise(rows: list[dict], context: dict, benchmark_id: str, citation: dict) -> dict:
-    groups = denominators(rows)
+    # Spectra of failed or degraded chunks stay out of every rate (they are counted and listed instead), and
+    # a spectrum whose reference formula or InChIKey cannot be evaluated stays out of that metric's rates.
+    included = [r for r in rows if not r["excluded"]]
+    structure_rows = [r for r in included if r["structure_evaluable"]]
+    formula_rows = [r for r in included if r["formula_evaluable"]]
+    structure_groups, formula_groups = denominators(structure_rows), denominators(formula_rows)
     score_formula, score_structure = score_type(context, "formula"), score_type(context, "structure")
-    structure = {name: rates(group, "rank_structure", STRUCTURE_K) for name, group in groups.items()}
-    formula = {name: rates(group, "rank_formula", FORMULA_K) for name, group in groups.items()}
+    structure = {name: rates(group, "rank_structure", STRUCTURE_K) for name, group in structure_groups.items()}
+    formula = {name: rates(group, "rank_formula", FORMULA_K) for name, group in formula_groups.items()}
     baselines = {
         "sirius_formula (SIRIUS formula_identifications_top-100.tsv, formulaRank)":
-            {name: rates(group, "sirius_formula_rank", FORMULA_K) for name, group in groups.items()},
+            {name: rates(group, "sirius_formula_rank", FORMULA_K) for name, group in formula_groups.items()},
         "sirius_csi_fingerid (SIRIUS structure_identifications_top-100.tsv, structurePerIdRank, InChIkey2D)":
-            {name: rates(group, "sirius_structure_rank", STRUCTURE_K) for name, group in groups.items()},
+            {name: rates(group, "sirius_structure_rank", STRUCTURE_K) for name, group in structure_groups.items()},
         "msfinder": "not evaluated: raw MS-FINDER outputs are not parsed by this version",
         "metfrag": "not evaluated: raw MetFrag outputs are not parsed by this version",
     }
-    with_parent = [r for r in rows if r["reference_direct_parent"]]
+    with_parent = [r for r in included if r["reference_direct_parent"]]
     formula_top1 = [r for r in with_parent if r["rank_formula"] == 1]
+
+    def hit_rate(subset: list[dict], field: str, k: int) -> dict:
+        return wilson(sum(r[field] <= k for r in subset), len(subset))
 
     def canopus_block(subset: list[dict]) -> dict:
         block = {"C1_most_specific_equals_direct_parent": wilson(sum(r["canopus_c1"] for r in subset), len(subset))}
@@ -465,32 +505,36 @@ def summarise(rows: list[dict], context: dict, benchmark_id: str, citation: dict
 
     strata = {}
     for key in ("unit_key", "ion_mode", "instrument_family", "mz_bin"):
-        values = sorted({r[key] for r in rows if r[key] is not None}, key=str)
-        strata[key] = {str(v): {"n": sum(r[key] == v for r in rows),
-                                "structure_hit@1": wilson(sum(r["rank_structure"] <= 1 for r in rows if r[key] == v),
-                                                          sum(r[key] == v for r in rows)),
-                                "structure_hit@5": wilson(sum(r["rank_structure"] <= 5 for r in rows if r[key] == v),
-                                                          sum(r[key] == v for r in rows)),
-                                "formula_hit@1": wilson(sum(r["rank_formula"] <= 1 for r in rows if r[key] == v),
-                                                        sum(r[key] == v for r in rows))}
+        values = sorted({r[key] for r in included if r[key] is not None}, key=str)
+        strata[key] = {str(v): {"n": sum(r[key] == v for r in included),
+                                "structure_hit@1": hit_rate([r for r in structure_rows if r[key] == v],
+                                                            "rank_structure", 1),
+                                "structure_hit@5": hit_rate([r for r in structure_rows if r[key] == v],
+                                                            "rank_structure", 5),
+                                "formula_hit@1": hit_rate([r for r in formula_rows if r[key] == v], "rank_formula", 1)}
                          for v in values}
-    unit_rates = [s["structure_hit@1"]["rate"] for s in strata["unit_key"].values() if s["n"]]
-    unit_rates5 = [s["structure_hit@5"]["rate"] for s in strata["unit_key"].values() if s["n"]]
-    unit_formula = [s["formula_hit@1"]["rate"] for s in strata["unit_key"].values() if s["n"]]
+
+    def unit_average(metric: str) -> dict:
+        """The mean of the per-unit rates, over the units that have at least one evaluable spectrum for it."""
+        values = [s[metric]["rate"] for s in strata["unit_key"].values() if s[metric]["rate"] is not None]
+        return {"average": round(sum(values) / len(values), 4) if values else None, "units": len(values)}
+
     parents = defaultdict(list)
     for row in with_parent:
         parents[row["reference_direct_parent"]].append(row)
     strata["reference_direct_parent_n_ge_5"] = {
-        name: {"n": len(group), "structure_hit@1": wilson(sum(r["rank_structure"] <= 1 for r in group), len(group)),
+        name: {"n": len(group),
+               "structure_hit@1": hit_rate([r for r in group if r["structure_evaluable"]], "rank_structure", 1),
                "canopus_C1": wilson(sum(r["canopus_c1"] for r in group), len(group))}
         for name, group in sorted(parents.items()) if len(group) >= 5}
-    margins = sorted(r["top1_structure_margin"] for r in rows if r["top1_structure_margin"] is not None)
+    margins = sorted(r["top1_structure_margin"] for r in structure_rows if r["top1_structure_margin"] is not None)
     closure = []
     for quantile in (0.0, 0.25, 0.5, 0.75, 0.9):
         if not margins:
             break
         cut = margins[min(len(margins) - 1, int(quantile * len(margins)))]
-        subset = [r for r in rows if r["top1_structure_margin"] is not None and r["top1_structure_margin"] >= cut]
+        subset = [r for r in structure_rows
+                  if r["top1_structure_margin"] is not None and r["top1_structure_margin"] >= cut]
         closure.append({"top1_margin_ge": round(cut, 4), "n": len(subset),
                         **{f"hit@{k}": wilson(sum(r["rank_structure"] <= k for r in subset), len(subset))
                            for k in (1, 5)}})
@@ -507,11 +551,22 @@ def summarise(rows: list[dict], context: dict, benchmark_id: str, citation: dict
         "candidate_database_note": "N_ref_in_db checks the MS-FINDER and MetFrag text databases only; coverage of "
                                    "the SIRIUS custom database is not checked",
         "canopus_summary_columns": context["canopus_columns"],
-        "counts": {name: len(group) for name, group in groups.items()} | {
+        "counts": {
+            "benchmark_spectra_evaluated": len(included),
+            **{f"structure_{name}": len(group) for name, group in structure_groups.items()},
+            **{f"formula_{name}": len(group) for name, group in formula_groups.items()},
+            "structure_reference_unevaluable": sum(not r["structure_evaluable"] for r in included),
+            "formula_reference_unevaluable": sum(not r["formula_evaluable"] for r in included),
+            "benchmark_spectra_in_excluded_chunks": len(rows) - len(included),
+            "excluded_chunks": len(context.get("excluded_chunks", [])),
             "benchmark_spectra_in_chunks_not_run": context.get("not_run", 0),
             "with_reference_direct_parent": len(with_parent),
-            "icd_coverage": wilson(len(with_parent), len(rows)),
-            "skipped_no_formula": sum(r["structure_step"] == "skipped_no_formula" for r in rows)},
+            "icd_coverage": wilson(len(with_parent), len(structure_rows)),  # a keyless reference has no parent
+            "skipped_no_formula": sum(r["structure_step"] == "skipped_no_formula" for r in included)},
+        "excluded_chunks": context.get("excluded_chunks", []),
+        "exclusion_rule": "a chunk whose driver exit is not 0, or that reports a failed step, is left out of every "
+                          "rate; a spectrum whose reference formula (charged or unparseable) or InChIKey (empty) "
+                          "cannot be evaluated is left out of that metric's rates",
         "rankers": {step: [{"ranker": r, "file": f, "sha256": h} for r, f, h in values]
                     for step, values in context.get("rankers", {}).items()},
         "structure": {"tool": TOOL_STRUCTURE, "score_type": score_structure,
@@ -526,11 +581,8 @@ def summarise(rows: list[dict], context: dict, benchmark_id: str, citation: dict
                     "all": canopus_block(with_parent), "formula_top1": canopus_block(formula_top1),
                     "note": "CANOPUS runs on MS-Emblator's top-1 formula, so the formula_top1 block is the "
                             "informative one; class/superclass agreement needs the ChemOnt lineage (Q5)"},
-        "unit_macro_average": {
-            "units": len(unit_rates),
-            "structure_hit@1": round(sum(unit_rates) / len(unit_rates), 4) if unit_rates else None,
-            "structure_hit@5": round(sum(unit_rates5) / len(unit_rates5), 4) if unit_rates5 else None,
-            "formula_hit@1": round(sum(unit_formula) / len(unit_formula), 4) if unit_formula else None},
+        "unit_macro_average": {metric: unit_average(metric)
+                               for metric in ("structure_hit@1", "structure_hit@5", "formula_hit@1")},
         "strata": strata,
         "closure_by_top1_margin": {"tool": TOOL_STRUCTURE, "score_type": score_structure,
                                    "margin": "rank_score(top1) - rank_score(top2)", "rows": closure},
@@ -563,15 +615,19 @@ def markdown(summary: dict, cited_rows: list[dict] | None) -> str:
                              f"{summary['canopus']['posterior_type']} | with direct parent | {value['n']} | "
                              f"{value['rate']} | {value['low']}-{value['high']} |")
     lines += ["", "Counts: " + ", ".join(f"{k} {v}" for k, v in summary["counts"].items() if not isinstance(v, dict)),
-              "", "Caveats:"] + [f"- {c}" for c in summary["caveats"]]
+              "", f"Exclusions: {summary['exclusion_rule']}."]
+    if summary["excluded_chunks"]:
+        lines += ["", "| Excluded chunk | spectra | reason |", "|---|---|---|"]
+        lines += [f"| {c['chunk_id']} | {c['spectra']} | {c['reason']} |" for c in summary["excluded_chunks"]]
+    lines += ["", "Caveats:"] + [f"- {c}" for c in summary["caveats"]]
     if cited_rows:
         lines += ["", f"Per-spectrum rows (reference identities from {citation['text']}):", "",
                   "| spectrum | reference | first block | rank formula | rank structure | CANOPUS most specific | "
-                  "reference direct parent |", "|---|---|---|---|---|---|---|"]
+                  "reference direct parent | excluded |", "|---|---|---|---|---|---|---|---|"]
         for row in cited_rows:
             lines.append(f"| {row['name']} | {row['reference_name']} | {first_block(row['reference_inchikey'])} | "
                          f"{row['rank_formula']} | {row['rank_structure']} | {row['canopus_most_specific']} | "
-                         f"{row['reference_direct_parent']} |")
+                         f"{row['reference_direct_parent']} | {row['excluded'] or 'no'} |")
     return "\n".join(lines) + "\n"
 
 
@@ -627,8 +683,10 @@ def main(argv: list[str] | None = None) -> int:
     summary_md.write_text(markdown(summary, rows if args.per_spectrum_rows else None), encoding="utf-8")
     identities = sorted({value for row in rows for value in (row["reference_name"], row["reference_inchikey"])
                          if value and len(value) > 3})
-    hits, uncited, detail = self_check([summary_json, summary_md], identities, citation["text"])
-    print(f"benchmark rows: {len(rows)}")
+    marker = citation["text"] if citation["libraries"] else None  # the fallback text is not a citation
+    hits, uncited, detail = self_check([summary_json, summary_md], identities, marker)
+    print(f"benchmark rows: {len(rows)} ({summary['counts']['benchmark_spectra_evaluated']} evaluated, "
+          f"{summary['counts']['benchmark_spectra_in_excluded_chunks']} in excluded chunks)")
     print(f"summary sha256: {sha256(summary_json)}")
     print(f"leak hits: {hits}" + ("" if not hits else f" {detail}"))
     print("citation: ok" if not uncited else f"citation: missing in {', '.join(uncited)}")
