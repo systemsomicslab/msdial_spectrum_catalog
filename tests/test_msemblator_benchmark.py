@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -53,6 +54,14 @@ class SelfCheckTest(unittest.TestCase):
         _, uncited, _ = self._check("| Caffeine | rank 1 |\n")
         self.assertEqual(uncited, ["benchmark_summary.md"])
 
+    def test_fallback_text_is_not_a_citation(self):
+        path = self.base / "benchmark_summary.md"
+        path.write_text("Reference library: reference library not recorded.\n| Caffeine | 1 |\n", encoding="utf-8")
+        _, uncited, _ = benchmark.self_check([path], ["Caffeine"], None)
+        self.assertEqual(uncited, ["benchmark_summary.md"])
+        path.write_text("| hit@1 | 0.5 |\n", encoding="utf-8")  # no identity named: nothing to cite
+        self.assertEqual(benchmark.self_check([path], ["Caffeine"], None)[1], [])
+
     def test_numbers_in_a_table_are_not_peak_lists(self):
         hits, _, _ = self._check(CLEAN + "| structure hit@5 | 6 | 0.5 | 0.19-0.81 |\n")
         self.assertEqual(hits, 0)
@@ -87,6 +96,47 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(benchmark.mz_bin(299.9), "<300")
         self.assertEqual(benchmark.mz_bin(300.0), "300-650")
         self.assertEqual(benchmark.mz_bin(651.0), ">650")
+
+    def test_chunk_exclusion(self):
+        self.assertEqual(benchmark.chunk_exclusion({"exit_code": 0, "failed_steps": []}), "")
+        self.assertIn("formula:msbuddy", benchmark.chunk_exclusion({"exit_code": 1, "failed_steps": ["formula:msbuddy"]}))
+        self.assertTrue(benchmark.chunk_exclusion({"exit_code": 2, "failed_steps": None}).startswith("driver exit 2"))
+        self.assertTrue(benchmark.chunk_exclusion({"exit_code": 0, "failed_steps": ["x"]}).startswith("degraded"))
+
+
+def row(name, **values):
+    base = {"name": name, "unit_key": "u1", "ion_mode": "Positive", "instrument_family": "QTOF", "mz_bin": "<300",
+            "excluded": "", "formula_evaluable": True, "structure_evaluable": True, "reference_in_db": True,
+            "formula_returned": True, "structure_returned": True, "structure_step": "sent",
+            "rank_formula": 1, "rank_structure": 1, "sirius_formula_rank": 1, "sirius_structure_rank": 1,
+            "top1_structure_margin": 0.5, "reference_direct_parent": "", "canopus_c1": False,
+            "canopus_in_all_classifications": False, **{f"canopus_c2_p{p}": False for p in benchmark.CANOPUS_P}}
+    return base | values
+
+
+class SummaryTest(unittest.TestCase):
+    CONTEXT = {"plan": {"run_id": "r"}, "databases": [], "canopus_columns": {}, "icd": {}, "not_run": 0,
+               "excluded_chunks": [{"chunk_id": "u1/benchmark/c001", "exit_code": 1,
+                                    "failed_steps": ["formula:msbuddy"], "spectra": 1, "reason": "driver exit 1"}]}
+
+    def test_excluded_chunks_and_unevaluable_references_stay_out_of_the_rates(self):
+        rows = [row("hit"),
+                row("miss", rank_formula=math.inf, rank_structure=math.inf),
+                row("failed chunk", excluded="driver exit 1", rank_formula=math.inf, rank_structure=math.inf),
+                row("charged reference", formula_evaluable=False, rank_formula=math.inf),
+                row("no inchikey", structure_evaluable=False, rank_structure=math.inf)]
+        summary = benchmark.summarise(rows, self.CONTEXT, "b", {"text": "lib", "libraries": []})
+        structure = summary["structure"]["denominators"]["N_sent"]["hit@1"]
+        formula = summary["formula"]["denominators"]["N_sent"]["hit@1"]
+        self.assertEqual((structure["hits"], structure["n"]), (2, 3))
+        self.assertEqual((formula["hits"], formula["n"]), (2, 3))
+        counts = summary["counts"]
+        self.assertEqual(counts["benchmark_spectra_evaluated"], 4)
+        self.assertEqual(counts["benchmark_spectra_in_excluded_chunks"], 1)
+        self.assertEqual(counts["formula_reference_unevaluable"], 1)
+        self.assertEqual(counts["structure_reference_unevaluable"], 1)
+        self.assertEqual(summary["excluded_chunks"][0]["chunk_id"], "u1/benchmark/c001")
+        self.assertIn("u1/benchmark/c001", benchmark.markdown(summary, None))
 
 
 if __name__ == "__main__":

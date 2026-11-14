@@ -6,10 +6,12 @@ and every chunk, so an importer can prove that a chunk's results came from that 
 (`msemblator_run.json.input_sha256 == chunk_sha256`) and that the chunk came from the export
 (`source_msp_sha256 == <unit>_<selection>_selection.json:msp_sha256`).
 
-`run` runs the driver once per chunk with MS-Emblator's interpreter, sequentially, under a lock that
-allows one SIRIUS at a time on this machine. It resumes: a chunk whose record says exit 0 is skipped,
-and a failed chunk is set aside and tried again, up to --max-attempts in all. It stops after a run of
-login or web-service failures, when MS-Emblator's work folder is in use, or when <run>/STOP exists.
+`run` runs the driver once per chunk with MS-Emblator's interpreter, sequentially and at below-normal
+priority, under a lock that allows one SIRIUS at a time for every runner that shares the lock file. It
+resumes: a chunk whose record says exit 0 for the planned input is skipped, and a failed chunk is set
+aside and tried again, up to --max-attempts in all. A login or web-service failure is not retried at once
+and does not use up an attempt. It stops after a run of such failures, when MS-Emblator's work folder is
+in use, or when <run>/STOP exists. It exits 0 only when no chunk is left failed.
 
 `status` and `throughput` read plan.json and the per-chunk records; they write nothing but
 throughput.json.
@@ -33,7 +35,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .msemblator_driver import (EXIT_OK, EXIT_REFUSED, git_commit, git_dirty, parse_log, rankers, sha256,
+from .msemblator_driver import (EXIT_OK, EXIT_REFUSED, git_commit, git_dirty, parse_log, rankers, scrub, sha256,
                                 subscription_limits)
 from .msemblator_export import export_unit
 
@@ -44,10 +46,25 @@ CHUNK_LIMITS = (20, 300)
 SIRIUS_TIMEOUT_SECONDS = 1800  # MS-Emblator's single timeout for the whole SIRIUS structure workflow
 LOCK_NAME = ".sirius.lock"
 _ALIGNMENT_ID = re.compile(r"\|ALIGNMENTID=(\d+)\|")
+_FAILED_INDEX = re.compile(r"\.failed-(\d+)$")
+
+# `run` exit codes. 3 is the driver's own "refused" code, reused for a runner that refuses to start.
+EXIT_STOPPED = 1  # STOP file, a refusing driver, consecutive service failures, an interrupt, a plan mismatch
+EXIT_CHUNKS_FAILED = 5  # the batch went through, but at least one chunk is left failed
+# Windows priority class for the driver; its Java and MS-FINDER children inherit it (charter C8).
+BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+DRIVER_PRIORITY = "below_normal"
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def write_json(path: Path, data: dict) -> None:
+    """Write JSON through a temporary file and a rename, so a kill mid-write leaves the old file whole."""
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _refuse_analysis_root(path: Path) -> None:
@@ -183,7 +200,7 @@ def make_plan(units: list[dict], run_dir: Path, run_id: str, chunk_size: int, ch
         "totals": {"units": len(units), "chunks": len(chunks), "records_by_selection": totals,
                    "representative_spectra_by_tier": by_tier},
     }
-    (run_dir / "plan.json").write_text(json.dumps(plan, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    write_json(run_dir / "plan.json", plan)
     return plan
 
 
@@ -226,7 +243,12 @@ def pid_alive(pid: int) -> bool:
 
 
 def acquire_lock(path: Path, run_id: str) -> tuple[bool, dict | None]:
-    """Take the machine-wide SIRIUS lock; refuse while a live process holds it."""
+    """Take the SIRIUS lock; refuse while a live process holds it.
+
+    The lock covers every runner that uses the same lock file (by default, one per annotation root). A
+    holder is stale only when neither the runner nor the driver it last started is alive: a driver
+    orphaned by a killed runner may still be running SIRIUS.
+    """
     holder = {"pid": os.getpid(), "host": socket.gethostname(), "run_id": run_id, "started_at": now()}
     path.parent.mkdir(parents=True, exist_ok=True)
     for _ in range(2):
@@ -237,8 +259,9 @@ def acquire_lock(path: Path, run_id: str) -> tuple[bool, dict | None]:
                 current = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 current = {}
-            if current.get("host") == socket.gethostname() and not pid_alive(int(current.get("pid", 0))):
-                path.unlink(missing_ok=True)  # the holder died without releasing it
+            pids = [int(current.get(key) or 0) for key in ("pid", "driver_pid")]
+            if current.get("host") == socket.gethostname() and not any(pid_alive(pid) for pid in pids):
+                path.unlink(missing_ok=True)  # the holder and its driver died without releasing it
                 continue
             return False, current
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -256,6 +279,11 @@ def release_lock(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+def note_driver(path: Path, holder: dict, driver_pid: int) -> None:
+    """Record in the lock the driver this runner started, so a takeover can tell whether it still runs."""
+    write_json(path, {**holder, "driver_pid": driver_pid})
+
+
 # ----------------------------------------------------------------------------------------------- run
 
 def read_record(output: Path) -> dict | None:
@@ -266,16 +294,19 @@ def read_record(output: Path) -> dict | None:
 
 
 def failed_attempts(output: Path) -> list[Path]:
-    return sorted(output.parent.glob(f"{output.name}.failed-*"))
+    attempts = [path for path in output.parent.glob(f"{output.name}.failed-*") if _FAILED_INDEX.search(path.name)]
+    return sorted(attempts, key=lambda path: int(_FAILED_INDEX.search(path.name).group(1)))
 
 
 def set_aside(output: Path) -> Path | None:
-    """Move a failed attempt out of the bundle path, keeping it for the record."""
+    """Move a failed attempt out of the bundle path, keeping it for the record, as the next free
+    .failed-<n> (an operator may have removed an earlier one)."""
     if not output.exists() or not any(output.iterdir()):
         if output.exists():
             output.rmdir()
         return None
-    target = output.with_name(f"{output.name}.failed-{len(failed_attempts(output)) + 1}")
+    used = [int(_FAILED_INDEX.search(path.name).group(1)) for path in failed_attempts(output)]
+    target = output.with_name(f"{output.name}.failed-{max(used, default=0) + 1}")
     output.rename(target)
     return target
 
@@ -284,6 +315,17 @@ def is_service_failure(record: dict | None) -> bool:
     if not record or record.get("exit_code") == EXIT_OK:
         return False
     return record.get("login_ok") is False or bool(record.get("service_error_lines"))
+
+
+def has_bundle(output: Path) -> bool:
+    return output.is_dir() and any(output.iterdir())
+
+
+def attempts_used(output: Path) -> int:
+    """Attempts that count against --max-attempts: every set-aside or current bundle, interrupted ones
+    included, except those that failed on login or the web service (they say nothing about the chunk)."""
+    bundles = failed_attempts(output) + ([output] if has_bundle(output) else [])
+    return sum(not is_service_failure(read_record(bundle)) for bundle in bundles)
 
 
 def append_event(run_dir: Path, event: dict) -> None:
@@ -324,7 +366,30 @@ def update_run_json(run_dir: Path, invocation: dict) -> None:
         "invocations": []}
     invocations = [i for i in record["invocations"] if i.get("invocation_id") != invocation["invocation_id"]]
     record["invocations"] = invocations + [invocation]
-    path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    write_json(path, record)
+
+
+def recorded_plan_sha256(run_dir: Path) -> str | None:
+    try:
+        return json.loads((run_dir / "run.json").read_text(encoding="utf-8")).get("plan_sha256")
+    except (OSError, ValueError):
+        return None
+
+
+def stderr_tail(stderr: bytes, characters: int) -> str:
+    """The end of the driver's stderr, with account details removed, for the events and run.json."""
+    return scrub(stderr.decode("utf-8", "replace")[-characters:])
+
+
+def start_driver(command: list[str], environment: dict, cwd: Path) -> subprocess.Popen:
+    """Start the driver at below-normal priority where the platform has priority classes."""
+    options: dict = {}
+    if sys.platform == "win32":
+        options["creationflags"] = BELOW_NORMAL_PRIORITY_CLASS
+    else:
+        options["preexec_fn"] = lambda: os.nice(5)
+    return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=environment,
+                            cwd=str(cwd), **options)
 
 
 def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None, driver: Path | None = None,
@@ -334,6 +399,12 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
     run_dir = plan_path.parent
     _refuse_analysis_root(run_dir)
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan_digest = sha256(plan_path)
+    recorded = recorded_plan_sha256(run_dir)
+    if recorded is not None and recorded != plan_digest:
+        print(f"Refusing to start: plan.json has sha256 {plan_digest}, but run.json was started with {recorded}",
+              file=sys.stderr)
+        return EXIT_REFUSED
     root = msemblator_root.resolve()
     python = python or root / ".venv" / "Scripts" / "python.exe"
     driver = (driver or Path(__file__).with_name("msemblator_driver.py")).resolve()
@@ -356,8 +427,11 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
         "parameter_file_sha256": sha256(root / "config" / "msemblator_parameter_file.yaml"),
         "library_sha256": library_hashes(root) if hash_libraries else "not computed",
         "host_logical_cpus": os.cpu_count(),
-        "plan_sha256": sha256(plan_path),
+        "plan_sha256": plan_digest,
         "model_assets": model_assets,
+        "driver_priority": DRIVER_PRIORITY,
+        "lock": "<root>/" + LOCK_NAME if lock_path == run_dir.parent / LOCK_NAME else "given with --lock",
+        "max_attempts": max_attempts,
     }
     try:
         from .msemblator_driver import affinity_mask
@@ -367,11 +441,14 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
     except Exception as error:  # a limits query that fails must not stop the batch
         invocation["subscription_limits_before"] = f"not read: {type(error).__name__}"
     update_run_json(run_dir, invocation)
-    outcome, ran, consecutive = "completed", 0, 0
+    # "crashed" until the loop says otherwise: an exception nobody expected must not be recorded as success.
+    outcome, ran, consecutive, stopped = "crashed", 0, 0, False
+    failed: list[dict] = []  # chunks this invocation ran and left failed
+    exhausted: list[str] = []  # chunks skipped because earlier invocations used up their attempts
     try:
         for chunk in plan["chunks"]:
             if (run_dir / "STOP").exists():
-                outcome = "stopped: STOP file"
+                outcome, stopped = "stopped: STOP file", True
                 break
             if limit is not None and ran >= limit:
                 outcome = f"stopped: --limit {limit}"
@@ -379,9 +456,15 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
             output = run_dir / chunk["output_dir"]
             record = read_record(output)
             if record and record.get("exit_code") == EXIT_OK:
+                if record.get("input_sha256") != chunk["chunk_sha256"]:
+                    outcome = (f"stopped: {chunk['chunk_id']} has an exit-0 record for another input "
+                               f"(input_sha256 {record.get('input_sha256')}, plan {chunk['chunk_sha256']})")
+                    stopped = True
+                    break
                 continue
-            attempts = len(failed_attempts(output)) + (1 if output.exists() and any(output.iterdir()) else 0)
+            attempts = attempts_used(output)
             if attempts >= max_attempts:
+                exhausted.append(chunk["chunk_id"])
                 continue
             ran += 1
             while attempts < max_attempts:
@@ -394,8 +477,8 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
                     command += ["--model-assets", model_assets]
                 started = now()
                 environment = dict(os.environ, PYTHONIOENCODING="utf-8")
-                process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                           env=environment, cwd=str(root))
+                process = start_driver(command, environment, root)
+                note_driver(lock_path, holder, process.pid)
                 reason = None
                 try:
                     _, stderr = process.communicate(timeout=chunk_timeout)
@@ -412,52 +495,65 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
                     append_event(run_dir, {"chunk_id": chunk["chunk_id"], "attempt": attempts + 1,
                                            "started_at": started, "finished_at": now(), "exit_code": None,
                                            "reason": "interrupted (Ctrl+C or Ctrl+Break); process tree killed",
-                                           "failed_steps": None, "stderr_tail": ""})
+                                           "failed_steps": None, "stderr_tail": "", "counts_as_attempt": True})
                     outcome = f"interrupted during {chunk['chunk_id']}"
                     raise _Stop
-                attempts += 1
                 record = read_record(output)
                 if record is None and reason is None and exit_code != EXIT_REFUSED:
                     reason = "no msemblator_run.json"
-                event = {"chunk_id": chunk["chunk_id"], "attempt": attempts, "started_at": started,
-                         "finished_at": now(), "exit_code": exit_code,
-                         "reason": reason or (record or {}).get("error"),
-                         "failed_steps": (record or {}).get("failed_steps"),
-                         "stderr_tail": stderr.decode("utf-8", "replace")[-2000:] if exit_code else ""}
-                append_event(run_dir, event)
+                service = is_service_failure(record)
+                append_event(run_dir, {"chunk_id": chunk["chunk_id"], "attempt": attempts + 1,
+                                       "started_at": started, "finished_at": now(), "exit_code": exit_code,
+                                       "reason": reason or (record or {}).get("error"),
+                                       "failed_steps": (record or {}).get("failed_steps"),
+                                       "stderr_tail": stderr_tail(stderr, 2000) if exit_code else "",
+                                       "counts_as_attempt": not service})
                 if exit_code == EXIT_REFUSED:
-                    return_reason = stderr.decode("utf-8", "replace").strip()[-500:]
-                    outcome = f"stopped: driver refused {chunk['chunk_id']}: {return_reason}"
+                    outcome = f"stopped: driver refused {chunk['chunk_id']}: {stderr_tail(stderr, 500).strip()}"
                     raise _Stop
-                if exit_code == EXIT_OK:
-                    break
-            if is_service_failure(record):
+                if exit_code == EXIT_OK or service:
+                    break  # a login or web-service failure would fail the same way at once: not retried here
+                attempts += 1
+            if exit_code != EXIT_OK:
+                failed.append({"chunk_id": chunk["chunk_id"], "exit_code": exit_code, "service_failure": service})
+            if service:
                 consecutive += 1
                 if consecutive >= stop_after:
                     outcome = f"stopped: {consecutive} consecutive login or web-service failures"
+                    stopped = True
                     break
             else:
                 consecutive = 0
+        else:
+            left = len(failed) + len(exhausted)
+            outcome = "completed" if not left else f"finished with {left} failed chunks"
     except _Stop:
-        pass
+        stopped = True
     except KeyboardInterrupt:  # between chunks
-        outcome = "interrupted between chunks"
+        outcome, stopped = "interrupted between chunks", True
+    except Exception as error:
+        outcome = f"crashed: {type(error).__name__}: {scrub(str(error))[:300]}"
+        raise
     finally:
         # Record the outcome and free the lock first: whoever sent an interrupt may kill the process soon
         # after, and the limits query below starts SIRIUS, which takes seconds.
         invocation["finished_at"] = now()
         invocation["outcome"] = outcome
         invocation["chunks_attempted"] = ran
+        invocation["chunks_failed"] = failed
+        invocation["chunks_exhausted"] = exhausted
         update_run_json(run_dir, invocation)
         release_lock(lock_path)
-        if sirius_directory is not None and not outcome.startswith("interrupted"):
+        if sirius_directory is not None and not outcome.startswith(("interrupted", "crashed")):
             try:
                 invocation["subscription_limits_after"] = subscription_limits(str(sirius_directory))
             except Exception as error:
                 invocation["subscription_limits_after"] = f"not read: {type(error).__name__}"
             update_run_json(run_dir, invocation)
     print(outcome)
-    return EXIT_OK if outcome.startswith(("completed", "stopped: --limit")) else 1
+    if stopped:
+        return EXIT_STOPPED
+    return EXIT_CHUNKS_FAILED if failed or exhausted else EXIT_OK
 
 
 class _Stop(Exception):
@@ -480,7 +576,9 @@ def collect(plan: dict, run_dir: Path) -> list[dict]:
         else:
             state = "done" if record.get("exit_code") == EXIT_OK else "failed"
         rows.append({"chunk": chunk, "output": output, "record": record, "state": state,
-                     "attempts": len(failed_attempts(output)) + (1 if record else 0)})
+                     "partial": record is None and has_bundle(output),
+                     "attempts": len(failed_attempts(output)) + (1 if has_bundle(output) else 0),
+                     "attempts_counted": attempts_used(output) if state != "done" else None})
     return rows
 
 
@@ -502,7 +600,9 @@ def status(plan_path: Path) -> dict:
         "spectra": {"planned": sum(r["chunk"]["records"] for r in rows), "done": spectra_done},
         "seconds_per_spectrum": round(seconds / spectra_done, 3) if spectra_done else None,
         "bytes_per_spectrum": round(size / spectra_done) if spectra_done else None,
+        "partial_bundles": [r["chunk"]["chunk_id"] for r in rows if r["partial"]],
         "failures": [{"chunk_id": r["chunk"]["chunk_id"], "attempts": r["attempts"],
+                      "attempts_counted": r["attempts_counted"],
                       "exit_code": (r["record"] or {}).get("exit_code"),
                       "reason": (r["record"] or {}).get("error"),
                       "failed_steps": (r["record"] or {}).get("failed_steps")}
@@ -569,18 +669,20 @@ def read_sha256_list(path: Path) -> dict[str, str]:
     return entries
 
 
-def backfill_rankers(plan_path: Path, msemblator_root: Path, expected: Path) -> list[str]:
+def backfill_rankers(plan_path: Path, msemblator_root: Path, expected: Path) -> dict[str, list[str]]:
     """Add `rankers` to chunk records written before the driver recorded it, from each chunk's own log.
 
     The ranker file is the one the chunk's log names. Its sha256 must equal the entry in `expected`, a
-    list written when the models were installed (before the run), or nothing is written. The record says
-    it was backfilled, from what, against which list and by which code; nothing else in it changes.
+    list written when the models were installed (before the run), or nothing is written. A record whose
+    log names no ranking model is left alone: there is nothing to verify. The record says it was
+    backfilled, from what, against which list and by which code; nothing else in it changes.
+    Returns the chunk IDs backfilled and those whose log named no model.
     """
     run_dir = plan_path.parent
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     listed = read_sha256_list(expected)
     list_sha256 = sha256(expected)
-    pending = []
+    pending, no_model = [], []
     for chunk in plan["chunks"]:
         output = run_dir / chunk["output_dir"]
         record = read_record(output)
@@ -589,6 +691,9 @@ def backfill_rankers(plan_path: Path, msemblator_root: Path, expected: Path) -> 
             continue
         loaded = parse_log(log.read_text(encoding="utf-8").splitlines())["ranker_models"]
         found = rankers(loaded, msemblator_root.resolve())
+        if not found:
+            no_model.append(chunk["chunk_id"])
+            continue
         for step, entry in found.items():
             want = listed.get(f"models/{step}/{entry['file']}")
             if want is None or entry["sha256"] != want:
@@ -602,10 +707,9 @@ def backfill_rankers(plan_path: Path, msemblator_root: Path, expected: Path) -> 
                                         "by_catalog_commit": git_commit(Path(__file__).resolve().parents[2]),
                                         "verified_against": expected.name, "verified_against_sha256": list_sha256,
                                         "match": True}
-        (output / "msemblator_run.json").write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n",
-                                                    encoding="utf-8")
+        write_json(output / "msemblator_run.json", record)
         changed.append(chunk["chunk_id"])
-    return changed
+    return {"backfilled": changed, "no_model_in_log": no_model}
 
 
 # ----------------------------------------------------------------------------------------------- CLI
@@ -629,7 +733,9 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--plan", required=True, type=Path)
     run_parser.add_argument("--msemblator-root", required=True, type=Path)
     run_parser.add_argument("--python", type=Path, help="Default: <msemblator-root>/.venv/Scripts/python.exe")
-    run_parser.add_argument("--lock", type=Path, help=f"Default: <plan dir>/../{LOCK_NAME}")
+    run_parser.add_argument("--lock", type=Path,
+                            help=f"Default: <plan dir>/../{LOCK_NAME}. Runners exclude each other only when they "
+                                 "use the same lock file: give every runner on this machine the same one")
     run_parser.add_argument("--limit", type=int, help="Run at most this many chunks")
     run_parser.add_argument("--max-attempts", type=int, default=2)
     run_parser.add_argument("--stop-after", type=int, default=3)
