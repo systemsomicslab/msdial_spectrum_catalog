@@ -75,8 +75,9 @@ python -m msdial_spectrum_catalog.msemblator_batch run --plan <run>\plan.json --
   bundle (an interrupted one included), except a failure of SIRIUS's stored login (`login_ok: false`):
   the first three per chunk do not count and are not retried at once, so after a re-login a new
   invocation runs the chunk again; later ones count. Other failures count even when the log has lines
-  that look like web-service errors (`service_error_lines`), which may be incidental. Those lines feed only
-  the `--stop-after` rule. `counts_as_attempt` in each event follows the same rule.
+  that look like web-service errors (`service_error_lines`), which may be incidental. Such a failure is
+  not retried in the same invocation (a quota or an outage would fail again at once), and it feeds the
+  `--stop-after` rule. `counts_as_attempt` in each event follows the same rule.
 - Stops: after `--stop-after` (3) consecutive chunks failing on login or the web service; when the driver
   refuses (exit 3); when `<run>\STOP` exists; after `--limit` chunks.
 - Exit codes: 0 when every chunk the runner reached is done; 5 when it went through but some chunks are

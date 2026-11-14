@@ -143,7 +143,10 @@ class SummaryTest(unittest.TestCase):
                  for r in rows]
         table = benchmark.markdown(summary, cited)
         self.assertIn("| excluded |", table)
-        self.assertIn("| driver exit 1 |", table)
+        by_spectrum = {line.split(" | ")[0].lstrip("| "): line for line in table.splitlines()
+                       if line.startswith("| ") and line.count(" | ") == 7}
+        self.assertTrue(by_spectrum["failed chunk"].endswith("| driver exit 1 |"))
+        self.assertTrue(by_spectrum["hit"].endswith("| no |"))
 
     def test_unit_counts_follow_each_metric(self):
         rows = [row("a"), row("b", unit_key="u2", structure_evaluable=False, rank_structure=math.inf)]

@@ -9,9 +9,10 @@ and every chunk, so an importer can prove that a chunk's results came from that 
 `run` runs the driver once per chunk with MS-Emblator's interpreter, sequentially and at below-normal
 priority, under a lock that allows one SIRIUS at a time for every runner that shares the lock file. It
 resumes: a chunk whose record says exit 0 for the planned input is skipped, and a failed chunk is set
-aside and tried again, up to --max-attempts in all. A login or web-service failure is not retried at once
-and does not use up an attempt. It stops after a run of such failures, when MS-Emblator's work folder is
-in use, or when <run>/STOP exists. It exits 0 only when no chunk is left failed.
+aside and tried again, up to --max-attempts in all. A failure that may come from the login or the web
+service is not retried in the same invocation. It uses up an attempt like any other, except the first
+three failures of SIRIUS's stored login per chunk. The batch stops after a run of such failures, when
+MS-Emblator's work folder is in use, or when <run>/STOP exists. It exits 0 only when no chunk is left failed.
 
 `status` and `throughput` read plan.json and the per-chunk records; they write nothing but
 throughput.json.
@@ -556,9 +557,10 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
                 if exit_code == EXIT_REFUSED:
                     outcome = f"stopped: driver refused {chunk['chunk_id']}: {stderr_tail(stderr, 500).strip()}"
                     raise _Stop
-                # A login failure would fail the same way at once, and an attempt that left nothing to count
-                # could repeat for ever: neither is retried in this invocation.
-                if exit_code == EXIT_OK or login or not counts:
+                # A login or web-service failure (a quota or an outage) would fail the same way at once, and
+                # an attempt that left nothing to count could repeat for ever: none is retried in this
+                # invocation. Whether the attempt counts is decided above, not here.
+                if exit_code == EXIT_OK or login or service or not counts:
                     break
                 attempts = used
             if exit_code != EXIT_OK:

@@ -35,6 +35,8 @@ codes = [int(c) for c in os.environ.get("FAKE_EXITS", "0").split(",")]
 code = codes[min(calls, len(codes) - 1)]
 if out.exists() and any(out.iterdir()):
     sys.exit(3)
+if os.environ.get("FAKE_REFUSE"):  # the real driver refuses (busy work folder) before writing anything
+    sys.exit(3)
 out.mkdir(parents=True, exist_ok=True)
 priority = None
 if sys.platform == "win32":
@@ -103,7 +105,7 @@ class BatchTest(unittest.TestCase):
             return batch.run_batch(self.run_dir / "plan.json", self.msemblator, python=Path(sys.executable),
                                    driver=self.fake, hash_libraries=False, **kwargs)
         finally:
-            for name in ("FAKE_COUNTER", "FAKE_EXITS", "FAKE_LOGIN", "FAKE_SERVICE_LINES"):
+            for name in ("FAKE_COUNTER", "FAKE_EXITS", "FAKE_LOGIN", "FAKE_SERVICE_LINES", "FAKE_REFUSE"):
                 os.environ.pop(name, None)
 
     def _calls(self):
@@ -297,14 +299,40 @@ class BatchTest(unittest.TestCase):
         self.assertEqual(self._calls(), batch.FREE_LOGIN_FAILURES + 2)
         self.assertIn(self.plan["chunks"][0]["chunk_id"], self._invocation()["chunks_exhausted"])
 
+    def _events(self):
+        return [json.loads(line) for line in
+                (self.run_dir / "batch_events.jsonl").read_text(encoding="utf-8").splitlines()]
+
     def test_an_incidental_service_line_does_not_exempt_a_real_failure(self):
-        os.environ["FAKE_SERVICE_LINES"] = "1"  # one matching line in an otherwise ordinary failure
-        self.assertEqual(self._run(exits="1", stop_after=99), batch.EXIT_CHUNKS_FAILED)
-        self.assertEqual(self._calls(), 12, "each chunk is retried and then counted as exhausted")
         output = self.run_dir / self.plan["chunks"][0]["output_dir"]
-        self.assertEqual(batch.attempts_used(output), 2)
+        for invocation in range(2):  # one matching line in an otherwise ordinary failure
+            os.environ["FAKE_SERVICE_LINES"] = "1"
+            self.assertEqual(self._run(exits="1", stop_after=99), batch.EXIT_CHUNKS_FAILED)
+            self.assertEqual(self._calls(), 6 * (invocation + 1), "not retried at once, but run on resume")
+            self.assertEqual(batch.attempts_used(output), invocation + 1, "every such attempt counts")
+        self.assertTrue(all(e["counts_as_attempt"] for e in self._events()))
         self.assertEqual(self._run(exits="0"), batch.EXIT_CHUNKS_FAILED)
-        self.assertEqual(self._calls(), 12, "a resume must not rerun them")
+        self.assertEqual(self._calls(), 12, "exhausted chunks are not rerun")
+        self.assertEqual(len(self._invocation()["chunks_exhausted"]), 6)
+
+    def test_a_web_service_outage_does_not_spend_every_attempt_at_once(self):
+        os.environ["FAKE_SERVICE_LINES"] = "3"  # login valid, the web service failing
+        self.assertEqual(self._run(exits="2"), batch.EXIT_STOPPED)
+        self.assertEqual(self._calls(), 3, "one attempt per chunk before --stop-after fires")
+        self.assertIn("consecutive", self._invocation()["outcome"])
+        output = self.run_dir / self.plan["chunks"][0]["output_dir"]
+        self.assertEqual(batch.attempts_used(output), 1)
+        # after recovery each of those chunks still has an attempt left
+        self.assertEqual(self._run(exits="0"), batch.EXIT_OK)
+        self.assertEqual(self._calls(), 9)
+
+    def test_a_refusal_before_any_output_is_not_counted(self):
+        os.environ["FAKE_REFUSE"] = "1"
+        self.assertEqual(self._run(), batch.EXIT_STOPPED)
+        event = self._events()[-1]
+        self.assertEqual(event["exit_code"], batch.EXIT_REFUSED)
+        self.assertFalse(event["counts_as_attempt"])
+        self.assertEqual(batch.attempts_used(self.run_dir / self.plan["chunks"][0]["output_dir"]), 0)
 
     def test_a_locked_rename_is_retried_and_a_failed_record_still_frees_the_lock(self):
         real_replace, calls = batch.os.replace, []
@@ -336,6 +364,34 @@ class BatchTest(unittest.TestCase):
         finally:
             batch.update_run_json = real_update
         self.assertFalse((self.root / batch.LOCK_NAME).exists(), "the lock must be freed anyway")
+
+    def test_write_json_retries_then_gives_up_cleanly(self):
+        target = self.base / "record.json"
+        real_replace, calls = batch.os.replace, []
+
+        def flaky(source, destination):
+            calls.append(1)
+            if len(calls) <= 3:
+                raise PermissionError("held open")
+            return real_replace(source, destination)
+
+        batch.REPLACE_PAUSE_SECONDS = 0
+        try:
+            batch.os.replace = flaky
+            batch.write_json(target, {"version": 1})
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"version": 1})
+            self.assertEqual(len(calls), 4)
+
+            def always(source, destination):
+                raise PermissionError("held open")
+
+            batch.os.replace = always
+            with self.assertRaises(PermissionError):
+                batch.write_json(target, {"version": 2})
+        finally:
+            batch.os.replace, batch.REPLACE_PAUSE_SECONDS = real_replace, 0.2
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"version": 1}, "the old file stays whole")
+        self.assertEqual(list(self.base.glob("record.json.*.tmp")), [], "the temporary file is removed")
 
     def test_failing_to_note_the_driver_does_not_end_the_batch(self):
         real_write = batch.write_json
@@ -392,10 +448,38 @@ class BatchTest(unittest.TestCase):
         event = json.loads((self.run_dir / "batch_events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
         self.assertIsNone(event["exit_code"])
         self.assertIn("interrupted", event["reason"])
+        self.assertTrue(event["counts_as_attempt"], "this interrupt left a bundle")
         # a restart sets the partial bundle aside and reruns the chunk as its second attempt
         self.assertEqual(self._run(), 0)
         self.assertTrue(first.with_name(first.name + ".failed-1").is_dir())
         self.assertEqual(batch.status(self.run_dir / "plan.json")["chunks"]["done"], 6)
+
+    def test_an_interrupt_before_any_output_is_not_counted(self):
+        class InterruptedAtOnce:  # Ctrl+C right after the driver started, before it wrote anything
+            pid = 0
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def communicate(self, timeout=None):
+                raise KeyboardInterrupt
+
+        real_popen, real_kill = batch.subprocess.Popen, batch.kill_tree
+
+        def popen(command, *args, **kwargs):
+            if str(self.fake.resolve()) in [str(c) for c in command]:
+                return InterruptedAtOnce()
+            return real_popen(command, *args, **kwargs)
+
+        batch.subprocess.Popen, batch.kill_tree = popen, lambda process: None
+        try:
+            self.assertEqual(self._run(), batch.EXIT_STOPPED)
+        finally:
+            batch.subprocess.Popen, batch.kill_tree = real_popen, real_kill
+        event = self._events()[-1]
+        self.assertIsNone(event["exit_code"])
+        self.assertFalse(event["counts_as_attempt"])
+        self.assertEqual(batch.attempts_used(self.run_dir / self.plan["chunks"][0]["output_dir"]), 0)
 
     def test_refused_driver_stops_the_batch(self):
         self.assertEqual(self._run(exits="3"), 1)
