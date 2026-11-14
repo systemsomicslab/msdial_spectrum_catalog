@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .parsers import read_msp, read_tsv, sha256_file
+from .annotator_settings import read_annotator_settings
 
 TIERS = ("LBM2", "VS21 strict", "VS21 relaxed", "GLACIER in-silico", "unassigned")
 SELECTIONS = {
@@ -68,7 +69,7 @@ def annotator_tiers(output: Path) -> dict[str, str]:
     path = output / "msp_annotator_settings.tsv"
     if not path.exists():
         return mapping
-    for _, row in read_tsv(path):
+    for row in read_annotator_settings(path):
         evidence = row.get("evidence_tier", "").lower()
         if row.get("library_kind", "").lower() == "predicted":
             mapping[row["annotator_id"]] = "GLACIER in-silico"
@@ -182,7 +183,7 @@ def select_spectra(output: Path, unit_id: str, selection: str = "unresolved",
         "representative_spectra_by_tier": by_tier,
         "sources": {
             name: sha256_file(output / name)
-            for name in (f"{stem}.mdmsp", f"{stem}.mdcandidate.tsv", "msp_annotator_settings.tsv")
+            for name in (f"{stem}.mdmsp", f"{stem}.mdcandidate.tsv")
             if (output / name).exists()
         },
     }

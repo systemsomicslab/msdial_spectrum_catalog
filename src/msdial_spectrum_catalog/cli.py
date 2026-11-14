@@ -39,6 +39,16 @@ def _report_dict(report):
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="MS-DIAL spectrum provenance catalog")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    devset_parser = subparsers.add_parser("devset", help="Build a read-only campaign selection")
+    devset_sub = devset_parser.add_subparsers(dest="devset_command", required=True)
+    build_parser = devset_sub.add_parser("build")
+    build_parser.add_argument("--campaigns-root", required=True)
+    build_parser.add_argument("--campaign", action="append", required=True)
+    build_parser.add_argument("--exclude", action="append", default=[])
+    build_parser.add_argument("--snapshot", action="store_true")
+    build_parser.add_argument("--name")
+    build_parser.add_argument("--out", required=True)
+    build_parser.add_argument("--force-new-date", action="store_true")
     init_parser = subparsers.add_parser("init", help="Initialize a catalog database")
     init_parser.add_argument("database")
 
@@ -196,6 +206,22 @@ def main(argv=None) -> int:
     msemblator_parser.add_argument("--max-spectra", type=int)
 
     args = parser.parse_args(argv)
+    if args.command == "devset":
+        from .devset import build_devset
+        import sys
+        exclusions = {}
+        for item in args.exclude:
+            key, separator, reason = item.partition("=")
+            if not separator or not key or not reason:
+                parser.error("--exclude requires UNIT_KEY=REASON")
+            exclusions[key] = reason
+        result = build_devset(args.campaigns_root, args.campaign, args.out,
+                              exclusions=exclusions, snapshot=args.snapshot, name=args.name,
+                              force_new_date=args.force_new_date,
+                              command=list(sys.argv[1:] if argv is None else argv))
+        print(json.dumps({k: result[k] for k in ("name", "content_sha256", "totals", "campaigns")},
+                         indent=2))
+        return 0
     if args.command == "msemblator-export":
         from pathlib import Path
 
