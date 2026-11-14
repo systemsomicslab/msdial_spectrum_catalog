@@ -32,6 +32,7 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,11 +61,26 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+REPLACE_RETRIES, REPLACE_PAUSE_SECONDS = 10, 0.2
+
+
 def write_json(path: Path, data: dict) -> None:
-    """Write JSON through a temporary file and a rename, so a kill mid-write leaves the old file whole."""
+    """Write JSON through a temporary file and a rename, so a kill mid-write leaves the old file whole.
+
+    On Windows the rename fails while another process has the target open (a monitor reading run.json,
+    a second runner reading the lock), so it is retried for about two seconds before giving up.
+    """
     temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    for attempt in range(REPLACE_RETRIES):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if attempt == REPLACE_RETRIES - 1:
+                temporary.unlink(missing_ok=True)
+                raise
+            time.sleep(REPLACE_PAUSE_SECONDS)
 
 
 def _refuse_analysis_root(path: Path) -> None:
@@ -280,8 +296,12 @@ def release_lock(path: Path) -> None:
 
 
 def note_driver(path: Path, holder: dict, driver_pid: int) -> None:
-    """Record in the lock the driver this runner started, so a takeover can tell whether it still runs."""
-    write_json(path, {**holder, "driver_pid": driver_pid})
+    """Record in the lock the driver this runner started, so a takeover can tell whether it still runs.
+    Best effort: failing to note it must not end the batch while the driver runs, nor free the lock."""
+    try:
+        write_json(path, {**holder, "driver_pid": driver_pid})
+    except OSError:
+        pass
 
 
 # ----------------------------------------------------------------------------------------------- run
@@ -311,10 +331,24 @@ def set_aside(output: Path) -> Path | None:
     return target
 
 
+def is_login_failure(record: dict | None) -> bool:
+    """The driver could not use SIRIUS's stored login. Such an attempt says nothing about the chunk, so it
+    is not retried at once and (up to FREE_LOGIN_FAILURES per chunk) does not use up an attempt.
+
+    The driver has no exit code of its own for a web-service failure, and its service_error_lines counts
+    matching lines anywhere in the log, incidental ones included, so neither exempts an attempt."""
+    return bool(record) and record.get("exit_code") != EXIT_OK and record.get("login_ok") is False
+
+
 def is_service_failure(record: dict | None) -> bool:
+    """A failure that may come from the login or the web service rather than the chunk: it feeds only the
+    --stop-after rule (a run of them stops the batch), never the attempt count."""
     if not record or record.get("exit_code") == EXIT_OK:
         return False
     return record.get("login_ok") is False or bool(record.get("service_error_lines"))
+
+
+FREE_LOGIN_FAILURES = 3  # per chunk; later login failures count as attempts, so no chunk reruns for ever
 
 
 def has_bundle(output: Path) -> bool:
@@ -323,9 +357,15 @@ def has_bundle(output: Path) -> bool:
 
 def attempts_used(output: Path) -> int:
     """Attempts that count against --max-attempts: every set-aside or current bundle, interrupted ones
-    included, except those that failed on login or the web service (they say nothing about the chunk)."""
+    included, except the first FREE_LOGIN_FAILURES that failed on the login."""
     bundles = failed_attempts(output) + ([output] if has_bundle(output) else [])
-    return sum(not is_service_failure(read_record(bundle)) for bundle in bundles)
+    counted, free = 0, FREE_LOGIN_FAILURES
+    for bundle in bundles:
+        if free and is_login_failure(read_record(bundle)):
+            free -= 1
+        else:
+            counted += 1
+    return counted
 
 
 def append_event(run_dir: Path, event: dict) -> None:
@@ -377,8 +417,9 @@ def recorded_plan_sha256(run_dir: Path) -> str | None:
 
 
 def stderr_tail(stderr: bytes, characters: int) -> str:
-    """The end of the driver's stderr, with account details removed, for the events and run.json."""
-    return scrub(stderr.decode("utf-8", "replace")[-characters:])
+    """The end of the driver's stderr, with account details removed, for the events and run.json. The
+    whole text is scrubbed before it is cut, so a cut cannot split a detail away from its key."""
+    return scrub(stderr.decode("utf-8", "replace"))[-characters:]
 
 
 def start_driver(command: list[str], environment: dict, cwd: Path) -> subprocess.Popen:
@@ -495,25 +536,31 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
                     append_event(run_dir, {"chunk_id": chunk["chunk_id"], "attempt": attempts + 1,
                                            "started_at": started, "finished_at": now(), "exit_code": None,
                                            "reason": "interrupted (Ctrl+C or Ctrl+Break); process tree killed",
-                                           "failed_steps": None, "stderr_tail": "", "counts_as_attempt": True})
+                                           "failed_steps": None, "stderr_tail": "",
+                                           "counts_as_attempt": attempts_used(output) > attempts})
                     outcome = f"interrupted during {chunk['chunk_id']}"
                     raise _Stop
                 record = read_record(output)
                 if record is None and reason is None and exit_code != EXIT_REFUSED:
                     reason = "no msemblator_run.json"
-                service = is_service_failure(record)
+                service, login = is_service_failure(record), is_login_failure(record)
+                # The same rule attempts_used applies on resume: a bundle exists and is not a free login failure.
+                used = attempts_used(output)
+                counts = used > attempts
                 append_event(run_dir, {"chunk_id": chunk["chunk_id"], "attempt": attempts + 1,
                                        "started_at": started, "finished_at": now(), "exit_code": exit_code,
                                        "reason": reason or (record or {}).get("error"),
                                        "failed_steps": (record or {}).get("failed_steps"),
                                        "stderr_tail": stderr_tail(stderr, 2000) if exit_code else "",
-                                       "counts_as_attempt": not service})
+                                       "counts_as_attempt": counts})
                 if exit_code == EXIT_REFUSED:
                     outcome = f"stopped: driver refused {chunk['chunk_id']}: {stderr_tail(stderr, 500).strip()}"
                     raise _Stop
-                if exit_code == EXIT_OK or service:
-                    break  # a login or web-service failure would fail the same way at once: not retried here
-                attempts += 1
+                # A login failure would fail the same way at once, and an attempt that left nothing to count
+                # could repeat for ever: neither is retried in this invocation.
+                if exit_code == EXIT_OK or login or not counts:
+                    break
+                attempts = used
             if exit_code != EXIT_OK:
                 failed.append({"chunk_id": chunk["chunk_id"], "exit_code": exit_code, "service_failure": service})
             if service:
@@ -542,8 +589,10 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
         invocation["chunks_attempted"] = ran
         invocation["chunks_failed"] = failed
         invocation["chunks_exhausted"] = exhausted
-        update_run_json(run_dir, invocation)
-        release_lock(lock_path)
+        try:
+            update_run_json(run_dir, invocation)
+        finally:
+            release_lock(lock_path)  # even when run.json cannot be written
         if sirius_directory is not None and not outcome.startswith(("interrupted", "crashed")):
             try:
                 invocation["subscription_limits_after"] = subscription_limits(str(sirius_directory))

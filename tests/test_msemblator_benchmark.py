@@ -137,6 +137,20 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(counts["structure_reference_unevaluable"], 1)
         self.assertEqual(summary["excluded_chunks"][0]["chunk_id"], "u1/benchmark/c001")
         self.assertIn("u1/benchmark/c001", benchmark.markdown(summary, None))
+        self.assertEqual(summary["counts"]["icd_coverage"]["n"], 3)  # the keyless reference is left out
+        self.assertEqual(summary["unit_macro_average"]["structure_hit@1"], {"average": 0.6667, "units": 1})
+        cited = [r | {"reference_name": r["name"], "reference_inchikey": "", "canopus_most_specific": ""}
+                 for r in rows]
+        table = benchmark.markdown(summary, cited)
+        self.assertIn("| excluded |", table)
+        self.assertIn("| driver exit 1 |", table)
+
+    def test_unit_counts_follow_each_metric(self):
+        rows = [row("a"), row("b", unit_key="u2", structure_evaluable=False, rank_structure=math.inf)]
+        summary = benchmark.summarise(rows, {**self.CONTEXT, "excluded_chunks": []}, "b",
+                                      {"text": "lib", "libraries": []})
+        self.assertEqual(summary["unit_macro_average"]["structure_hit@1"]["units"], 1)
+        self.assertEqual(summary["unit_macro_average"]["formula_hit@1"]["units"], 2)
 
 
 if __name__ == "__main__":

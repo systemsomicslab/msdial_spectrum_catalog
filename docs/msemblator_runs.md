@@ -71,9 +71,12 @@ python -m msdial_spectrum_catalog.msemblator_batch run --plan <run>\plan.json --
 - Resume: a chunk whose `msemblator_run.json` says exit 0 is skipped, after its `input_sha256` is checked
   against the plan's `chunk_sha256`. A mismatch stops the batch, and a `plan.json` whose sha256 differs
   from the one `run.json` recorded is refused. A failed chunk is moved to the next free
-  `cNNN.failed-<n>` and run again, up to `--max-attempts` (2) in all. An interrupted attempt counts. An
-  attempt that failed on login or the web service does not count, and is not retried at once: after a
-  re-login, a new invocation runs it again.
+  `cNNN.failed-<n>` and run again, up to `--max-attempts` (2) in all. An attempt counts when it left a
+  bundle (an interrupted one included), except a failure of SIRIUS's stored login (`login_ok: false`):
+  the first three per chunk do not count and are not retried at once, so after a re-login a new
+  invocation runs the chunk again; later ones count. Other failures count even when the log has lines
+  that look like web-service errors (`service_error_lines`), which may be incidental. Those lines feed only
+  the `--stop-after` rule. `counts_as_attempt` in each event follows the same rule.
 - Stops: after `--stop-after` (3) consecutive chunks failing on login or the web service; when the driver
   refuses (exit 3); when `<run>\STOP` exists; after `--limit` chunks.
 - Exit codes: 0 when every chunk the runner reached is done; 5 when it went through but some chunks are
@@ -91,7 +94,8 @@ python -m msdial_spectrum_catalog.msemblator_batch run --plan <run>\plan.json --
   dirty), the interpreters, the parameter-file and library sha256, the affinity mask, the driver priority,
   `max_attempts`, the usage limits SIRIUS reports (the allowlisted keys only), the start, end and outcome,
   and the failed and exhausted chunks. It is written through a temporary file and a rename, so a kill
-  mid-write leaves the previous version whole.
+  mid-write leaves the previous version whole. The rename is retried for about two seconds while another
+  process holds the file open, and the lock is freed even when the last write fails.
 - Every chunk attempt is appended to `batch_events.jsonl`, with `counts_as_attempt` and the end of the
   driver's stderr, from which account details are removed.
 

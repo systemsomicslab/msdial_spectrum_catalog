@@ -514,9 +514,10 @@ def summarise(rows: list[dict], context: dict, benchmark_id: str, citation: dict
                                 "formula_hit@1": hit_rate([r for r in formula_rows if r[key] == v], "rank_formula", 1)}
                          for v in values}
 
-    def unit_average(metric: str) -> float | None:
+    def unit_average(metric: str) -> dict:
+        """The mean of the per-unit rates, over the units that have at least one evaluable spectrum for it."""
         values = [s[metric]["rate"] for s in strata["unit_key"].values() if s[metric]["rate"] is not None]
-        return round(sum(values) / len(values), 4) if values else None
+        return {"average": round(sum(values) / len(values), 4) if values else None, "units": len(values)}
 
     parents = defaultdict(list)
     for row in with_parent:
@@ -560,7 +561,7 @@ def summarise(rows: list[dict], context: dict, benchmark_id: str, citation: dict
             "excluded_chunks": len(context.get("excluded_chunks", [])),
             "benchmark_spectra_in_chunks_not_run": context.get("not_run", 0),
             "with_reference_direct_parent": len(with_parent),
-            "icd_coverage": wilson(len(with_parent), len(included)),
+            "icd_coverage": wilson(len(with_parent), len(structure_rows)),  # a keyless reference has no parent
             "skipped_no_formula": sum(r["structure_step"] == "skipped_no_formula" for r in included)},
         "excluded_chunks": context.get("excluded_chunks", []),
         "exclusion_rule": "a chunk whose driver exit is not 0, or that reports a failed step, is left out of every "
@@ -580,11 +581,8 @@ def summarise(rows: list[dict], context: dict, benchmark_id: str, citation: dict
                     "all": canopus_block(with_parent), "formula_top1": canopus_block(formula_top1),
                     "note": "CANOPUS runs on MS-Emblator's top-1 formula, so the formula_top1 block is the "
                             "informative one; class/superclass agreement needs the ChemOnt lineage (Q5)"},
-        "unit_macro_average": {
-            "units": sum(s["n"] > 0 for s in strata["unit_key"].values()),
-            "structure_hit@1": unit_average("structure_hit@1"),
-            "structure_hit@5": unit_average("structure_hit@5"),
-            "formula_hit@1": unit_average("formula_hit@1")},
+        "unit_macro_average": {metric: unit_average(metric)
+                               for metric in ("structure_hit@1", "structure_hit@5", "formula_hit@1")},
         "strata": strata,
         "closure_by_top1_margin": {"tool": TOOL_STRUCTURE, "score_type": score_structure,
                                    "margin": "rank_score(top1) - rank_score(top2)", "rows": closure},
@@ -625,11 +623,11 @@ def markdown(summary: dict, cited_rows: list[dict] | None) -> str:
     if cited_rows:
         lines += ["", f"Per-spectrum rows (reference identities from {citation['text']}):", "",
                   "| spectrum | reference | first block | rank formula | rank structure | CANOPUS most specific | "
-                  "reference direct parent |", "|---|---|---|---|---|---|---|"]
+                  "reference direct parent | excluded |", "|---|---|---|---|---|---|---|---|"]
         for row in cited_rows:
             lines.append(f"| {row['name']} | {row['reference_name']} | {first_block(row['reference_inchikey'])} | "
                          f"{row['rank_formula']} | {row['rank_structure']} | {row['canopus_most_specific']} | "
-                         f"{row['reference_direct_parent']} |")
+                         f"{row['reference_direct_parent']} | {row['excluded'] or 'no'} |")
     return "\n".join(lines) + "\n"
 
 
