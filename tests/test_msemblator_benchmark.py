@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
 import tempfile
 import unittest
@@ -154,6 +155,35 @@ class SummaryTest(unittest.TestCase):
                                       {"text": "lib", "libraries": []})
         self.assertEqual(summary["unit_macro_average"]["structure_hit@1"]["units"], 1)
         self.assertEqual(summary["unit_macro_average"]["formula_hit@1"]["units"], 2)
+
+    def test_the_summary_names_the_cleanup_and_flags_mixed_builds(self):
+        new = {"exit_code": 0, "environment": {"msemblator_commit": "edcea4a", "msfinder": {
+            "folder": "MSFINDER 773d4cf", "binary_sha256": {"MsfinderConsoleApp.exe": "598a2885" + "0" * 56},
+            "gc_server": True}}}
+        old = {"exit_code": 0, "environment": {"msemblator_commit": "edcea4a"}}
+        self.assertTrue(json.loads(benchmark.msfinder_identity(new))["recorded"])
+        self.assertFalse(json.loads(benchmark.msfinder_identity(old))["recorded"])
+        self.assertIsNone(benchmark.msfinder_identity(None))
+        one = [{**json.loads(benchmark.msfinder_identity(new)), "chunks": 2}]
+        rule = {"rule": "spectral_entropy", "max_entropy": 4.5}
+        context = {**self.CONTEXT, "excluded_chunks": [], "plan": {"run_id": "r", "peak_cleanup": rule},
+                   "msfinder_builds": one}
+        summary = benchmark.summarise([row("a")], context, "b", {"text": "lib", "libraries": []})
+        self.assertEqual(summary["peak_cleanup"], rule)
+        self.assertFalse(summary["msfinder_build_mixed"])
+        text = benchmark.markdown(summary, None)
+        self.assertIn("Peak cleanup: spectral_entropy at most 4.5.", text)
+        self.assertIn("MS-FINDER build: MSFINDER 773d4cf (console 598a28850000", text)
+        mixed = one + [{**json.loads(benchmark.msfinder_identity(old)), "chunks": 1}]
+        summary = benchmark.summarise([row("a")], {**context, "msfinder_builds": mixed}, "b",
+                                      {"text": "lib", "libraries": []})
+        self.assertTrue(summary["msfinder_build_mixed"])
+        self.assertIn("MIXED MS-FINDER builds", benchmark.markdown(summary, None))
+        self.assertTrue(any("more than one" in caveat for caveat in summary["caveats"]))
+        plain = benchmark.summarise([row("a")], {**self.CONTEXT, "excluded_chunks": []}, "b",
+                                    {"text": "lib", "libraries": []})
+        self.assertEqual(plain["peak_cleanup"], {"rule": None})
+        self.assertIn("Peak cleanup: none.", benchmark.markdown(plain, None))
 
 
 if __name__ == "__main__":
