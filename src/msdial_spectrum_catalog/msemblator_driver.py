@@ -20,7 +20,7 @@ Besides the four CSVs, a run keeps what an importer and a benchmark need to trus
 - metfrag/, the MetFrag outputs, which MS-Emblator leaves in its checkout and clears on the next run;
 - name_map.tsv, MS-Emblator's integer compound ID mapped back to the exported NAME and, through the
   export manifest, to unit and alignment ID;
-- msemblator_run.json, with the SIRIUS version, the failed steps, the environment and a hash of every
+- msemblator_run.json, with the SIRIUS version, the MS-FINDER build, the failed steps, the environment and a hash of every
   harvested file, including the CANOPUS summaries MS-Emblator writes but never reads.
 
 Exit codes: 0 clean; 1 MS-Emblator reported failed steps; 2 exception (including a missing login or a
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import glob
 import hashlib
 import json
 import os
@@ -147,6 +148,35 @@ def sirius_version(root: Path) -> str | None:
     return None
 
 
+MSFINDER_BINARIES = ("MsfinderConsoleApp.exe", "MsfinderConsoleApp.exe.config", "MolecularFormulaFinder.dll",
+                     "StructureFinder.dll", "MsfinderCommon.dll", "Common.dll")
+_GC_SERVER = re.compile(r"<gcServer\s+enabled\s*=\s*\"(true|false)\"", re.IGNORECASE)
+
+
+def msfinder_build(root: Path) -> dict:
+    """Which MS-FINDER console the run used, so runs on different MS-FINDER builds can be told apart.
+
+    MS-Emblator runs the first external/msfinder/MSFINDER* folder that glob returns; the same rule picks it
+    here. The record holds folder names, file hashes and sizes, never a path.
+    """
+    candidates = glob.glob(os.path.join(str(root / "external" / "msfinder"), "MSFINDER*"))
+    if not candidates:
+        return {"folder": None}
+    folder = Path(candidates[0])
+    binaries = {name: sha256(folder / name) for name in MSFINDER_BINARIES if (folder / name).is_file()}
+    config = folder / "MsfinderConsoleApp.exe.config"
+    match = _GC_SERVER.search(config.read_text(encoding="utf-8-sig", errors="replace")) if config.is_file() else None
+    resources = folder / "Resources"
+    return {
+        "folder": folder.name,
+        "candidates": sorted(Path(path).name for path in candidates),
+        "binary_sha256": binaries,
+        "gc_server": None if match is None else match.group(1).lower() == "true",
+        "resources": {path.name: path.stat().st_size for path in sorted(resources.iterdir()) if path.is_file()}
+        if resources.is_dir() else None,
+    }
+
+
 def affinity_mask() -> str | None:
     """The process CPU affinity mask, as hex, where the platform tells it."""
     if hasattr(os, "sched_getaffinity"):
@@ -255,6 +285,7 @@ def environment(root: Path) -> dict:
     return {
         "msemblator_commit": git_commit(root),
         "msemblator_dirty": git_dirty(root),
+        "msfinder": msfinder_build(root),
         "model_sha256": models,
         "library_databases": databases,
         "python": platform.python_version(),

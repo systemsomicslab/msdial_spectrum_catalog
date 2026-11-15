@@ -142,7 +142,10 @@ chunk's sha256), `input_records`, `manifest`, `parameter_file_sha256`, `started_
 `msemblator.<step>.rank_score.<ranker>`), `service_error_lines`, `name_map_ok`, `name_map`
 (`records`, `sent_to_structure`, `skipped_no_formula`, `problems`), `metfrag_files`, `harvest`
 (`{relative path: {sha256, bytes}}`), `canopus_summary_files`, `outputs` (`{csv: sha256}`) and
-`environment` (MS-Emblator commit and dirty flag, model sha256, library DB size and mtime, Python, affinity
+`environment` (MS-Emblator commit and dirty flag; `msfinder`, the MS-FINDER console MS-Emblator runs: the
+first `external/msfinder/MSFINDER*` folder, as MS-Emblator picks it, with every candidate folder, sha256 of
+the console and its formula and structure DLLs, the `gcServer` setting and the size of each `Resources`
+file; model sha256, library DB size and mtime, Python, affinity
 mask, logical CPUs, `model_assets` as given with `--model-assets`, for example the Zenodo record and md5
 of the installed model set, and `third_party_data`: the data files msbuddy fetches into its package folder
 on first use, with size, sha256, source URL and fetch time).
