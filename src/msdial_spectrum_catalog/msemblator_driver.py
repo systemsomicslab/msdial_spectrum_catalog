@@ -44,6 +44,7 @@ import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from xml.etree import ElementTree
 
 PLACEHOLDER = "<stored-sirius-login>"
 CSV_OUTPUTS = ("formula_summary.csv", "formula_score.csv", "structure_score.csv", "structure_summary.csv")
@@ -150,7 +151,26 @@ def sirius_version(root: Path) -> str | None:
 
 MSFINDER_BINARIES = ("MsfinderConsoleApp.exe", "MsfinderConsoleApp.exe.config", "MolecularFormulaFinder.dll",
                      "StructureFinder.dll", "MsfinderCommon.dll", "Common.dll")
-_GC_SERVER = re.compile(r"<gcServer\s+enabled\s*=\s*\"(true|false)\"", re.IGNORECASE)
+
+
+def gc_server_setting(config: Path) -> tuple[bool | None, str | None]:
+    """The <runtime><gcServer enabled="..."/> setting of a .NET Framework config: (value, error).
+
+    The value is None when the file or the element is absent (the runtime's default, workstation GC applies);
+    the error names a config that cannot be parsed, so it is not mistaken for an absent setting."""
+    if not config.is_file():
+        return None, None
+    try:
+        tree = ElementTree.parse(config)  # comments are dropped, either quote style is read
+    except (ElementTree.ParseError, OSError) as error:
+        return None, type(error).__name__
+    element = tree.getroot().find("runtime/gcServer")
+    if element is None:
+        return None, None
+    value = (element.get("enabled") or "").strip().lower()
+    if value not in ("true", "false"):
+        return None, f"gcServer enabled={value!r}"
+    return value == "true", None
 
 
 def msfinder_build(root: Path) -> dict:
@@ -164,14 +184,14 @@ def msfinder_build(root: Path) -> dict:
         return {"folder": None}
     folder = Path(candidates[0])
     binaries = {name: sha256(folder / name) for name in MSFINDER_BINARIES if (folder / name).is_file()}
-    config = folder / "MsfinderConsoleApp.exe.config"
-    match = _GC_SERVER.search(config.read_text(encoding="utf-8-sig", errors="replace")) if config.is_file() else None
+    gc_server, gc_error = gc_server_setting(folder / "MsfinderConsoleApp.exe.config")
     resources = folder / "Resources"
     return {
         "folder": folder.name,
         "candidates": sorted(Path(path).name for path in candidates),
         "binary_sha256": binaries,
-        "gc_server": None if match is None else match.group(1).lower() == "true",
+        "gc_server": gc_server,
+        **({"gc_server_error": gc_error} if gc_error else {}),
         "resources": {path.name: path.stat().st_size for path in sorted(resources.iterdir()) if path.is_file()}
         if resources.is_dir() else None,
     }
