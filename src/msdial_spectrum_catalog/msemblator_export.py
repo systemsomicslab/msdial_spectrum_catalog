@@ -14,8 +14,10 @@ alignment by Peak ID. Three properties of its input decide whether that join is 
   outputs they were exported from.
 
 An optional peak cleanup (max_entropy, in `spectrum_cleanup`) drops each spectrum's weakest ions until its
-spectral entropy is at most a ceiling. The manifest keeps the raw and the written peak count and entropy, and
-the selection record states the rule, so a run says which peaks the tools were given.
+spectral entropy is at most a ceiling. It never removes a spectrum from the export. The manifest keeps, per
+spectrum, the raw and the written peak count and entropy, the cleanup status, and the kept threshold and the
+largest dropped ion relative to the base peak; the selection record states the rule and counts what was
+written, so a run says which peaks the tools were given.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from pathlib import Path
 
 from .parsers import read_msp, read_tsv, sha256_file
 from .annotator_settings import read_annotator_settings
-from .spectrum_cleanup import clean_by_entropy, spectral_entropy
+from .spectrum_cleanup import check_max_entropy, clean_by_entropy, spectral_entropy
 
 TIERS = ("LBM2", "VS21 strict", "VS21 relaxed", "GLACIER in-silico", "unassigned")
 SELECTIONS = {
@@ -57,6 +59,9 @@ class ExportedSpectrum:
     raw_peak_count: int
     spectral_entropy_raw: float
     spectral_entropy: float
+    cleanup_status: str  # not_requested, unchanged, cleaned, above_ceiling or kept_raw_too_few_peaks
+    kept_threshold_pct_of_base: float | None  # the weakest kept ion, % of the base peak, when ions were dropped
+    largest_removed_pct_of_base: float | None  # the strongest dropped ion, % of the base peak
     reference_name: str
     reference_formula: str
     reference_inchikey: str
@@ -130,8 +135,15 @@ def cleanup_rule(max_entropy: float | None) -> dict:
     """The peak cleanup as the selection record and the plan state it."""
     if max_entropy is None:
         return {"rule": None}
-    return {"rule": "spectral_entropy", "max_entropy": max_entropy, "logarithm": "natural",
-            "drops": "the weakest ions, equal intensities together, until the entropy is at most max_entropy",
+    return {"rule": "spectral_entropy", "max_entropy": check_max_entropy(max_entropy), "logarithm": "natural",
+            "drops": "the weakest positive ions, equal intensities together, until the entropy is at most "
+                     "max_entropy; zero and negative entries are left as they are",
+            "too_few_peaks": f"a spectrum that would keep fewer than {MINIMUM_PEAKS} positive ions is written "
+                             "raw (kept_raw_too_few_peaks)",
+            "above_ceiling": "when the strongest intensity level alone is above the ceiling, that level is "
+                             "kept and the spectrum stays above it (above_ceiling)",
+            "scale": "entropy of the spectrum as exported, without Li et al.'s preprocessing; their ranges "
+                     "are not a calibration of this ceiling",
             "reference": "Li et al., Nat. Methods 18, 1524-1531 (2021)"}
 
 
@@ -141,17 +153,17 @@ def select_spectra(output: Path, unit_id: str, selection: str = "unresolved",
     """Return the selected spectra with their peaks, and the counts that explain the selection.
 
     With max_entropy, each selected spectrum's weakest ions are dropped until its spectral entropy is at
-    most max_entropy; the minimum-peak rule is then checked again."""
+    most max_entropy. The cleanup never removes a spectrum: one that would keep fewer than MINIMUM_PEAKS
+    positive ions is written raw. Its counts describe the spectra written, after the cap."""
     if selection not in SELECTIONS:
         raise ValueError(f"selection is one of {sorted(SELECTIONS)}")
-    if max_entropy is not None and max_entropy <= 0:
-        raise ValueError("max_entropy must be positive")
+    if max_entropy is not None:
+        max_entropy = check_max_entropy(max_entropy)
     stem = latest_alignment_stem(output)
     tiers = representative_tiers(output, stem)
     wanted = SELECTIONS[selection]
     counts = {"records": 0, "no_peak_id": 0, "isotope": 0, "too_few_peaks": 0, "not_selected_tier": 0,
               "selected_before_cap": 0}
-    cleanup = {**cleanup_rule(max_entropy), "spectra_cleaned": 0, "peaks_removed": 0}
     by_tier = {tier: 0 for tier in TIERS}
     chosen = []
     for record in read_msp(output / f"{stem}.mdmsp"):
@@ -174,15 +186,16 @@ def select_spectra(output: Path, unit_id: str, selection: str = "unresolved",
             continue
         peaks = record.peaks
         entropy_raw = entropy = spectral_entropy(peaks)
+        status, kept_pct, removed_pct = "not_requested", None, None
         if max_entropy is not None:
             cleaned = clean_by_entropy(peaks, max_entropy)
-            if cleaned.removed:
-                cleanup["spectra_cleaned"] += 1
-                cleanup["peaks_removed"] += cleaned.removed
-            peaks, entropy = cleaned.peaks, cleaned.entropy_after
-            if len(peaks) < MINIMUM_PEAKS:  # unreachable for a ceiling above ln 3; kept as a guard
-                counts["too_few_peaks"] += 1
-                continue
+            status = cleaned.status
+            if cleaned.removed and sum(float(i) > 0 for _, i in cleaned.peaks) < MINIMUM_PEAKS:
+                status = "kept_raw_too_few_peaks"  # the cleanup never removes a spectrum
+            elif cleaned.removed:
+                peaks, entropy = cleaned.peaks, cleaned.entropy_after
+                kept_pct = round(100 * cleaned.intensity_threshold / cleaned.base_peak, 2)
+                removed_pct = round(100 * cleaned.largest_removed / cleaned.base_peak, 2)
         peaks_text = "\n".join(f"{mz:.5f}\t{intensity:.0f}" for mz, intensity in peaks)
         fields = record.fields
         reference = candidate if selection == "benchmark" else {}
@@ -200,6 +213,9 @@ def select_spectra(output: Path, unit_id: str, selection: str = "unresolved",
             raw_peak_count=len(record.peaks),
             spectral_entropy_raw=round(entropy_raw, 4),
             spectral_entropy=round(entropy, 4),
+            cleanup_status=status,
+            kept_threshold_pct_of_base=kept_pct,
+            largest_removed_pct_of_base=removed_pct,
             reference_name=reference.get("name", ""),
             reference_formula=reference.get("formula", ""),
             reference_inchikey=reference.get("inchikey", ""),
@@ -210,6 +226,16 @@ def select_spectra(output: Path, unit_id: str, selection: str = "unresolved",
         chosen = sorted(chosen, key=lambda item: _sampling_rank(unit_id, item[0].alignment_id))[:max_spectra]
         chosen.sort(key=lambda item: item[0].alignment_id)
     counts["selected"] = len(chosen)
+    statuses = [spectrum.cleanup_status for spectrum, _ in chosen]
+    cleanup = {
+        **cleanup_rule(max_entropy),
+        # what was written, after the cap
+        "spectra_cleaned": sum(s.peak_count < s.raw_peak_count for s, _ in chosen),
+        "peaks_removed": sum(s.raw_peak_count - s.peak_count for s, _ in chosen),
+        "spectra_above_ceiling": statuses.count("above_ceiling"),
+        "spectra_kept_raw_too_few_peaks": statuses.count("kept_raw_too_few_peaks"),
+        "non_positive_entries_written": sum(sum(float(i) <= 0 for _, i in peaks) for _, peaks in chosen),
+    }
     summary = {
         "unit_id": unit_id,
         "selection": selection,

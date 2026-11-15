@@ -40,6 +40,7 @@ from pathlib import Path
 from .msemblator_driver import (EXIT_OK, EXIT_REFUSED, git_commit, git_dirty, parse_log, rankers, scrub, sha256,
                                 subscription_limits)
 from .msemblator_export import cleanup_rule, export_unit
+from .spectrum_cleanup import check_max_entropy
 
 PLAN_SCHEMA = "msemblator-batch-plan.v1"
 CAMPAIGN_MARKER = "_campaigns"  # the reanalysis (analysis) root holds the campaign ledgers here
@@ -140,6 +141,13 @@ def chunk_size_from(seconds_per_structure_spectrum: float) -> int:
     return max(CHUNK_LIMITS[0], min(CHUNK_LIMITS[1], size))
 
 
+def _max_entropy_argument(text: str) -> float:
+    try:
+        return check_max_entropy(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+
+
 def make_plan(units: list[dict], run_dir: Path, run_id: str, chunk_size: int, chunk_size_origin: str,
               selections: tuple[str, ...] = SELECTION_ORDER, max_spectra: int | None = None,
               sources: dict | None = None, max_entropy: float | None = None) -> dict:
@@ -166,7 +174,8 @@ def make_plan(units: list[dict], run_dir: Path, run_id: str, chunk_size: int, ch
                 "records": len(blocks),
                 "representative_spectra_by_tier": summary["representative_spectra_by_tier"],
                 "counts": summary["counts"],
-                "peak_cleanup": {k: summary["peak_cleanup"][k] for k in ("spectra_cleaned", "peaks_removed")},
+                "peak_cleanup": {k: v for k, v in summary["peak_cleanup"].items() if k not in cleanup_rule(None)
+                                 and isinstance(v, int)},
                 "chunks": [],
             }
             for index in range(0, len(blocks), chunk_size):
@@ -781,7 +790,7 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.add_argument("--chunk-size-origin", default="given")
     plan_parser.add_argument("--selections", default=",".join(SELECTION_ORDER))
     plan_parser.add_argument("--max-spectra", type=int)
-    plan_parser.add_argument("--max-entropy", type=float,
+    plan_parser.add_argument("--max-entropy", type=_max_entropy_argument,
                              help="Drop each spectrum's weakest ions until its spectral entropy is at most this "
                                   "(for example 4.5); default: no cleanup")
 

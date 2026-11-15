@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import io
 import json
 import os
 import sys
@@ -152,6 +154,29 @@ class BatchTest(unittest.TestCase):
         self.assertEqual({e["peak_cleanup"]["peaks_removed"] for e in cleaned["exports"]}, {0})
         self.assertEqual([c["chunk_sha256"] for c in cleaned["chunks"]],
                          [c["chunk_sha256"] for c in self.plan["chunks"]])
+
+    def test_the_plan_command_passes_the_ceiling_and_counts_a_real_cleanup(self):
+        output = self.base / "units" / "noisy" / "output"
+        write_unit(output, strict=1, relaxed=0)
+        mdmsp = output / f"{STEM}.mdmsp"
+        noise = "".join(f"{100.5 + k:.1f}\t{1000 + 50 * (k % 41)}\n" for k in range(300))
+        mdmsp.write_text(mdmsp.read_text(encoding="utf-8").replace(
+            "Num Peaks: 3\n50.0\t1\n60.0\t2\n70.0\t3\n",
+            f"Num Peaks: 303\n{noise}500.0\t100000\n600.0\t60000\n700.0\t30000\n"), encoding="utf-8")
+        common = ["plan", "--units", f"noisy={output}", "--root", str(self.root), "--chunk-size", "3",
+                  "--chunk-size-origin", "test", "--selections", "benchmark"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(batch.main(common + ["--run-id", "cli", "--max-entropy", "4.5"]), 0)
+        plan = json.loads((self.root / "cli" / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["peak_cleanup"]["max_entropy"], 4.5)
+        counts = plan["exports"][0]["peak_cleanup"]
+        self.assertEqual(counts["spectra_cleaned"], 1)
+        self.assertGreater(counts["peaks_removed"], 0)
+        self.assertEqual(counts["spectra_kept_raw_too_few_peaks"], 0)
+        for bad in ("nan", "inf", "0"):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                batch.main(common + ["--run-id", f"bad-{bad}", "--max-entropy", bad])
+            self.assertFalse((self.root / f"bad-{bad}" / "plan.json").exists())
 
     def test_a_plan_is_written_once(self):
         with self.assertRaises(SystemExit):
