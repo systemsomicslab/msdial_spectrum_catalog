@@ -319,6 +319,16 @@ def msfinder_identity(record: dict | None) -> str | None:
     }, sort_keys=True)
 
 
+def build_mixed(builds: list[dict]) -> bool:
+    """True when the included chunks ran on two different setups that are both known: two recorded MS-FINDER
+    builds, or two MS-Emblator commits. A chunk whose record predates the build record is unknown, not
+    different."""
+    recorded = {json.dumps({k: v for k, v in b.items() if k != "chunks"}, sort_keys=True)
+                for b in builds if b.get("recorded")}
+    commits = {b.get("msemblator_commit") for b in builds if b.get("msemblator_commit")}
+    return len(recorded) > 1 or len(commits) > 1
+
+
 def evaluate(run: Path, icd: Path, databases: list[str]) -> tuple[list[dict], dict]:
     plan = json.loads((run / "plan.json").read_text(encoding="utf-8"))
     units = {unit["unit_key"]: unit for unit in plan["units"]}
@@ -366,9 +376,6 @@ def evaluate(run: Path, icd: Path, databases: list[str]) -> tuple[list[dict], di
             exit_code = (outputs.record or {}).get("exit_code")
             for step, ranker in ((outputs.record or {}).get("rankers") or {}).items():
                 rankers_seen[step].add((ranker.get("ranker"), ranker.get("file"), ranker.get("sha256")))
-            build = msfinder_identity(outputs.record)
-            if build is not None:
-                builds_seen.setdefault(build, []).append(chunk["chunk_id"])
             chunk_names = [line[5:].strip() for line in
                            (run / chunk["chunk"]).read_text(encoding="utf-8").splitlines()
                            if line.upper().startswith("NAME:")]
@@ -376,6 +383,8 @@ def evaluate(run: Path, icd: Path, databases: list[str]) -> tuple[list[dict], di
                 not_run.extend(chunk_names)
                 continue
             exclusion = chunk_exclusion(outputs.record)
+            if not exclusion:  # the builds behind the rates: chunks left out of every rate do not count
+                builds_seen.setdefault(msfinder_identity(outputs.record), []).append(chunk["chunk_id"])
             if exclusion:
                 excluded.append({"chunk_id": chunk["chunk_id"], "exit_code": exit_code,
                                  "failed_steps": outputs.record.get("failed_steps") or [],
@@ -594,7 +603,9 @@ def summarise(rows: list[dict], context: dict, benchmark_id: str, citation: dict
                     for step, values in context.get("rankers", {}).items()},
         "peak_cleanup": context["plan"].get("peak_cleanup") or {"rule": None},
         "msfinder_builds": context.get("msfinder_builds", []),
-        "msfinder_build_mixed": len(context.get("msfinder_builds", [])) > 1,
+        "msfinder_build_mixed": build_mixed(context.get("msfinder_builds", [])),
+        "msfinder_build_unknown_chunks": sum(b["chunks"] for b in context.get("msfinder_builds", [])
+                                             if not b.get("recorded")),
         "structure": {"tool": TOOL_STRUCTURE, "score_type": score_structure,
                       "posterior_type": POSTERIOR_MSEMBLATOR, "match": "first InChIKey block (RDKit from SMILES)",
                       "denominators": structure},
@@ -620,7 +631,10 @@ def summarise(rows: list[dict], context: dict, benchmark_id: str, citation: dict
             "optimistic agreement.",
         ] + (["The chunks ran on more than one MS-Emblator commit or MS-FINDER build (msfinder_builds); the rates "
               "pool them and do not describe either setup alone."]
-             if len(context.get("msfinder_builds", [])) > 1 else []),
+             if build_mixed(context.get("msfinder_builds", [])) else [])
+          + (["Some chunk records predate the MS-FINDER build record (msfinder_build_unknown_chunks); their "
+              "MS-FINDER build is unknown, not known to differ."]
+             if any(not b.get("recorded") for b in context.get("msfinder_builds", [])) else []),
     }
 
 
@@ -648,10 +662,12 @@ def markdown(summary: dict, cited_rows: list[dict] | None) -> str:
     builds = summary.get("msfinder_builds", [])
     if builds:
         described = "; ".join(
-            f"{b.get('msfinder_folder') or 'not recorded'} (console "
+            f"{b.get('msfinder_folder') or 'build not recorded'} (console "
             f"{((b.get('msfinder_binary_sha256') or {}).get('MsfinderConsoleApp.exe') or 'unknown')[:12]}, "
             f"MS-Emblator {(b.get('msemblator_commit') or 'unknown')[:7]}, {b['chunks']} chunks)" for b in builds)
-        lines.append(("MIXED MS-FINDER builds: " if summary.get("msfinder_build_mixed") else "MS-FINDER build: ")
+        label = ("MIXED MS-FINDER builds: " if summary.get("msfinder_build_mixed")
+                 else "MS-FINDER builds: " if len(builds) > 1 else "MS-FINDER build: ")
+        lines.append(label
                      + described + ".")
     lines += ["", "Counts: " + ", ".join(f"{k} {v}" for k, v in summary["counts"].items() if not isinstance(v, dict)),
               "", f"Exclusions: {summary['exclusion_rule']}."]

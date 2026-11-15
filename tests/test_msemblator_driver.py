@@ -358,6 +358,9 @@ class ParseLogTest(unittest.TestCase):
             self.assertEqual(set(build["binary_sha256"]),
                              {"MsfinderConsoleApp.exe", "MsfinderConsoleApp.exe.config", "MolecularFormulaFinder.dll",
                               "StructureFinder.dll", "MsfinderCommon.dll", "Common.dll"})
+            (root / "external" / "msfinder" / first / "MsfinderConsoleApp.exe.config").write_text(
+                "<configuration><runtime>", encoding="utf-8")
+            self.assertEqual(driver.msfinder_build(root)["gc_server_error"], "ParseError")
             self.assertEqual(build["binary_sha256"]["Common.dll"],
                              driver.sha256(root / "external" / "msfinder" / first / "Common.dll"))
 
@@ -378,6 +381,8 @@ class ParseLogTest(unittest.TestCase):
             self.assertEqual(setting("<configuration><runtime><gcServer enabled=\"maybe\"/></runtime></configuration>"),
                              (None, "gcServer enabled='maybe'"))
             self.assertEqual(setting("<configuration><runtime>"), (None, "ParseError"))
+            self.assertEqual(setting('<configuration xmlns="http://schemas.microsoft.com/.NetConfiguration/v2.0">'
+                                     '<runtime><gcServer enabled="true"/></runtime></configuration>'), (True, None))
             config.unlink()
             self.assertEqual(driver.gc_server_setting(config), (None, None))
 

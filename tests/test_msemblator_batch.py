@@ -214,6 +214,23 @@ class BatchTest(unittest.TestCase):
         self.assertEqual(invocation["msemblator_root"], "msemblator")
         self.assertIn("msfinder differ from the previous invocation", stderr.getvalue())
 
+    def test_a_resume_on_another_ms_emblator_root_is_recorded(self):
+        self.assertEqual(self._run(), 0)
+        other = self.base / "msemblator-runtime"
+        (other / "config").mkdir(parents=True)
+        (other / "config" / "msemblator_parameter_file.yaml").write_text("x\n", encoding="utf-8")
+        (self.run_dir / "STOP").write_text("", encoding="utf-8")
+        os.environ["FAKE_COUNTER"] = str(self.counter)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                batch.run_batch(self.run_dir / "plan.json", other, python=Path(sys.executable), driver=self.fake,
+                                hash_libraries=False)
+        finally:
+            os.environ.pop("FAKE_COUNTER", None)
+        invocation = json.loads((self.run_dir / "run.json").read_text(encoding="utf-8"))["invocations"][-1]
+        self.assertEqual(invocation["msemblator_root"], "msemblator-runtime")
+        self.assertIn("msemblator_root", invocation["changed_since_last_invocation"])
+
     def test_failed_chunk_is_set_aside_and_retried_once(self):
         self.assertEqual(self._run(exits="1,0", limit=1), 0)
         output = self.run_dir / self.plan["chunks"][0]["output_dir"]

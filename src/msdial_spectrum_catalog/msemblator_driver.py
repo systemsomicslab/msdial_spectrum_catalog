@@ -153,6 +153,10 @@ MSFINDER_BINARIES = ("MsfinderConsoleApp.exe", "MsfinderConsoleApp.exe.config", 
                      "StructureFinder.dll", "MsfinderCommon.dll", "Common.dll")
 
 
+def _local_name(tag) -> str:
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
 def gc_server_setting(config: Path) -> tuple[bool | None, str | None]:
     """The <runtime><gcServer enabled="..."/> setting of a .NET Framework config: (value, error).
 
@@ -164,7 +168,9 @@ def gc_server_setting(config: Path) -> tuple[bool | None, str | None]:
         tree = ElementTree.parse(config)  # comments are dropped, either quote style is read
     except (ElementTree.ParseError, OSError) as error:
         return None, type(error).__name__
-    element = tree.getroot().find("runtime/gcServer")
+    # match by local name: a config may declare a default namespace (xmlns="...NetConfiguration/v2.0")
+    element = next((child for runtime in tree.getroot() if _local_name(runtime.tag) == "runtime"
+                    for child in runtime if _local_name(child.tag) == "gcServer"), None)
     if element is None:
         return None, None
     value = (element.get("enabled") or "").strip().lower()

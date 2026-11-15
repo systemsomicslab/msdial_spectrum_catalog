@@ -174,16 +174,60 @@ class SummaryTest(unittest.TestCase):
         text = benchmark.markdown(summary, None)
         self.assertIn("Peak cleanup: spectral_entropy at most 4.5.", text)
         self.assertIn("MS-FINDER build: MSFINDER 773d4cf (console 598a28850000", text)
-        mixed = one + [{**json.loads(benchmark.msfinder_identity(old)), "chunks": 1}]
-        summary = benchmark.summarise([row("a")], {**context, "msfinder_builds": mixed}, "b",
+        commits = one + [{**json.loads(benchmark.msfinder_identity(new)), "msemblator_commit": "other", "chunks": 1}]
+        summary = benchmark.summarise([row("a")], {**context, "msfinder_builds": commits}, "b",
                                       {"text": "lib", "libraries": []})
         self.assertTrue(summary["msfinder_build_mixed"])
         self.assertIn("MIXED MS-FINDER builds", benchmark.markdown(summary, None))
         self.assertTrue(any("more than one" in caveat for caveat in summary["caveats"]))
+        unknown = one + [{**json.loads(benchmark.msfinder_identity(old)), "chunks": 3}]
+        summary = benchmark.summarise([row("a")], {**context, "msfinder_builds": unknown}, "b",
+                                      {"text": "lib", "libraries": []})
+        self.assertFalse(summary["msfinder_build_mixed"])  # unknown is not different
+        self.assertEqual(summary["msfinder_build_unknown_chunks"], 3)
+        self.assertTrue(any("unknown, not known to differ" in caveat for caveat in summary["caveats"]))
+        self.assertIn("MS-FINDER builds: ", benchmark.markdown(summary, None))
+        other = {**json.loads(benchmark.msfinder_identity(new)), "chunks": 1}
+        other["msfinder_binary_sha256"] = {"MsfinderConsoleApp.exe": "1" * 64}
+        summary = benchmark.summarise([row("a")], {**context, "msfinder_builds": one + [other]}, "b",
+                                      {"text": "lib", "libraries": []})
+        self.assertTrue(summary["msfinder_build_mixed"])
         plain = benchmark.summarise([row("a")], {**self.CONTEXT, "excluded_chunks": []}, "b",
                                     {"text": "lib", "libraries": []})
         self.assertEqual(plain["peak_cleanup"], {"rule": None})
         self.assertIn("Peak cleanup: none.", benchmark.markdown(plain, None))
+
+
+class EvaluateBuildsTest(unittest.TestCase):
+    """evaluate() collects the build of every included chunk, and leaves excluded chunks out."""
+
+    def test_builds_come_from_the_included_chunks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / "m.tsv").write_text("name\tunit_id\talignment_id\nn0\tu1\t1\nn1\tu1\t2\nn2\tu1\t3\n",
+                                       encoding="utf-8")
+            builds = [("MSFINDER new", "a" * 64, 0), ("MSFINDER old", "b" * 64, 0), ("MSFINDER other", "c" * 64, 2)]
+            chunks = []
+            for index, (folder, digest, exit_code) in enumerate(builds):
+                (run / f"c{index}").mkdir()
+                (run / f"c{index}.msp").write_text(f"NAME: n{index}\nNum Peaks: 0\n\n", encoding="utf-8")
+                record = {"exit_code": exit_code, "failed_steps": [], "environment": {
+                    "msemblator_commit": "edcea4a",
+                    "msfinder": {"folder": folder, "binary_sha256": {"MsfinderConsoleApp.exe": digest}}}}
+                (run / f"c{index}" / "msemblator_run.json").write_text(json.dumps(record), encoding="utf-8")
+                chunks.append({"chunk_id": f"u1/benchmark/c{index:03d}", "output_dir": f"c{index}",
+                               "chunk": f"c{index}.msp"})
+            plan = {"run_id": "r", "units": [{"unit_key": "u1"}], "chunks": chunks,
+                    "exports": [{"selection": "benchmark", "manifest": "m.tsv",
+                                 "chunks": [c["chunk_id"] for c in chunks]}]}
+            (run / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            icd = run / "empty.icd"
+            icd.write_text("InChIKey\tName\tID\n", encoding="utf-8")
+            rows, context = benchmark.evaluate(run, icd, [])
+        self.assertEqual(len(rows), 3)
+        folders = {b["msfinder_folder"]: b["chunks"] for b in context["msfinder_builds"]}
+        self.assertEqual(folders, {"MSFINDER new": 1, "MSFINDER old": 1})  # the excluded chunk is not counted
+        self.assertTrue(benchmark.build_mixed(context["msfinder_builds"]))
 
 
 if __name__ == "__main__":
