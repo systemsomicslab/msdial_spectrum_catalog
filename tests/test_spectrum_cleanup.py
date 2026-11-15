@@ -11,10 +11,10 @@ from msdial_spectrum_catalog.spectrum_cleanup import clean_by_entropy, spectral_
 
 
 def brute_force(peaks, ceiling):
-    """Drop the weakest intensity level, one level at a time, until the entropy is at most the ceiling."""
-    peaks = [p for p in peaks if p[1] > 0]
-    while spectral_entropy(peaks) > ceiling and len({i for _, i in peaks}) > 1:  # one level is kept whole
-        weakest = min(i for _, i in peaks)
+    """Drop the weakest positive intensity level, one level at a time, until the entropy is at most the
+    ceiling; zero entries stay."""
+    while spectral_entropy(peaks) > ceiling and len({i for _, i in peaks if i > 0}) > 1:  # one level is kept
+        weakest = min(i for _, i in peaks if i > 0)
         peaks = [p for p in peaks if p[1] != weakest]
     return peaks
 
@@ -33,6 +33,7 @@ class SpectralEntropyTest(unittest.TestCase):
         self.assertEqual(result.peaks, peaks)
         self.assertEqual(result.removed, 0)
         self.assertIsNone(result.intensity_threshold)
+        self.assertEqual((result.status, result.base_peak, result.largest_removed), ("unchanged", 1000.0, None))
 
     def test_noise_is_dropped_and_order_is_kept(self):
         signal = [(100.0, 1000), (150.0, 600), (200.0, 300)]
@@ -45,6 +46,9 @@ class SpectralEntropyTest(unittest.TestCase):
         self.assertEqual(result.peaks, sorted(result.peaks))
         self.assertEqual(result.removed, len(peaks) - len(result.peaks))
         self.assertTrue(all(i >= result.intensity_threshold for _, i in result.peaks))
+        self.assertEqual((result.status, result.base_peak), ("cleaned", 1000.0))
+        self.assertEqual(result.largest_removed, max(i for p in peaks if p not in result.peaks for i in [p[1]]))
+        self.assertLess(result.largest_removed, result.intensity_threshold)
 
     def test_equal_intensities_go_together(self):
         peaks = [(float(m), 10) for m in range(200)] + [(500.0, 100)]
@@ -53,16 +57,30 @@ class SpectralEntropyTest(unittest.TestCase):
         self.assertEqual(result.peaks, [(500.0, 100)])  # the 200 equal ions go together
         alone = clean_by_entropy([(float(m), 10) for m in range(200)], 4.5)
         self.assertEqual(len(alone.peaks), 200)  # one level above the ceiling cannot be split; it is kept
+        self.assertEqual((alone.status, alone.removed), ("above_ceiling", 0))
+        self.assertGreater(alone.entropy_after, 4.5)
+        above = clean_by_entropy([(float(m), 10) for m in range(200)] + [(900.0, 1)], 4.5)
+        self.assertEqual((above.status, above.removed, len(above.peaks)), ("above_ceiling", 1, 200))
+
+    def test_zero_entries_are_left_as_they_are(self):
+        signal = [(100.0, 1000), (150.0, 600), (200.0, 300)]
+        noise = [(100.5 + k, 20 + k % 41) for k in range(300)]
+        zeros = [(400.5 + k, 0) for k in range(50)]
+        result = clean_by_entropy(signal + noise + zeros, 4.5)
+        self.assertTrue(set(zeros) <= set(result.peaks))
+        self.assertEqual(result.removed, len(signal + noise) - (len(result.peaks) - len(zeros)))
+        low = clean_by_entropy(signal + zeros, 4.5)
+        self.assertEqual((low.peaks, low.removed), (signal + zeros, 0))
 
     def test_matches_the_one_level_at_a_time_rule(self):
         rng = random.Random(7)
         for _ in range(200):
             n = rng.randint(1, 400)
-            peaks = [(100.0 + k, rng.choice([rng.randint(1, 20), rng.randint(1, 100000)])) for k in range(n)]
+            peaks = [(100.0 + k, rng.choice([0, rng.randint(1, 20), rng.randint(1, 100000)])) for k in range(n)]
             ceiling = rng.choice([1.0, 2.5, 4.5])
             result = clean_by_entropy(peaks, ceiling)
             self.assertEqual(result.peaks, brute_force(peaks, ceiling) if result.removed else peaks)
-            if len({i for _, i in result.peaks}) > 1:
+            if result.status != "above_ceiling":
                 self.assertLessEqual(result.entropy_after, ceiling + 1e-9)
 
     def test_dropping_the_weakest_ion_never_raises_the_entropy(self):
@@ -73,9 +91,10 @@ class SpectralEntropyTest(unittest.TestCase):
             for smaller, larger in itertools.pairwise(entropies):
                 self.assertLessEqual(smaller, larger + 1e-12)
 
-    def test_the_ceiling_must_be_positive(self):
-        with self.assertRaises(ValueError):
-            clean_by_entropy([(1, 1)], 0)
+    def test_the_ceiling_must_be_finite_and_positive(self):
+        for ceiling in (0, -1, float("nan"), float("inf"), "x", None):
+            with self.assertRaises(ValueError, msg=repr(ceiling)):
+                clean_by_entropy([(1, 1)], ceiling)
 
 
 if __name__ == "__main__":
