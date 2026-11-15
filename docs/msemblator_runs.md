@@ -51,6 +51,12 @@ spectrum's weakest positive ions until its spectral entropy is at most S. The en
 al., Nat. Methods 18, 1524-1531 (2021): intensities normalised to sum 1, natural logarithm. Without the option,
 nothing is dropped.
 
+The campaign runs without it (decision of 2026-11-16). On the development set, a 4.5 ceiling changed 0.56% of
+benchmark spectra and 1.84% of unresolved spectra. A paired run on the 844 benchmark spectra of the affected
+units changed no formula ranking, and showed no difference in top-1 or top-5 formula or structure agreement or
+in CANOPUS class agreement (37 changed spectra, exact McNemar p = 1.0 for every metric). The option stays for
+other data and for further evaluation.
+
 - **Rule.** Dropping the weakest ion never raises the entropy, so the result is the largest set of strongest
   ions, closed under equal intensities, whose entropy is at most S. Ions of equal intensity are kept or
   dropped together. A spectrum already at or below S is written unchanged.
