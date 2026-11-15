@@ -46,6 +46,19 @@ selection):
 - `chunks[]`: `chunk_id`, `unit_key`, `selection`, `chunk`, `chunk_sha256`, `records`, `manifest`,
   `output_dir`, `order`.
 
+**Peak cleanup.** `--max-entropy <S>` (for example 4.5) drops each selected spectrum's weakest ions until its
+spectral entropy is at most S. The entropy is computed as in Li et al., Nat. Methods 18, 1524-1531 (2021):
+intensities normalised to sum 1, natural logarithm. Library spectra mostly lie between 1 and 3, and values
+above about 5 point to many low-intensity ions. Dropping the weakest ion never raises the entropy, so the
+result is the largest set of strongest ions at or below S. Ions of equal intensity are kept or dropped
+together. A spectrum already at or below S is written unchanged. Without the option, nothing is dropped.
+
+- `plan.json` records the rule (`peak_cleanup`), with spectra cleaned and peaks removed per export.
+- The selection record repeats the rule and the counts.
+- The manifest keeps `raw_peak_count`, `spectral_entropy_raw`, `peak_count` and `spectral_entropy` (as
+  written) for every spectrum.
+- `peaks_sha256` is the hash of the peaks as written.
+
 Paths in `plan.json` are relative to the run folder. The plan refuses a run folder inside the reanalysis
 root (any folder holding `_campaigns\`): unit outputs are read-only inputs.
 

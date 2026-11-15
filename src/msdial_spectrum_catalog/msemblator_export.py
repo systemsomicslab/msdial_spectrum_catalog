@@ -12,6 +12,10 @@ alignment by Peak ID. Three properties of its input decide whether that join is 
   the benchmark only.
 - The source files are recorded by SHA-256, so a later ingest can refuse results that no longer match the
   outputs they were exported from.
+
+An optional peak cleanup (max_entropy, in `spectrum_cleanup`) drops each spectrum's weakest ions until its
+spectral entropy is at most a ceiling. The manifest keeps the raw and the written peak count and entropy, and
+the selection record states the rule, so a run says which peaks the tools were given.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from pathlib import Path
 
 from .parsers import read_msp, read_tsv, sha256_file
 from .annotator_settings import read_annotator_settings
+from .spectrum_cleanup import clean_by_entropy, spectral_entropy
 
 TIERS = ("LBM2", "VS21 strict", "VS21 relaxed", "GLACIER in-silico", "unassigned")
 SELECTIONS = {
@@ -49,6 +54,9 @@ class ExportedSpectrum:
     peak_count: int
     peaks_sha256: str
     tier: str
+    raw_peak_count: int
+    spectral_entropy_raw: float
+    spectral_entropy: float
     reference_name: str
     reference_formula: str
     reference_inchikey: str
@@ -118,16 +126,32 @@ def representative_tiers(output: Path, stem: str) -> dict[int, tuple[str, dict[s
     return tiers
 
 
+def cleanup_rule(max_entropy: float | None) -> dict:
+    """The peak cleanup as the selection record and the plan state it."""
+    if max_entropy is None:
+        return {"rule": None}
+    return {"rule": "spectral_entropy", "max_entropy": max_entropy, "logarithm": "natural",
+            "drops": "the weakest ions, equal intensities together, until the entropy is at most max_entropy",
+            "reference": "Li et al., Nat. Methods 18, 1524-1531 (2021)"}
+
+
 def select_spectra(output: Path, unit_id: str, selection: str = "unresolved",
-                   max_spectra: int | None = None) -> tuple[list[tuple[ExportedSpectrum, list]], dict]:
-    """Return the selected spectra with their peaks, and the counts that explain the selection."""
+                   max_spectra: int | None = None,
+                   max_entropy: float | None = None) -> tuple[list[tuple[ExportedSpectrum, list]], dict]:
+    """Return the selected spectra with their peaks, and the counts that explain the selection.
+
+    With max_entropy, each selected spectrum's weakest ions are dropped until its spectral entropy is at
+    most max_entropy; the minimum-peak rule is then checked again."""
     if selection not in SELECTIONS:
         raise ValueError(f"selection is one of {sorted(SELECTIONS)}")
+    if max_entropy is not None and max_entropy <= 0:
+        raise ValueError("max_entropy must be positive")
     stem = latest_alignment_stem(output)
     tiers = representative_tiers(output, stem)
     wanted = SELECTIONS[selection]
     counts = {"records": 0, "no_peak_id": 0, "isotope": 0, "too_few_peaks": 0, "not_selected_tier": 0,
               "selected_before_cap": 0}
+    cleanup = {**cleanup_rule(max_entropy), "spectra_cleaned": 0, "peaks_removed": 0}
     by_tier = {tier: 0 for tier in TIERS}
     chosen = []
     for record in read_msp(output / f"{stem}.mdmsp"):
@@ -148,7 +172,18 @@ def select_spectra(output: Path, unit_id: str, selection: str = "unresolved",
         if tier not in wanted:
             counts["not_selected_tier"] += 1
             continue
-        peaks_text = "\n".join(f"{mz:.5f}\t{intensity:.0f}" for mz, intensity in record.peaks)
+        peaks = record.peaks
+        entropy_raw = entropy = spectral_entropy(peaks)
+        if max_entropy is not None:
+            cleaned = clean_by_entropy(peaks, max_entropy)
+            if cleaned.removed:
+                cleanup["spectra_cleaned"] += 1
+                cleanup["peaks_removed"] += cleaned.removed
+            peaks, entropy = cleaned.peaks, cleaned.entropy_after
+            if len(peaks) < MINIMUM_PEAKS:  # unreachable for a ceiling above ln 3; kept as a guard
+                counts["too_few_peaks"] += 1
+                continue
+        peaks_text = "\n".join(f"{mz:.5f}\t{intensity:.0f}" for mz, intensity in peaks)
         fields = record.fields
         reference = candidate if selection == "benchmark" else {}
         chosen.append((ExportedSpectrum(
@@ -159,14 +194,17 @@ def select_spectra(output: Path, unit_id: str, selection: str = "unresolved",
             precursor_mz=float(fields["PRECURSORMZ"]),
             precursor_type=fields.get("PRECURSORTYPE", ""),
             retention_time_min=float(fields["RETENTIONTIME"]) if fields.get("RETENTIONTIME") else None,
-            peak_count=len(record.peaks),
+            peak_count=len(peaks),
             peaks_sha256=hashlib.sha256(peaks_text.encode()).hexdigest(),
             tier=tier,
+            raw_peak_count=len(record.peaks),
+            spectral_entropy_raw=round(entropy_raw, 4),
+            spectral_entropy=round(entropy, 4),
             reference_name=reference.get("name", ""),
             reference_formula=reference.get("formula", ""),
             reference_inchikey=reference.get("inchikey", ""),
             reference_ontology=reference.get("ontology", ""),
-        ), record.peaks))
+        ), peaks))
     counts["selected_before_cap"] = len(chosen)
     if max_spectra is not None and len(chosen) > max_spectra:
         chosen = sorted(chosen, key=lambda item: _sampling_rank(unit_id, item[0].alignment_id))[:max_spectra]
@@ -178,6 +216,7 @@ def select_spectra(output: Path, unit_id: str, selection: str = "unresolved",
         "selected_tiers": sorted(wanted),
         "minimum_peaks": MINIMUM_PEAKS,
         "max_spectra": max_spectra,
+        "peak_cleanup": cleanup,
         "alignment_stem": stem,
         "counts": counts,
         "representative_spectra_by_tier": by_tier,
@@ -218,9 +257,9 @@ def manifest_name(unit_id: str, selection: str) -> str:
 
 
 def export_unit(output: Path, unit_id: str, destination: Path, selection: str = "unresolved",
-                max_spectra: int | None = None) -> dict:
+                max_spectra: int | None = None, max_entropy: float | None = None) -> dict:
     """Write <unit>_<selection>.msp, its manifest TSV and a selection JSON into destination."""
-    spectra, summary = select_spectra(output, unit_id, selection, max_spectra)
+    spectra, summary = select_spectra(output, unit_id, selection, max_spectra, max_entropy)
     destination.mkdir(parents=True, exist_ok=True)
     base = destination / f"{unit_id}_{selection}"
     write_msp(base.with_suffix(".msp"), spectra)

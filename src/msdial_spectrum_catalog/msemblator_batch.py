@@ -39,7 +39,7 @@ from pathlib import Path
 
 from .msemblator_driver import (EXIT_OK, EXIT_REFUSED, git_commit, git_dirty, parse_log, rankers, scrub, sha256,
                                 subscription_limits)
-from .msemblator_export import export_unit
+from .msemblator_export import cleanup_rule, export_unit
 
 PLAN_SCHEMA = "msemblator-batch-plan.v1"
 CAMPAIGN_MARKER = "_campaigns"  # the reanalysis (analysis) root holds the campaign ledgers here
@@ -142,7 +142,7 @@ def chunk_size_from(seconds_per_structure_spectrum: float) -> int:
 
 def make_plan(units: list[dict], run_dir: Path, run_id: str, chunk_size: int, chunk_size_origin: str,
               selections: tuple[str, ...] = SELECTION_ORDER, max_spectra: int | None = None,
-              sources: dict | None = None) -> dict:
+              sources: dict | None = None, max_entropy: float | None = None) -> dict:
     _refuse_analysis_root(run_dir)
     if (run_dir / "plan.json").exists():
         raise SystemExit(f"{run_dir / 'plan.json'} exists; a plan is written once")
@@ -153,7 +153,7 @@ def make_plan(units: list[dict], run_dir: Path, run_id: str, chunk_size: int, ch
         key = unit["unit_key"]
         destination = run_dir / "input" / key
         for selection in selections:
-            summary = export_unit(Path(unit["output_dir"]), key, destination, selection, max_spectra)
+            summary = export_unit(Path(unit["output_dir"]), key, destination, selection, max_spectra, max_entropy)
             source = destination / summary["msp"]
             blocks = msp_blocks(source)
             entry = {
@@ -166,6 +166,7 @@ def make_plan(units: list[dict], run_dir: Path, run_id: str, chunk_size: int, ch
                 "records": len(blocks),
                 "representative_spectra_by_tier": summary["representative_spectra_by_tier"],
                 "counts": summary["counts"],
+                "peak_cleanup": {k: summary["peak_cleanup"][k] for k in ("spectra_cleaned", "peaks_removed")},
                 "chunks": [],
             }
             for index in range(0, len(blocks), chunk_size):
@@ -210,6 +211,7 @@ def make_plan(units: list[dict], run_dir: Path, run_id: str, chunk_size: int, ch
         "chunk_size_origin": chunk_size_origin,
         "selections": list(selections),
         "max_spectra": max_spectra,
+        "peak_cleanup": cleanup_rule(max_entropy),
         "sources": sources or {},
         "units": units,
         "exports": exports,
@@ -779,6 +781,9 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.add_argument("--chunk-size-origin", default="given")
     plan_parser.add_argument("--selections", default=",".join(SELECTION_ORDER))
     plan_parser.add_argument("--max-spectra", type=int)
+    plan_parser.add_argument("--max-entropy", type=float,
+                             help="Drop each spectrum's weakest ions until its spectral entropy is at most this "
+                                  "(for example 4.5); default: no cleanup")
 
     run_parser = commands.add_parser("run", help="Run the driver on every pending chunk, one at a time")
     run_parser.add_argument("--plan", required=True, type=Path)
@@ -816,7 +821,7 @@ def main(argv: list[str] | None = None) -> int:
         run_dir = args.root / args.run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         plan = make_plan(units, run_dir, args.run_id, args.chunk_size, args.chunk_size_origin, selections,
-                         args.max_spectra, sources)
+                         args.max_spectra, sources, args.max_entropy)
         print(json.dumps(plan["totals"], indent=2))
         return 0
     if args.command == "run":

@@ -141,6 +141,18 @@ class BatchTest(unittest.TestCase):
         self.assertEqual([c["chunk_sha256"] for c in again["chunks"]],
                          [c["chunk_sha256"] for c in self.plan["chunks"]])
 
+    def test_plan_records_the_peak_cleanup(self):
+        self.assertEqual(self.plan["peak_cleanup"], {"rule": None})
+        other = self.base / "annotation" / "msemblator" / "run-clean"
+        other.mkdir()
+        cleaned = batch.make_plan(self.units, other, "run-clean", chunk_size=3, chunk_size_origin="test",
+                                  max_entropy=4.5)
+        self.assertEqual(cleaned["peak_cleanup"]["max_entropy"], 4.5)
+        # these three-ion spectra are far below the ceiling: nothing is dropped and the chunks are unchanged
+        self.assertEqual({e["peak_cleanup"]["peaks_removed"] for e in cleaned["exports"]}, {0})
+        self.assertEqual([c["chunk_sha256"] for c in cleaned["chunks"]],
+                         [c["chunk_sha256"] for c in self.plan["chunks"]])
+
     def test_a_plan_is_written_once(self):
         with self.assertRaises(SystemExit):
             batch.make_plan(self.units, self.run_dir, "run1", chunk_size=3, chunk_size_origin="test")

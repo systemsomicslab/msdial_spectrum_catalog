@@ -113,6 +113,46 @@ class MsemblatorExportTest(unittest.TestCase):
         summary, _, _ = self._export("unresolved")
         self.assertNotIn("private", json.dumps(summary))
 
+    def _noisy_spot_3(self):
+        """Give spot 3 three strong ions and 300 weak ones (spectral entropy above 4.5)."""
+        text = (self.output / f"{STEM}.mdmsp").read_text(encoding="utf-8")
+        noisy = _record(3, 0).replace("Num Peaks: 0\n", "Num Peaks: 303\n").rstrip("\n") + "\n"
+        noisy += "".join(f"{100.5 + k:.1f}\t{1000 + 50 * (k % 41)}\n" for k in range(300))
+        noisy += "500.0\t100000\n600.0\t60000\n700.0\t30000\n\n"
+        (self.output / f"{STEM}.mdmsp").write_text(text.replace(_record(3, 5), noisy), encoding="utf-8")
+
+    def test_entropy_cleanup_drops_weak_ions_and_records_it(self):
+        self._noisy_spot_3()
+        destination = self.root / "out"
+        summary = export_unit(self.output, "unit1", destination, "unresolved", max_entropy=4.5)
+        records = {r.fields["NAME"]: r for r in read_msp(destination / "unit1_unresolved.msp")}
+        with (destination / "unit1_unresolved_manifest.tsv").open(encoding="utf-8") as handle:
+            manifest = {m["name"]: m for m in csv.DictReader(handle, delimiter="\t")}
+        cleaned, untouched = manifest["unit1_3"], manifest["unit1_4"]
+        self.assertEqual(int(cleaned["raw_peak_count"]), 303)
+        self.assertEqual(int(cleaned["peak_count"]), len(records["unit1_3"].peaks))
+        self.assertLess(int(cleaned["peak_count"]), 303)
+        self.assertIn((500.0, 100000.0), [(mz, float(i)) for mz, i in records["unit1_3"].peaks])
+        self.assertGreater(float(cleaned["spectral_entropy_raw"]), 4.5)
+        self.assertLessEqual(float(cleaned["spectral_entropy"]), 4.5)
+        self.assertEqual(untouched["raw_peak_count"], untouched["peak_count"])
+        self.assertEqual(untouched["spectral_entropy_raw"], untouched["spectral_entropy"])
+        cleanup = summary["peak_cleanup"]
+        self.assertEqual((cleanup["rule"], cleanup["max_entropy"]), ("spectral_entropy", 4.5))
+        self.assertEqual(cleanup["spectra_cleaned"], 1)
+        self.assertEqual(cleanup["peaks_removed"], 303 - int(cleaned["peak_count"]))
+
+    def test_no_cleanup_by_default(self):
+        self._noisy_spot_3()
+        summary, records, manifest = self._export("unresolved")
+        self.assertEqual(summary["peak_cleanup"], {"rule": None, "spectra_cleaned": 0, "peaks_removed": 0})
+        self.assertEqual(len(records[0].peaks), 303)
+        self.assertEqual(manifest[0]["raw_peak_count"], manifest[0]["peak_count"])
+
+    def test_a_non_positive_ceiling_is_refused(self):
+        with self.assertRaises(ValueError):
+            export_unit(self.output, "unit1", self.root / "out", "unresolved", max_entropy=0)
+
 
 if __name__ == "__main__":
     unittest.main()
