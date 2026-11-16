@@ -46,6 +46,45 @@ selection):
 - `chunks[]`: `chunk_id`, `unit_key`, `selection`, `chunk`, `chunk_sha256`, `records`, `manifest`,
   `output_dir`, `order`.
 
+**Peak cleanup.** `--max-entropy <S>` (a finite positive number, for example 4.5) drops each selected
+spectrum's weakest positive ions until its spectral entropy is at most S. The entropy is defined as in Li et
+al., Nat. Methods 18, 1524-1531 (2021): intensities normalised to sum 1, natural logarithm. Without the option,
+nothing is dropped.
+
+The campaign runs without it (decision of 2026-11-16). On the development set, a 4.5 ceiling changed 0.56% of
+benchmark spectra and 1.84% of unresolved spectra. A paired run on the 844 benchmark spectra of the affected
+units changed no formula ranking, and showed no difference in top-1 or top-5 formula or structure agreement or
+in CANOPUS class agreement (37 changed spectra, exact McNemar p = 1.0 for every metric). The option stays for
+other data and for further evaluation.
+
+- **Rule.** Dropping the weakest ion never raises the entropy, so the result is the largest set of strongest
+  ions, closed under equal intensities, whose entropy is at most S. Ions of equal intensity are kept or
+  dropped together. A spectrum already at or below S is written unchanged.
+- **Exceptions, each with its own status.** When the strongest intensity level alone is above S, that level
+  is kept and the spectrum stays above S (`above_ceiling`). A spectrum that would keep fewer than 3 positive
+  ions is written raw (`kept_raw_too_few_peaks`): the cleanup never removes a spectrum, so both arms of a
+  comparison export the same spectra.
+- **Zero and negative entries** carry no entropy and are left as they are, with or without the cleanup.
+- **Scale.** Li et al. compute S after their own preprocessing (peaks within 0.05 Da merged, ions under 1% of
+  the base peak and the precursor region removed), and their ranges (library spectra mostly 1 to 3, above
+  about 5 suggesting noise) describe that scale. Here S is computed on the spectra as exported, so those
+  ranges do not calibrate S; the ceiling is judged by its effect on annotation.
+- **The cut is relative.** The threshold follows each spectrum's own intensity distribution, not an absolute
+  noise floor; in a flat spectrum it can drop ions at a sizeable fraction of the base peak. The manifest
+  records the kept threshold and the largest dropped ion as a percentage of the base peak, so results can be
+  stratified by them.
+
+What is recorded:
+
+- `plan.json` records the rule (`peak_cleanup`). Each export carries the counts of what was written, after
+  `--max-spectra`: spectra cleaned, peaks removed, spectra above the ceiling, spectra kept raw, and
+  non-positive entries written.
+- The selection record repeats the rule and the counts.
+- The manifest keeps, for every spectrum, `raw_peak_count`, `spectral_entropy_raw`, `peak_count` and
+  `spectral_entropy` (as written), `cleanup_status` (`not_requested`, `unchanged`, `cleaned`, `above_ceiling`
+  or `kept_raw_too_few_peaks`), `kept_threshold_pct_of_base` and `largest_removed_pct_of_base`.
+- `peaks_sha256` is the hash of the peaks as written.
+
 Paths in `plan.json` are relative to the run folder. The plan refuses a run folder inside the reanalysis
 root (any folder holding `_campaigns\`): unit outputs are read-only inputs.
 
