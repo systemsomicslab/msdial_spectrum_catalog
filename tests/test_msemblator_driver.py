@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import glob
 import json
 import os
 import subprocess
@@ -126,6 +127,12 @@ def make_stub_root(base: Path) -> Path:
     (root / "models" / "formula" / "xgbranker_final_all.pkl").write_bytes(b"ranker")
     (root / "library").mkdir()
     (root / "library" / "metfrag_StructureDB.txt").write_text("InChIKey1\n", encoding="utf-8")
+    msfinder = root / "external" / "msfinder" / "MSFINDER test"
+    (msfinder / "Resources").mkdir(parents=True)
+    (msfinder / "MsfinderConsoleApp.exe").write_bytes(b"exe")
+    (msfinder / "MsfinderConsoleApp.exe.config").write_text(
+        '﻿<configuration><runtime><gcServer enabled="true" /></runtime></configuration>\n', encoding="utf-8")
+    (msfinder / "Resources" / "InchikeyClassyfireDB-VS5.icd").write_bytes(b"icd")
     return root
 
 
@@ -191,6 +198,13 @@ class DriverTest(unittest.TestCase):
                          {"file": "xgbranker_final_all.pkl", "ranker": "xgboost",
                           "sha256": driver.sha256(self.root / "models" / "formula" / "xgbranker_final_all.pkl")})
         self.assertIn("third_party_data", record["environment"])
+        msfinder = record["environment"]["msfinder"]
+        self.assertEqual(msfinder["folder"], "MSFINDER test")
+        self.assertEqual(msfinder["binary_sha256"]["MsfinderConsoleApp.exe"],
+                         driver.sha256(self.root / "external" / "msfinder" / "MSFINDER test" / "MsfinderConsoleApp.exe"))
+        self.assertTrue(msfinder["gc_server"])
+        self.assertEqual(msfinder["resources"], {"InchikeyClassyfireDB-VS5.icd": 3})
+        self.assertNotIn(self.base.name, json.dumps(msfinder))  # names and hashes, never a path
         self.assertEqual(record["environment"]["model_sha256"]["formula/pipeline_sirius_score.pkl"],
                          driver.sha256(self.root / "models" / "formula" / "pipeline_sirius_score.pkl"))
         # work/ moved out of the checkout; MetFrag copied, the checkout's own files left behind
@@ -314,6 +328,63 @@ class ParseLogTest(unittest.TestCase):
                          "https://github.com/example/msbuddy/releases/download/v1/formula_db_v1.joblib")
         self.assertEqual(len(files[0]["sha256"]), 64)
         self.assertIn("fetched_at_file_mtime", files[0])
+
+    def test_msfinder_build_without_a_folder_or_a_gc_setting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertEqual(driver.msfinder_build(root), {"folder": None})
+            folder = root / "external" / "msfinder" / "MSFINDER ver 3.61"
+            folder.mkdir(parents=True)
+            (folder / "MsfinderConsoleApp.exe.config").write_text("<configuration/>\n", encoding="utf-8")
+            build = driver.msfinder_build(root)
+            self.assertEqual((build["folder"], build["candidates"]), ("MSFINDER ver 3.61", ["MSFINDER ver 3.61"]))
+            self.assertIsNone(build["gc_server"])
+            self.assertIsNone(build["resources"])
+            self.assertEqual(list(build["binary_sha256"]), ["MsfinderConsoleApp.exe.config"])
+
+    def test_msfinder_build_takes_ms_emblators_folder_and_hashes_every_binary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("MSFINDER a", "MSFINDER b"):
+                folder = root / "external" / "msfinder" / name
+                folder.mkdir(parents=True)
+                for binary in ("MsfinderConsoleApp.exe", "MsfinderConsoleApp.exe.config", "MolecularFormulaFinder.dll",
+                               "StructureFinder.dll", "MsfinderCommon.dll", "Common.dll"):
+                    (folder / binary).write_bytes(f"{name}/{binary}".encode())
+            build = driver.msfinder_build(root)
+            first = Path(glob.glob(str(root / "external" / "msfinder" / "MSFINDER*"))[0]).name  # MS-Emblator's dirs[0]
+            self.assertEqual(build["folder"], first)
+            self.assertEqual(build["candidates"], ["MSFINDER a", "MSFINDER b"])
+            self.assertEqual(set(build["binary_sha256"]),
+                             {"MsfinderConsoleApp.exe", "MsfinderConsoleApp.exe.config", "MolecularFormulaFinder.dll",
+                              "StructureFinder.dll", "MsfinderCommon.dll", "Common.dll"})
+            (root / "external" / "msfinder" / first / "MsfinderConsoleApp.exe.config").write_text(
+                "<configuration><runtime>", encoding="utf-8")
+            self.assertEqual(driver.msfinder_build(root)["gc_server_error"], "ParseError")
+            self.assertEqual(build["binary_sha256"]["Common.dll"],
+                             driver.sha256(root / "external" / "msfinder" / first / "Common.dll"))
+
+    def test_gc_server_is_read_as_xml(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "MsfinderConsoleApp.exe.config"
+
+            def setting(text):
+                config.write_text(text, encoding="utf-8")
+                return driver.gc_server_setting(config)
+
+            self.assertEqual(setting("﻿<configuration><runtime><!-- server GC -->"
+                                     "<gcServer enabled=\"True\" /></runtime></configuration>"), (True, None))
+            self.assertEqual(setting("<configuration><runtime><gcServer enabled='false'/></runtime></configuration>"),
+                             (False, None))
+            self.assertEqual(setting("<configuration><runtime><!-- <gcServer enabled=\"true\" /> -->"
+                                     "</runtime></configuration>"), (None, None))
+            self.assertEqual(setting("<configuration><runtime><gcServer enabled=\"maybe\"/></runtime></configuration>"),
+                             (None, "gcServer enabled='maybe'"))
+            self.assertEqual(setting("<configuration><runtime>"), (None, "ParseError"))
+            self.assertEqual(setting('<configuration xmlns="http://schemas.microsoft.com/.NetConfiguration/v2.0">'
+                                     '<runtime><gcServer enabled="true"/></runtime></configuration>'), (True, None))
+            config.unlink()
+            self.assertEqual(driver.gc_server_setting(config), (None, None))
 
     def test_parse_assets(self):
         self.assertEqual(driver.parse_assets("zenodo_record=1, md5=ab"), {"zenodo_record": "1", "md5": "ab"})

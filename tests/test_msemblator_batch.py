@@ -196,6 +196,40 @@ class BatchTest(unittest.TestCase):
         run_json = json.loads((self.run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(len(run_json["invocations"]), 2)
         self.assertIn("catalog_commit", run_json["invocations"][0])
+        self.assertEqual(run_json["invocations"][0]["msfinder"], {"folder": None})
+        self.assertNotIn("changed_since_last_invocation", run_json["invocations"][1])
+
+    def test_a_resume_on_another_ms_finder_build_is_recorded_and_warned(self):
+        self.assertEqual(self._run(), 0)
+        build = self.msemblator / "external" / "msfinder" / "MSFINDER new"
+        build.mkdir(parents=True)
+        (build / "MsfinderConsoleApp.exe").write_bytes(b"new")
+        (self.run_dir / "STOP").write_text("", encoding="utf-8")  # record the invocation, run no chunk
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self._run()
+        invocation = json.loads((self.run_dir / "run.json").read_text(encoding="utf-8"))["invocations"][-1]
+        self.assertEqual(invocation["msfinder"]["folder"], "MSFINDER new")
+        self.assertEqual(invocation["changed_since_last_invocation"], ["msfinder"])
+        self.assertEqual(invocation["msemblator_root"], "msemblator")
+        self.assertIn("msfinder differ from the previous invocation", stderr.getvalue())
+
+    def test_a_resume_on_another_ms_emblator_root_is_recorded(self):
+        self.assertEqual(self._run(), 0)
+        other = self.base / "msemblator-runtime"
+        (other / "config").mkdir(parents=True)
+        (other / "config" / "msemblator_parameter_file.yaml").write_text("x\n", encoding="utf-8")
+        (self.run_dir / "STOP").write_text("", encoding="utf-8")
+        os.environ["FAKE_COUNTER"] = str(self.counter)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                batch.run_batch(self.run_dir / "plan.json", other, python=Path(sys.executable), driver=self.fake,
+                                hash_libraries=False)
+        finally:
+            os.environ.pop("FAKE_COUNTER", None)
+        invocation = json.loads((self.run_dir / "run.json").read_text(encoding="utf-8"))["invocations"][-1]
+        self.assertEqual(invocation["msemblator_root"], "msemblator-runtime")
+        self.assertIn("msemblator_root", invocation["changed_since_last_invocation"])
 
     def test_failed_chunk_is_set_aside_and_retried_once(self):
         self.assertEqual(self._run(exits="1,0", limit=1), 0)

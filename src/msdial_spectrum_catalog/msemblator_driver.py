@@ -20,7 +20,7 @@ Besides the four CSVs, a run keeps what an importer and a benchmark need to trus
 - metfrag/, the MetFrag outputs, which MS-Emblator leaves in its checkout and clears on the next run;
 - name_map.tsv, MS-Emblator's integer compound ID mapped back to the exported NAME and, through the
   export manifest, to unit and alignment ID;
-- msemblator_run.json, with the SIRIUS version, the failed steps, the environment and a hash of every
+- msemblator_run.json, with the SIRIUS version, the MS-FINDER build, the failed steps, the environment and a hash of every
   harvested file, including the CANOPUS summaries MS-Emblator writes but never reads.
 
 Exit codes: 0 clean; 1 MS-Emblator reported failed steps; 2 exception (including a missing login or a
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import glob
 import hashlib
 import json
 import os
@@ -43,6 +44,7 @@ import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from xml.etree import ElementTree
 
 PLACEHOLDER = "<stored-sirius-login>"
 CSV_OUTPUTS = ("formula_summary.csv", "formula_score.csv", "structure_score.csv", "structure_summary.csv")
@@ -145,6 +147,60 @@ def sirius_version(root: Path) -> str | None:
         if match:
             return match.group(1)
     return None
+
+
+MSFINDER_BINARIES = ("MsfinderConsoleApp.exe", "MsfinderConsoleApp.exe.config", "MolecularFormulaFinder.dll",
+                     "StructureFinder.dll", "MsfinderCommon.dll", "Common.dll")
+
+
+def _local_name(tag) -> str:
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def gc_server_setting(config: Path) -> tuple[bool | None, str | None]:
+    """The <runtime><gcServer enabled="..."/> setting of a .NET Framework config: (value, error).
+
+    The value is None when the file or the element is absent (the runtime's default, workstation GC applies);
+    the error names a config that cannot be parsed, so it is not mistaken for an absent setting."""
+    if not config.is_file():
+        return None, None
+    try:
+        tree = ElementTree.parse(config)  # comments are dropped, either quote style is read
+    except (ElementTree.ParseError, OSError) as error:
+        return None, type(error).__name__
+    # match by local name: a config may declare a default namespace (xmlns="...NetConfiguration/v2.0")
+    element = next((child for runtime in tree.getroot() if _local_name(runtime.tag) == "runtime"
+                    for child in runtime if _local_name(child.tag) == "gcServer"), None)
+    if element is None:
+        return None, None
+    value = (element.get("enabled") or "").strip().lower()
+    if value not in ("true", "false"):
+        return None, f"gcServer enabled={value!r}"
+    return value == "true", None
+
+
+def msfinder_build(root: Path) -> dict:
+    """Which MS-FINDER console the run used, so runs on different MS-FINDER builds can be told apart.
+
+    MS-Emblator runs the first external/msfinder/MSFINDER* folder that glob returns; the same rule picks it
+    here. The record holds folder names, file hashes and sizes, never a path.
+    """
+    candidates = glob.glob(os.path.join(str(root / "external" / "msfinder"), "MSFINDER*"))
+    if not candidates:
+        return {"folder": None}
+    folder = Path(candidates[0])
+    binaries = {name: sha256(folder / name) for name in MSFINDER_BINARIES if (folder / name).is_file()}
+    gc_server, gc_error = gc_server_setting(folder / "MsfinderConsoleApp.exe.config")
+    resources = folder / "Resources"
+    return {
+        "folder": folder.name,
+        "candidates": sorted(Path(path).name for path in candidates),
+        "binary_sha256": binaries,
+        "gc_server": gc_server,
+        **({"gc_server_error": gc_error} if gc_error else {}),
+        "resources": {path.name: path.stat().st_size for path in sorted(resources.iterdir()) if path.is_file()}
+        if resources.is_dir() else None,
+    }
 
 
 def affinity_mask() -> str | None:
@@ -255,6 +311,7 @@ def environment(root: Path) -> dict:
     return {
         "msemblator_commit": git_commit(root),
         "msemblator_dirty": git_dirty(root),
+        "msfinder": msfinder_build(root),
         "model_sha256": models,
         "library_databases": databases,
         "python": platform.python_version(),

@@ -37,8 +37,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .msemblator_driver import (EXIT_OK, EXIT_REFUSED, git_commit, git_dirty, parse_log, rankers, scrub, sha256,
-                                subscription_limits)
+from .msemblator_driver import (EXIT_OK, EXIT_REFUSED, git_commit, git_dirty, msfinder_build, parse_log, rankers,
+                                scrub, sha256, subscription_limits)
 from .msemblator_export import cleanup_rule, export_unit
 from .spectrum_cleanup import check_max_entropy
 
@@ -421,6 +421,24 @@ def update_run_json(run_dir: Path, invocation: dict) -> None:
     write_json(path, record)
 
 
+SETUP_FIELDS = ("msemblator_root", "msemblator_commit", "msfinder")
+
+
+def environment_changes(run_dir: Path, invocation: dict) -> list[str]:
+    """The setup fields that differ from the last earlier invocation that recorded them (a resume on
+    another MS-Emblator root or MS-FINDER build would otherwise mix setups in one run silently)."""
+    try:
+        earlier = json.loads((run_dir / "run.json").read_text(encoding="utf-8")).get("invocations", [])
+    except (OSError, ValueError):
+        return []
+    changes = []
+    for field in SETUP_FIELDS:
+        recorded = [i[field] for i in earlier if field in i and i.get("invocation_id") != invocation["invocation_id"]]
+        if recorded and field in invocation and recorded[-1] != invocation[field]:
+            changes.append(field)
+    return changes
+
+
 def recorded_plan_sha256(run_dir: Path) -> str | None:
     try:
         return json.loads((run_dir / "run.json").read_text(encoding="utf-8")).get("plan_sha256")
@@ -473,6 +491,7 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
         "catalog_checkout": catalog_root.name,
         "catalog_commit": git_commit(catalog_root),
         "catalog_dirty": git_dirty(catalog_root),
+        "msemblator_root": root.name,
         "msemblator_commit": git_commit(root),
         "msemblator_dirty": git_dirty(root),
         "interpreters": {"batch": platform.python_version(), "driver": python.name},
@@ -493,6 +512,15 @@ def run_batch(plan_path: Path, msemblator_root: Path, python: Path | None = None
             invocation["subscription_limits_before"] = subscription_limits(str(sirius_directory))
     except Exception as error:  # a limits query that fails must not stop the batch
         invocation["subscription_limits_before"] = f"not read: {type(error).__name__}"
+    try:
+        invocation["msfinder"] = msfinder_build(root)
+    except Exception as error:  # a missing fact about the environment must not stop the batch
+        invocation["msfinder"] = {"error": f"{type(error).__name__}"}
+    changes = environment_changes(run_dir, invocation)
+    if changes:
+        invocation["changed_since_last_invocation"] = changes
+        print(f"Warning: {', '.join(changes)} differ from the previous invocation of this run; chunks run before "
+              "and after this point were run on different setups", file=sys.stderr)
     update_run_json(run_dir, invocation)
     # "crashed" until the loop says otherwise: an exception nobody expected must not be recorded as success.
     outcome, ran, consecutive, stopped = "crashed", 0, 0, False
