@@ -1,4 +1,5 @@
 """WS8 P3 candidate normaliser, on synthetic records only (never the literature files)."""
+from collections import defaultdict
 import contextlib
 import csv
 import importlib.util
@@ -61,6 +62,11 @@ class KindMapTests(unittest.TestCase):
         self.assertEqual((row["kind"], row["kind_original"], row["manual_queue"]), ("manual", "other", True))
         self.assertEqual([m["id"] for m in result["manual"]], ["s3-x-001"])
         self.assertEqual(result["manual"][0]["reason"], "kind_other")
+        # its tokens stay in terms.tsv but are not grouped until a reader assigns a kind
+        (term,) = result["terms"]
+        self.assertEqual((term["group_exclusion"], term["group_id"]), (["manual"], ""))
+        self.assertIn("manual", term["flags"])
+        self.assertEqual(result["groups"], [])
 
     def test_unknown_kind_is_unmapped_and_queued(self):
         result = build({"stage2": [stage2("s2-x-001", "p3x", kind="mystery")]})
@@ -105,10 +111,17 @@ class FamilyMapTests(unittest.TestCase):
         unified = {v["family"] for v in self.fam.values()}
         for (source, rid), o in overrides.items():
             self.assertIn(o["family"], unified)
-            self.assertEqual(o["family_original"], "flavonoid_C_glycoside")
-            self.assertEqual((o["family"], o["family_group"]), ("flavonoid_di_c_glycoside", "flavonoid_c_glycoside"))
+            if o["family_original"] == "flavonoid_C_glycoside":
+                self.assertEqual((o["family"], o["family_group"]),
+                                 ("flavonoid_di_c_glycoside", "flavonoid_c_glycoside"))
+            else:
+                # a steryl_glycoside record about steryl esters only: an acyl-lipid class, out of scope
+                self.assertEqual((o["family_original"], o["family"], o["scope"]),
+                                 ("steryl_glycoside", "steryl_ester", "out_of_scope"))
+        self.assertEqual(self.fam["steryl_glycoside"]["scope"], "in_scope")
+        c_glycoside = next(o for o in overrides.values() if o["family_original"] == "flavonoid_C_glycoside")
         maps = nc.load_maps()
-        maps["family_override"] = {("stage3", "s3-x-001"): dict(overrides[next(iter(overrides))])}
+        maps["family_override"] = {("stage3", "s3-x-001"): dict(c_glycoside)}
         recs = {"stage3": [stage2("s3-x-001", "p3x", family="flavonoid_C_glycoside"),
                            stage2("s3-x-002", "p3x", family="flavonoid_C_glycoside")]}
         result = nc.build({k: (Path(f"{k}.json"), v) for k, v in recs.items()}, maps)
@@ -169,6 +182,9 @@ class IonModeAndAdductTests(unittest.TestCase):
         self.assertEqual(nc.parse_adducts("[M]+ (printed as '[M-H]+')")[0], ["[M]+"])
         self.assertEqual(nc.parse_adducts("[(M+Na)-aglycone]+")[0], ["[(M+Na)-aglycone]+"])
         self.assertEqual(nc.parse_adducts("[M-H]- or M-.")[0], ["[M-H]-", "[M]-•"])
+        self.assertEqual(nc.parse_adducts("[M+H]+.")[0], ["[M+H]+•"])  # a radical mark after the charge
+        self.assertEqual(nc.parse_adducts("[M+H]+. (radical cation)")[0], ["[M+H]+•"])
+        self.assertEqual(nc.parse_adducts("[M+H]+.5")[0], ["[M+H]+"])
         adducts, flags = nc.parse_adducts("see value")
         self.assertIsNone(adducts)
 
@@ -192,6 +208,42 @@ class IonModeAndAdductTests(unittest.TestCase):
         self.assertFalse(any(t["expanded_from_adducts"] for t in terms.values()))
         self.assertIn("kind_conflict", terms["s2-x-001#t2.pos"]["flags"])
         self.assertEqual(result["records"][0]["ion_mode"], "both")
+
+    def test_both_takes_the_polarity_the_text_gives_a_neutral_token(self):
+        value = ("fragments common to all isomers: C14H9O2 and C13H9O2 (negative), C13H9 and C12H9 (positive); "
+                 "every isomer differs; C12H9 occurs for all of them in both modes")
+        result = build({"stage3": [stage2("s3-x-001", "p3x", ion_mode="both", adduct="[M-H]- / [M+H]+",
+                                          value=value)]})
+        modes = defaultdict(set)
+        for t in result["terms"]:
+            modes[t["formula"]].add(t["ion_mode"])
+        self.assertEqual(dict(modes), {"C14H9O2": {"negative"}, "C13H9O2": {"negative"}, "C13H9": {"positive"},
+                                       "C12H9": {"positive", "negative"}})
+        terms = {t["term_id"]: t for t in result["terms"]}
+        self.assertEqual(set(terms), {"s3-x-001#t1.neg", "s3-x-001#t2.neg", "s3-x-001#t3.pos", "s3-x-001#t4.pos",
+                                      "s3-x-001#t4.neg"})
+        self.assertIn("polarity_from_text", terms["s3-x-001#t1.neg"]["flags"])
+        self.assertEqual(terms["s3-x-001#t4.neg"]["polarity_label"], "both")
+        self.assertNotIn("polarity_unverified", terms["s3-x-001#t4.neg"]["flags"])
+        # a heading of the clause gives the polarity; a polarity word elsewhere leaves the token unverified
+        result = build({"stage3": [
+            stage2("s3-x-002", "p3x", ion_mode="both", kind="neutral_loss", adduct="[M+H]+ / [M-H]-",
+                   value="positive: losses of C2H2O (ketene; 245 -> 203), then CH3 to 188; negative: CO2 loss"),
+            stage2("s3-x-003", "p3x", ion_mode="both", kind="neutral_loss", adduct="[M+H]+ / [M-H]-",
+                   value="radical loss of CH3O (31) is the base peak: 477->446 (neg); 523->492 (pos)"),
+            stage2("s3-x-004", "p3x", ion_mode="both", kind="neutral_loss", adduct="[M+H]+ / [M-H]-",
+                   formula="C6H10O5")]})
+        modes = defaultdict(set)
+        flags = defaultdict(set)
+        for t in result["terms"]:
+            modes[(t["record_id"], t["formula"])].add(t["ion_mode"])
+            flags[(t["record_id"], t["formula"])].update(t["flags"])
+        self.assertEqual(modes[("s3-x-002", "C2H2O")], {"positive"})
+        self.assertEqual(modes[("s3-x-002", "CH3")], {"positive"})
+        self.assertEqual(modes[("s3-x-003", "CH3O")], {"positive", "negative"})
+        self.assertIn("polarity_unverified", flags[("s3-x-003", "CH3O")])
+        self.assertEqual(modes[("s3-x-004", "C6H10O5")], {"positive", "negative"})
+        self.assertNotIn("polarity_unverified", flags[("s3-x-004", "C6H10O5")])
 
     def test_both_without_adduct_of_a_polarity(self):
         result = build({"stage2": [stage2("s2-x-001", "p3x", ion_mode="both", adduct="[M+H]+", formula="H2O")]})
@@ -296,15 +348,15 @@ class FormulaTests(unittest.TestCase):
         self.assertIn(("formula", "not printed"), result["unmapped"])
 
     def test_composites_and_fragments_are_logged(self):
-        tokens, rejected, composites = nc.tokenise_formulas("computed CH2O+2H2O 66.0317; C3H6O3 90.0317")
+        tokens, rejected, composites, _ = nc.tokenise_formulas("computed CH2O+2H2O 66.0317; C3H6O3 90.0317")
         self.assertEqual([(t["formula"], t["composite_part"]) for t in tokens],
                          [("CH2O", True), ("C3H6O3", False)])
         self.assertEqual((rejected, composites), (["2H2O"], ["CH2O+2H2O"]))
-        tokens, rejected, composites = nc.tokenise_formulas("RCOOH + NH3")
+        tokens, rejected, composites, _ = nc.tokenise_formulas("RCOOH + NH3")
         self.assertEqual(([t["formula"] for t in tokens], rejected, composites), (["H3N"], ["RCOOH"],
                                                                                  ["RCOOH + NH3"]))
         # a formula that also stands alone is no composite part; a charge is no '+' operator; units are no operand
-        tokens, _, composites = nc.tokenise_formulas("C8H16O2 (144.1150); C8H20O4 = C8H16O2 + 2H2O")
+        tokens, _, composites, _ = nc.tokenise_formulas("C8H16O2 (144.1150); C8H20O4 = C8H16O2 + 2H2O")
         self.assertEqual(composites, ["C8H16O2 + 2H2O"])
         self.assertEqual(nc.tokenise_formulas("C9H7O3+ C7H5O2+")[2], [])
         self.assertEqual(nc.tokenise_formulas("72 Da + C2H4 losses")[2], [])
@@ -348,6 +400,101 @@ class FormulaTests(unittest.TestCase):
         self.assertNotIn("kind_conflict", terms["C21H19O11-"]["flags"])
         self.assertEqual(terms["C21H19O11-"]["group_id"], "")
         self.assertEqual([g["formula"] for g in result["groups"]], ["C6H10O5"])
+
+    def test_precursor_heading_and_notation_before_at(self):
+        def roles(text, **kw):
+            return [(t["formula"], t["role"], t["role_evidence"]) for t in self.tokens(text, **kw)]
+        text = ("loss C6H10O5 (162.0528, recomputed; not printed). Precursor formulas from Table 1: C25H32O13, "
+                "C25H32O12, C24H30O13")
+        self.assertEqual(roles(text), [("C6H10O5", "", ""), ("C25H32O13", "precursor", "clause"),
+                                       ("C25H32O12", "precursor", "clause"), ("C24H30O13", "precursor", "clause")])
+        # a sentence end closes the heading's clause; 'precursor m/z 353:' is no heading
+        self.assertEqual(roles("Precursor ions: C16H17O9-. Products are C9H7O4- and C7H11O6-")[1:],
+                         [("C9H7O4-", "", ""), ("C7H11O6-", "", "")])
+        self.assertEqual(roles("MS3 of precursor m/z 353: C7H11O6- 191"), [("C7H11O6-", "", "")])
+        self.assertEqual(roles("observed as a radical cation [M+H]+. at m/z 369.1686 (C18H27NO7)", from_value=True),
+                         [("C18H27NO7", "precursor", "before")])
+        self.assertEqual(roles("[M-H]- ion at m/z 447.0933 (C21H19O11-)"), [("C21H19O11-", "precursor", "before")])
+        self.assertEqual(roles("loss of CO2 from [M-H]- is C14H9O3-"), [("CO2", "", ""), ("C14H9O3-", "", "")])
+
+    def test_formulas_named_as_not_observed_or_quoted_as_printed(self):
+        def roles(text, **kw):
+            return [(t["formula"], t["role"]) for t in self.tokens(text, **kw)]
+        self.assertEqual(roles("recomputed: C6H3O5- 154.9986; C5H3O3- 111.0088 (the QA-path analogues would be "
+                               "C7H7O4- 155.0350 and C6H7O2- 111.0452)"),
+                         [("C6H3O5-", ""), ("C5H3O3-", ""), ("C7H7O4-", "not_observed"), ("C6H7O2-", "not_observed")])
+        self.assertEqual(roles("(would be C9H7O3+); C9H5O2+"), [("C9H7O3+", "not_observed"), ("C9H5O2+", "")])
+        self.assertEqual(roles("C7H11O6- (printed as C7H12O6); C7H9O5-; C16H17O9-"),
+                         [("C7H11O6-", ""), ("C7H12O6", "printed_as"), ("C7H9O5-", ""), ("C16H17O9-", "")])
+        self.assertEqual(roles("58 u, printed as CH2COOH; C2H2O2 = 58.0055 by calculation"),
+                         [("C2H3O2", "printed_as"), ("C2H2O2", "")])
+        self.assertEqual(roles("C3H6O3 (90.0317); fragments printed as C18H13O8 (357), C17H11O7 (327)"),
+                         [("C3H6O3", ""), ("C18H13O8", "printed_as"), ("C17H11O7", "printed_as")])
+        self.assertEqual(roles("(printed as C7H12O6), C7H9O5-"), [("C7H12O6", "printed_as"), ("C7H9O5-", "")])
+        text = ("C6H10O2 (114.0681); 297 printed as C21H27O+, but m/z 297 fits C21H29O+ (297.2213; C21H27O+ would be "
+                "295.2056)")
+        self.assertEqual(roles(text), [("C6H10O2", ""), ("C21H27O+", "printed_as"), ("C21H29O+", ""),
+                                       ("C21H27O+", "not_observed")])
+        result = build({"stage2": [
+            stage2("s2-x-001", "p3x", ion_mode="negative", adduct="[M-H]-",
+                   formula="C6H3O5- 154.9986 (the analogues would be C7H7O4- 155.0350)"),
+            stage2("s2-x-002", "p3y", ion_mode="negative", adduct="[M-H]-", formula="C7H7O4-"),
+            stage2("s2-x-003", "p3z", kind="neutral_loss", formula=text, adduct="[M+H]+")]})
+        terms = {(t["record_id"], t["formula"]): t for t in result["terms"]}
+        self.assertEqual(terms[("s2-x-001", "C7H7O4-")]["group_exclusion"], ["not_observed"])
+        self.assertEqual(terms[("s2-x-001", "C7H7O4-")]["group_id"], "")
+        self.assertEqual(terms[("s2-x-003", "C21H27O+")]["group_exclusion"], ["printed_as"])  # both occurrences
+        self.assertEqual(terms[("s2-x-003", "C21H29O+")]["group_exclusion"], [])
+        group = next(g for g in result["groups"] if g["formula"] == "C7H7O4-")
+        self.assertEqual((group["record_ids"], group["n_papers"]), (["s2-x-002"], 1))
+        self.assertEqual(result["unmapped"][("formula_not_observed", "C7H7O4-")], ["s2-x-001"])
+        self.assertEqual(result["unmapped"][("formula_printed_as", "C21H27O+")], ["s2-x-003"])
+
+    def test_isotope_labels_are_not_terms(self):
+        tokens, rejected, composites, isotopes = nc.tokenise_formulas(
+            "C10H10N+ (144.0808); C10H10(15N)+ in labelled plants")
+        self.assertEqual([t["formula"] for t in tokens], ["C10H10N+"])
+        self.assertEqual(isotopes, ["C10H10(15N)+"])
+        self.assertEqual(nc.tokenise_formulas("(13C)C5H10O5 and C6H10O5 (162)")[3], ["(13C)C5H10O5"])
+        self.assertEqual(nc.tokenise_formulas("C6H10O5 (162.0528)")[3], [])
+        result = build({"stage3": [stage2("s3-x-001", "p3x", formula="C10H10N+ (144.0808); C10H10(15N)+ labelled")]})
+        self.assertEqual([t["formula"] for t in result["terms"]], ["C10H10N+"])
+        self.assertEqual(result["unmapped"][("formula_isotope_label", "C10H10(15N)+")], ["s3-x-001"])
+        self.assertIn("isotope_label_not_a_term", result["records"][0]["formula_flags"])
+
+    def test_ion_before_an_arrow_is_the_precursor_of_a_loss(self):
+        text = "C24H39O5- 407.2803 -> C23H35O2- 343.2643 (calculated)"
+        result = build({"stage2": [
+            stage2("s2-x-001", "p3x", kind="neutral_loss", ion_mode="negative", adduct="[M-H]-", formula=text),
+            stage2("s2-x-002", "p3x", kind="fragment_ion", ion_mode="negative", adduct="[M-H]-", formula=text)]})
+        terms = {(t["record_id"], t["formula"]): t for t in result["terms"]}
+        self.assertEqual((terms[("s2-x-001", "C24H39O5-")]["role"], terms[("s2-x-001", "C24H39O5-")]["role_evidence"]),
+                         ("precursor", "arrow"))
+        self.assertNotIn("kind_conflict", terms[("s2-x-001", "C24H39O5-")]["flags"])
+        self.assertIn("kind_conflict", terms[("s2-x-001", "C23H35O2-")]["flags"])
+        # in a product-ion record the first ion of a pathway may itself be the diagnostic product
+        self.assertEqual(terms[("s2-x-002", "C24H39O5-")]["role"], "")
+
+    def test_term_override(self):
+        maps = nc.load_maps()
+        maps["term_override"] = {("stage2", "s2-x-001", "C16H17O9-"): {"role": "precursor", "reason": "test"}}
+        recs = {"stage2": [stage2("s2-x-001", "p3x", ion_mode="negative", adduct="[M-H]-",
+                                  formula="C7H11O6-; C16H17O9-")]}
+        result = nc.build({k: (Path(f"{k}.json"), v) for k, v in recs.items()}, maps)
+        terms = {t["formula"]: t for t in result["terms"]}
+        self.assertEqual((terms["C16H17O9-"]["role"], terms["C16H17O9-"]["role_evidence"]), ("precursor", "override"))
+        self.assertEqual(terms["C16H17O9-"]["group_id"], "")
+        self.assertEqual(result["overrides"]["term_override_rows_used"], 1)
+        maps["term_override"] = {("stage2", "s2-x-001", "C9H7O4-"): {"role": "precursor", "reason": "stale"}}
+        with self.assertRaises(nc.NormaliseError):
+            nc.build({k: (Path(f"{k}.json"), v) for k, v in recs.items()}, maps)
+        self.assertTrue(nc.load_term_override())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "term.tsv"
+            path.write_text("source\tid\tformula\trole\treason\nstage2\ts2-x-001\tC9H7O4-\tproduct\tx\n",
+                            encoding="utf-8")
+            with self.assertRaises(nc.NormaliseError):
+                nc.load_term_override(path)
 
     def test_negative_evidence_terms_are_not_grouped(self):
         result = build({"stage3": [stage2("s3-x-001", "p3x", kind="diagnostic_absence", ion_mode="positive",
@@ -479,6 +626,25 @@ class MassTests(unittest.TestCase):
         self.assertEqual([(n[2], n[3]) for n in numbers],
                          [("163.0390", "C9H7O3"), ("145.0284", "C9H5O2"), ("117.0335", None)])
 
+    def test_pairing_does_not_hide_a_match(self):
+        # a number next to a formula is that formula's mass only when it lies near it; one-element tokens, ':' and
+        # composite parts never pair
+        cases = [
+            ("C21H31+", "I(m/z 283.2420) > I(m/z 289.2162) for the 12-OH aglycone", "matched"),
+            ("C27H45+", "sterol cation after loss of hexose + NH3: 369.3505 (cholesterol)", "matched"),
+            ("C6H15NO6", "NL 197.09 (C6H12O6 + NH3)", "matched"),
+            ("C28H48NO2-", "474.3589 -> 430.3670 (CO2 loss, as printed)", "matched"),
+            ("C13H18NO2+", "losses: C5H8O4 (220.1342, C13H18NO2+)", "matched"),
+            ("C13H18NO2+", "losses: C5H8O4 (220.1442, C13H18NO2+)", "printed_mismatch"),
+        ]
+        for text, value, status in cases:
+            tok = nc.tokenise_formulas(text)[0][0]
+            got = nc.mass_check(tok["mass"], nc.printed_numbers(value), (), tok["hill"])["status"]
+            self.assertEqual(got, status, f"{text} | {value}")
+        self.assertEqual([n[3] for n in nc.printed_numbers("I(m/z 283.2420)")], [None])
+        self.assertEqual([n[3] for n in nc.printed_numbers("C9H7O3+: 163.0390")], [None])
+        self.assertEqual([n[3] for n in nc.printed_numbers("C5H8O4 (132.0423)")], ["C5H8O4"])
+
     def test_sentence_final_numbers_are_read(self):
         self.assertEqual([n[2] for n in nc.printed_numbers("ions at 303.0510, 305.0667.")],
                          ["303.0510", "305.0667"])
@@ -566,6 +732,82 @@ class InstrumentTests(unittest.TestCase):
         self.assertEqual(self.classify("Thermo Velos Pro linear ion trap (MSn); accurate mass on Q Exactive Focus")[:2],
                          ("mixed", "ion_trap"))
 
+    def test_tribrid_names_without_orbitrap(self):
+        self.assertEqual(self.classify("Orbitrap Exploris 120/240, Ascend")[:3], ("mixed", "mixed", "mixed.tribrid"))
+        self.assertEqual(self.classify("Orbitrap Exploris 480, Ascend", "HCD NCE 30")[:3],
+                         ("mixed", "orbitrap_ft", "mixed.tribrid"))
+        self.assertEqual(self.classify("Thermo Eclipse", "CID 35%")[:3], ("mixed", "ion_trap", "mixed.tribrid"))
+        # the Zorbax Eclipse column is no instrument
+        self.assertEqual(self.classify("Agilent 6545 Q-TOF; Zorbax Eclipse Plus C18")[:2], ("qtof", "qtof"))
+        self.assertEqual(self.classify("Agilent 6545 Q-TOF; Eclipse XDB-C18")[:2], ("qtof", "qtof"))
+
+    def test_n2_collision_gas_marks_beam_cid_on_trap_hybrids(self):
+        got = self.classify("Orbitrap Elite (FTMS), infusion", "CID (N2), ramp 0-50 eV; 2 m/z isolation")
+        self.assertEqual(got, ("mixed", "orbitrap_ft", "mixed.ltq_hybrid", "beam (collision gas)"))
+        self.assertEqual(self.classify("Orbitrap Elite", "CID with nitrogen, 30 eV")[:2], ("mixed", "orbitrap_ft"))
+        # without a beam-cell gas, a bare CID stays trap CID on these hybrids
+        self.assertEqual(self.classify("Orbitrap Elite", "CID ramp 0-50 eV")[:2], ("mixed", "ion_trap"))
+        self.assertEqual(self.classify("LTQ Orbitrap XL", "CID (He), 35%")[:2], ("mixed", "ion_trap"))
+
+    def test_collision_regime(self):
+        cases = [
+            # (instrument, collision, regime, basis, in_source_mentioned)
+            ("Exactive Orbitrap", "in-source CID 25-100 eV", "in_source", "collision: in-source only", True),
+            ("Agilent 6220 TOF", "in-source CID, fragmentor 170-330 V", "in_source", "collision: in-source only",
+             True),
+            ("Q-TOF Premier", "cone voltage 30 V", "in_source", "collision: source voltage only", False),
+            ("Waters Xevo TQ", "cone 30, 110, 140 V", "in_source", "collision: source voltage only", False),
+            ("Waters Xevo TQ", "cone 30 V, collision energy 20 eV", "beam", "instrument", False),
+            ("Q Exactive", "in-source CID 35 eV, then HCD NCE 27", "beam", "instrument", True),
+            ("Agilent 6530 Q-TOF", "CID 20 eV", "beam", "instrument", False),
+            ("Agilent 6530 Q-TOF", "fragmentor 175 V; CE 20 eV", "beam", "instrument", False),
+            ("Finnigan LCQ Deca ion trap", "NCE 35%", "trap", "instrument", False),
+            ("Thermo LTQ FT Ultra", "CID 35%", "trap", "activation", False),
+            ("Orbitrap Elite", "CID (N2), ramp 0-50 eV", "beam", "activation", False),
+            ("Thermo LTQ Orbitrap XL", "HCD RCE 60% (Orbitrap) and LIT CID MSn", "mixed", "activation", False),
+            ("Thermo LTQ-Orbitrap XL", None, "unknown", "activation not named", False),
+            ("Bruker solariX 7.0 T FTICR", "IRMPD", "ft_cell", "collision", False),
+            ("review across ESI with ion trap and QTOF", None, "unknown", "instrument", False),
+            ("review across ESI with ion trap and QTOF", "HCD", "beam", "collision", False),
+        ]
+        for inst, collision, regime, basis, in_src in cases:
+            got = nc.collision_regime(self.classify(inst, collision), inst, collision, None, self.rules)
+            self.assertEqual(got, (regime, basis, in_src), f"{inst} | {collision}")
+        result = build({"stage3": [stage2("s3-x-001", "p3x", instrument="Exactive Orbitrap",
+                                          collision="in-source CID 50 eV", formula="C9H7O3+")]})
+        row = result["records"][0]
+        self.assertEqual((row["instrument_strat"], row["collision_regime"], row["in_source_mentioned"]),
+                         ("orbitrap_ft", "in_source", True))
+        self.assertEqual(result["groups"][0]["collision_regimes"], {"in_source": 1})
+        self.assertEqual(result["support"][0]["collision_regimes"], {"in_source": 1})
+
+    def test_stratum_override(self):
+        maps = nc.load_maps()
+        maps["stratum_override"] = [("stage2", re.compile(r"^s2-p3x-"), "orbitrap_ft", "beam", "test"),
+                                    ("stage2", re.compile(r"^s2-p3z-"), "qtof", "beam", "unused")]
+        recs = {"stage2": [stage2("s2-p3x-001", "p3x", instrument="Orbitrap Elite", collision="CID ramp 0-50 eV",
+                                  formula="C9H7O3+"),
+                           stage2("s2-p3y-001", "p3y", instrument="Orbitrap Elite", collision="CID ramp 0-50 eV",
+                                  formula="C9H7O3+")]}
+        result = nc.build({k: (Path(f"{k}.json"), v) for k, v in recs.items()}, maps)
+        rows = {r["id"]: r for r in result["records"]}
+        self.assertEqual((rows["s2-p3x-001"]["instrument_strat"], rows["s2-p3x-001"]["instrument_strat_computed"],
+                          rows["s2-p3x-001"]["collision_regime"], rows["s2-p3x-001"]["collision_regime_basis"],
+                          rows["s2-p3x-001"]["instrument_override"]),
+                         ("orbitrap_ft", "ion_trap", "beam", "override", "test"))
+        self.assertEqual((rows["s2-p3y-001"]["instrument_strat"], rows["s2-p3y-001"]["instrument_override"]),
+                         ("ion_trap", ""))
+        self.assertEqual(result["overrides"]["stratum_override_rows_used"], ["^s2-p3x-"])
+        self.assertEqual(result["overrides"]["stratum_override_rows_unused"], ["^s2-p3z-"])
+        self.assertEqual(result["groups"][0]["instrument_strata"], {"ion_trap": 1, "orbitrap_ft": 1})
+        self.assertTrue(nc.load_stratum_override())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stratum.tsv"
+            path.write_text("source\tid_pattern\tinstrument_strat\tcollision_regime\treason\n"
+                            "stage2\t^s2-x-\torbitrap\tbeam\tx\n", encoding="utf-8")
+            with self.assertRaises(nc.NormaliseError):
+                nc.load_stratum_override(path)
+
     def test_hybrid_stratum_reaches_records(self):
         result = build({"stage3": [stage2("s3-x-001", "p3x", instrument="Thermo LTQ FT Ultra",
                                           collision="CID 35%", formula="C9H7O3+")]})
@@ -646,6 +888,19 @@ class GroupingTests(unittest.TestCase):
         self.assertEqual(support["adducts"], ["[M+H]+", "[M+Na]+", "[M]+", "unstated"])
         self.assertTrue(all(t["support_id"] == support["support_id"] for t in result["terms"] if t["group_id"]))
 
+    def test_kind_consistent(self):
+        result = build({"stage2": [
+            stage2("s2-a-001", "p3a", kind="neutral_loss", formula="C6H10O5"),
+            stage2("s2-b-001", "p3b", kind="neutral_loss", formula="C9H7O3+"),  # a charged neutral loss
+            stage2("s2-c-001", "p3c", kind="fragment_ion", formula="C9H7O3+"),
+            stage2("s2-d-001", "p3d", kind="fragment_ion", formula="C9H7O3")]})  # an uncharged product ion
+        groups = {(g["kind"], g["formula"]): g for g in result["groups"]}
+        self.assertEqual({k: (g["kind_consistent"], g["n_kind_conflict_rows"]) for k, g in groups.items()},
+                         {("neutral_loss", "C6H10O5"): (True, 0), ("neutral_loss", "C9H7O3+"): (False, 1),
+                          ("product_ion", "C9H7O3+"): (True, 0), ("product_ion", "C9H7O3"): (False, 1)})
+        self.assertEqual({(s["kind"], s["formula"]): s["kind_consistent"] for s in result["support"]},
+                         {k: g["kind_consistent"] for k, g in groups.items()})
+
     def test_counts_tables(self):
         result = build({"stage2": [stage2("s2-a-001", "p3a", formula="C9H7O3+", standards_based=True)],
                         "stage3": [stage2("s3-b-001", "p3b", formula="C9H7O3+"),
@@ -714,7 +969,10 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual([i["label"] for i in run["inputs"]], ["npr", "stage2", "stage3"])
             self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", i["sha256"]) for i in run["inputs"]))
             self.assertRegex(run["code"]["script_sha256"], r"^[0-9a-f]{64}$")
-            self.assertIn("family-override-p3.tsv", run["code"]["mapping_files"])
+            self.assertEqual(set(run["code"]["mapping_files"]), {p.name for p in nc.MAP_FILES})
+            self.assertIn("term-override-p3.tsv", run["code"]["mapping_files"])
+            self.assertIn("stratum-override-p3.tsv", run["code"]["mapping_files"])
+            self.assertIn("collision_regime", run["counts"])
             self.assertEqual(run["counts"]["terms_excluded_from_groups"], {"role_unverified": 1})
             with open(out / "records.tsv", encoding="utf-8", newline="") as f:
                 rows = list(csv.DictReader(f, delimiter="\t"))

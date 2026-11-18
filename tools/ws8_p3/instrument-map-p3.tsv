@@ -10,6 +10,11 @@
 # ion_trap, HCD or beam-type CID gives orbitrap_ft, IRMPD or SORI-CID in the FT cell gives orbitrap_ft, both kinds
 # give mixed, nothing gives mixed. energy_only_strat is the stratum when the collision field gives only a
 # normalised or percentage energy without naming the activation (the trap is the default on LTQ-based hybrids).
+# A bare CID or CAD (row cid) is trap CID on these hybrids unless the record names N2 as collision gas (row
+# beam_gas): the linear trap uses helium, so CID with N2 is beam-type activation in the HCD cell.
+# The rows in_source, in_source_strip, tandem and source_voltage give the collision regime (README): in_source when
+# the collision field names in-source activation and no collision-cell or trap activation once the in-source
+# phrases are removed, or names only a source voltage; otherwise the regime of the fragmenting instrument.
 # unknown also covers instruments outside the five tandem classes (sector, single quadrupole, TOF without precursor
 # selection); the rule name says which.
 kind	name	pattern	instrument_class	instrument_strat	energy_only_strat	comment
@@ -18,18 +23,24 @@ define	QTOF	Q[-/]?TOF|QqTOF|TripleTOF|ZenoTOF|Synapt|Xevo G2|micrOTOF-Q|microQ-T
 define	ORB	Orbitrap|Exactive|Exploris|\bFusion\b|Lumos|\bFTMS\b				Orbitrap instruments
 define	FT	FT-?ICR|\bFT\b|solariX|\bApex\b|IonSpec				FT-ICR instruments
 define	HYB_LTQ	LTQ[- ]?(?:Orbitrap|FT)|\bLIT[- ]?FT|Orbitrap[- ](?:Elite|Velos)|ion[- ]trap[- ]Orbitrap				LTQ- or LIT-based Orbitrap and FT-ICR hybrids, whose MSn is ion-trap CID by default
-define	TRIBRID	Orbitrap[- ](?:Fusion|Eclipse|Ascend|ID-X)|\bFusion\b|\bLumos\b|\bTribrid\b				Orbitrap tribrids, with both ion-trap CID and HCD
+define	TRIBRID	Orbitrap[- ](?:Fusion|Eclipse|Ascend|ID-X)|\bFusion\b|\bLumos\b|\bTribrid\b|\bAscend\b|(?<!Zorbax )\bEclipse\b(?!\s+(?:Plus|XDB|C\d))				Orbitrap tribrids, with both ion-trap CID and HCD; a bare Ascend or Eclipse counts, the Zorbax Eclipse column does not
 define	QQQ	triple[- ]?quad\w*|\bQqQ\b|\bTQ\b|\bTQ-|Quattro|\bTSQ\b|\bAPI[- ]?(?:2000|3000|3200|4000|III)|Q-?TRAP|QqLIT|\b64(?:30|60|70)\b|LCMS-8050				triple quadrupoles and QTRAPs
 define	TOF1	micrOTOF(?!-Q)|\bLCT\b|G1969A|\b6220\b|MALDI|Voyager				TOF without a quadrupole, and MALDI instruments
 define	SECTOR	AutoSpec|VG 70|\bEBQQ\b|\bEBE\b|magnetic sector|MAT ?95				sector and sector hybrids
 define	SQ	single[- ]quadrupole|\bZMD\b				single quadrupoles
 activation	strip	(?:\b(?:in[- ]source|source|pre[- ]?trap|cone|nozzle[- ]skimmer)(?:\s*/\s*(?:in[- ]source|source|pre[- ]?trap))?\s+(?:CID|SID|CAD|fragmentation|activation|dissociation)|\bSID\b)(?:,?\s*(?:at\s+)?\d+(?:\.\d+)?(?:\s*-\s*\d+(?:\.\d+)?)?\s*(?:%|eV\b|V\b))?|\bnot (?:by )?(?:CID|HCD|IRMPD)\b|\boutside (?:the )?CID/HCD\b				removed before reading activation: in-source and pre-trap activation, and negated mentions
-activation	trap	\bCID\b|\bCAD\b|\bLIT\b|\bPQD\b|ion[- ]trap|linear trap|\bresonan(?:t|ce)\b				resonance CID in an ion trap (on these hybrids CID means trap CID)
+activation	trap	\bLIT\b|\bPQD\b|ion[- ]trap|linear trap|\bresonan(?:t|ce)\b				resonance CID named as ion-trap activation
+activation	cid	\bCID\b|\bCAD\b				a bare CID or CAD: trap CID on these hybrids, unless a beam_gas is named
 activation	beam	\bHCD\b|beam[- ]type|higher[- ]energy (?:collision|C[- ]?trap)				beam-type CID (HCD) in the collision cell
+activation	beam_gas	\bN2\b|\bnitrogen\b				a collision gas of the beam-type (HCD) cell; the linear ion trap uses helium, so CID with N2 is beam-type
 activation	ft_cell	\bIRMPD\b|\bSORI\b|\bECD\b				activation in the FT-ICR cell
 activation	energy	\bNCE\b|\bRCE\b|normali[sz]ed (?:collision|CID|CE)|^\s*\d+(?:\.\d+)?(?:\s*-\s*\d+(?:\.\d+)?)?\s*%				a normalised or percentage energy that names no activation (collision field only)
 activation	instrument_trap	MSn in the LTQ|LTQ MSn|ion[- ]trap (?:CID|MSn|MS2|full scan)|linear ion trap MSn|CID in the (?:linear )?ion trap				activation named in the instrument text: ion trap
 activation	instrument_beam	\bHCD\b				activation named in the instrument text: HCD
+activation	in_source	\bin[- ]source\b|\bISCID\b|\bISF\b|\bsource[- ](?:CID|SID|fragmentation|activation|condition|cone)\b|^\s*source\b|\bpost[- ]source\b|\bfront[- ]end\b|\bup[- ]front\b|\bSID\b|\bpre[- ]?trap\b|no precursor isolation				collision regime: in-source activation named in the collision field
+activation	in_source_strip	(?:\b(?:in[- ]source|source|post[- ]source|front[- ]end|up[- ]front|pre[- ]?trap)(?:\s*/\s*(?:in[- ]source|source|pre[- ]?trap))?(?:\s+octapole)?(?:\s*\((?:orifice|cone|SID)\))?(?:[\s-]+(?:CID|SID|CAD|fragmentation|activation|dissociation|formation))?(?:\s*\(SID\))?|\bISCID\b|\bSID\b)(?:,?\s*(?:at|via|by)?\s*(?:cone|orifice|fragmentor|DP)?(?:\s+voltage)?\s*[-+]?\d+(?:\.\d+)?(?:\s*(?:%|eV|kV|V)\b)?(?:\s*(?:-|to|,|and|or|/)\s*[-+]?\d+(?:\.\d+)?(?:\s*(?:%|eV|kV|V)\b)?)*)?|\bno\s+(?:MS/MS|MS2|MSn|precursor isolation)\b				collision regime: in-source phrases and negated MS/MS removed before looking for tandem activation
+activation	tandem	\bCE\b|collision[- ]?(?:energy|energies|cell|voltage|gas)|\bCID\b|\bCAD\b|\bHCD\b|\bNCE\b|\bRCE\b|MS/MS|\bMS[2-9n]\b|\bMSE\b|HDMSE|\bQ2\b|\bElab\b|lab-frame|resonan|\bIRMPD\b|\bSORI\b|\bECD\b|precursor[- ]ion scan|product[- ]ion scan|\bMRM\b|\bSRM\b|\bAr\b|argon|\bN2\b|helium|\bHe\b|low[- ]energy|high[- ]energy|ion[- ]trap|\bLIT\b|\d\s*eV\b|\d\s*%|^\s*\d+(?:\.\d+)?(?:\s*-\s*\d+(?:\.\d+)?)?\s*V\b				collision regime: activation in a collision cell or trap (MS/MS, CE, HCD, a collision gas, an eV or % energy, a leading collision voltage)
+activation	source_voltage	\bcone\b|fragmentor|orifice|\bDP\b|declustering|skimmer|capillary|aperture|entrance[- ]slit				collision regime: a source voltage; a collision field naming only these is in-source
 rule	compilation.multi_source_row	not printed per row|ion trap / QTRAP sources	compilation	compilation		a review row drawing on several cited instruments
 rule	unknown.not_stated	^\s*(?:none|not stated|not printed|not specified|unspecified)\b	unknown	unknown		instrument not stated
 rule	unknown.non_tandem_db	non-tandem	unknown	unknown		database spectra from a non-tandem instrument

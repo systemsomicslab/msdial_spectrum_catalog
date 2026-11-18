@@ -1,0 +1,6 @@
+# Paper-level stratum and collision regime: (source, id regex) -> instrument_strat, collision_regime. Record ids
+# and labels only, no text from papers. Used where one record of a paper names the activation and the paper's
+# other records share its method without restating it. The computed stratum stays in instrument_strat_computed
+# and the reason in instrument_override. Rows are inferences from the records, to be confirmed by a reader.
+source	id_pattern	instrument_strat	collision_regime	reason
+stage2	^s2-p3r019-	orbitrap_ft	beam	inferred, not yet confirmed against the paper: s2-p3r019-001 names CID with N2 and an eV ramp on this Orbitrap Elite, i.e. beam-type activation in the HCD cell (the linear trap uses helium); the other records of the paper state the same ramp

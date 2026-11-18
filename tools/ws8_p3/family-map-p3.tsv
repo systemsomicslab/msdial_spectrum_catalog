@@ -46,6 +46,7 @@ acylsugar	acylsugar	acylsugar	out_of_scope	sugar fatty-acyl esters (LIPID MAPS s
 lipid	lipid	lipid	out_of_scope	directive: lipids out of scope
 lipid_sn_position	lipid_sn_position	lipid	out_of_scope	directive: lipids out of scope
 lipid_double_bond_position	lipid_double_bond_position	lipid	out_of_scope	directive: lipids out of scope
+steryl_ester	steryl_ester	lipid	out_of_scope	no record carries this label; target of record overrides for records about steryl esters only: fatty-acyl esters of sterols are an acyl-lipid class; directive: lipids out of scope
 alkaloid_monoterpene_indole	alkaloid_monoterpene_indole	alkaloid_monoterpene_indole	in_scope	synonym set alkaloid_MIA / alkaloid_monoterpene_indole; P3 v1 family (MIA)
 alkaloid_MIA	alkaloid_monoterpene_indole	alkaloid_monoterpene_indole	in_scope	synonym of alkaloid_monoterpene_indole (stage-2 README)
 alkaloid_yohimbine_corynanthean	alkaloid_yohimbine_corynanthean	alkaloid_monoterpene_indole	in_scope	MIA subtype, kept as its own label

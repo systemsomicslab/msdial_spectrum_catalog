@@ -1,7 +1,9 @@
 # Record-level family overrides: (source, id) -> unified family. Record ids and labels only, no text from papers.
-# Used where the family label of a record is broader than its class scope: these records carry a C-glycoside label
-# but their class scope is di-C-glycosides only. Records whose scope covers mono- and di-C-glycosides together keep
-# the mono label. family_original must equal the record's family, and family must be a unified family of
+# Used where the family label of a record is broader than its class scope. The C-glycoside records below carry a
+# C-glycoside label but their class scope is di-C-glycosides only; records whose scope covers mono- and
+# di-C-glycosides together keep the mono label. A steryl_glycoside record whose class scope is steryl esters only
+# goes to steryl_ester (out of scope: an acyl-lipid class); a record covering steryl glycosides and esters together
+# keeps steryl_glycoside. family_original must equal the record's family, and family must be a unified family of
 # family-map-p3.tsv; otherwise the run fails.
 source	id	family_original	family	reason
 stage3	s3-p3r173-008	flavonoid_C_glycoside	flavonoid_di_c_glycoside	class scope is di-C-glycosides only
@@ -24,3 +26,4 @@ stage3	s3-p3r283-007	flavonoid_C_glycoside	flavonoid_di_c_glycoside	class scope 
 stage3	s3-p3r283-008	flavonoid_C_glycoside	flavonoid_di_c_glycoside	class scope is di-C-glycosides only
 stage3	s3-p3r289-001	flavonoid_C_glycoside	flavonoid_di_c_glycoside	class scope is di-C-glycosides only
 stage3	s3-p3r289-002	flavonoid_C_glycoside	flavonoid_di_c_glycoside	class scope is di-C-glycosides only
+stage3	s3-p3r413-005	steryl_glycoside	steryl_ester	class scope is steryl esters and sterol lipids, not steryl glycosides
