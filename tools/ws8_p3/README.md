@@ -251,3 +251,34 @@ python -B tools/ws8_p3/build_tables.py compare <RuleSet>
   individual families are written by their drafters, not by this script.
 
 Tests use temporary directories and synthetic rows only: `tests/test_ws8_p3_build_tables.py`.
+
+# WS8 P3: C# parity vectors (`cjson_vectors.py`)
+
+`cjson_vectors.py` writes `cjson-vectors.json`, the CPython-oracle vectors the C# port of the rule-file format must
+reproduce (C# design sections 2.5, 3.1-3.2, 4.9, 4.11 and 7.2). Everything is synthetic; the file is generated,
+never committed, and is itself strict JSON in storage form, so the C# strict reader can read it.
+
+```powershell
+python -B tools/ws8_p3/cjson_vectors.py write <dir>/cjson-vectors.json [--source-md]
+python -B tools/ws8_p3/cjson_vectors.py check <dir>/cjson-vectors.json
+```
+
+| Section | Vectors |
+|---|---|
+| `strict_json` | input bytes (base64) to the canonical text and its sha256, or the reader's error code: key order by code point, nesting to depth 128, whitespace, escapes, every accepted integer and float form and boundary, and every refused form (BOM, invalid UTF-8, grammar, duplicate keys, NaN, depth 129, integer and float ranges, `-0`, exponents, more than 15 digits, control and non-ASCII characters) |
+| `float_lexeme` | accepted lexeme to IEEE bits, with the mantissa and scale of the one division of design 3.1 |
+| `fixed_decimal`, `result_double` | double and decimals to exact half-even text (no sign on all-zero text); `null` when not finite |
+| `string_escape`, `ieee_bits`, `instrument_class` | UTF-16 text to `ensure_ascii` JSON; NaN canonicalisation; the ASCII-only instrument class |
+| `file_hashes`, `ruleset_load`, `rule_semantic` | per-file canonical sha256 and the rule-set sha256 of small file maps; two clean synthetic rule sets with every hash and each rule's `resolved` set; `rule_semantic_sha256` cases |
+| `masses` | element lexemes to integer pDa (`mass_precision` above 12 fraction digits), formulas to pDa, ions of both charges with the electron, adduct precursors (multiplier, add, remove), refused formulas |
+| `loader_errors` | a clean base file map and, for every code of `rule_format.ERROR_CODES`, a patch (null removes a path) with the exact sorted error list of `load_files(files, draft=False)`, version pin included |
+
+`write` prints the sha256; `--source-md` writes `SOURCE.md` beside the file (generator, catalog commit, interpreter,
+sha256; repository-relative paths only). The output is the same bytes for any hash seed and interpreter version
+(checked with 3.12 and 3.14). The C# step copies both files into
+`tests/Common/CommonStandardTests/Resources/DiagnosticRuleFixtures/` of MsdialWorkbench and does not edit them.
+Design 7.2 also plans `engine/loader-errors.json` owned by MsdialWorkbench; the loader vectors here are the CPython
+side of the same codes, and the C# step decides whether they replace or complement it.
+
+Tests: `tests/test_ws8_p3_cjson_vectors.py` (stable output under two hash seeds, every error code with a loader
+vector that a fresh load reproduces, and the other sections recomputed).
