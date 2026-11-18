@@ -2,9 +2,10 @@
 
 Reads the rule-candidate JSON files given with --inputs (label=path), maps kinds, families, ion modes,
 adducts and instruments onto one vocabulary through the TSV tables beside this file, splits the formula
-field into term rows, recomputes every mass from its formula, checks printed values against it, and groups
-term rows across papers by (family, kind, ion mode, adduct, formula). Nothing is dropped: values that could
-not be mapped are written to unmapped.tsv and every input record appears exactly once in records.tsv.
+field into term rows (one per formula token, polarity and adduct), recomputes every mass from its formula,
+checks printed values against it, and groups term rows across papers by (family, kind, ion mode, adduct,
+formula), with a roll-up over adducts. Nothing is dropped: values that could not be mapped are written to
+unmapped.tsv and every input record appears exactly once in records.tsv.
 """
 from __future__ import annotations
 
@@ -26,12 +27,18 @@ KIND_MAP = HERE / "kind-map-p3.tsv"
 FAMILY_MAP = HERE / "family-map-p3.tsv"
 INSTRUMENT_MAP = HERE / "instrument-map-p3.tsv"
 PAPER_MAP = HERE / "paper-map-p3.tsv"
+FAMILY_OVERRIDE = HERE / "family-override-p3.tsv"
+MAP_FILES = (KIND_MAP, FAMILY_MAP, FAMILY_OVERRIDE, INSTRUMENT_MAP, PAPER_MAP)
 
 KINDS = ("product_ion", "neutral_loss", "ion_ratio", "absence", "veto", "sequence", "precondition",
          "adduct_behaviour", "manual")
 SCOPES = ("in_scope", "out_of_scope", "generic")
 INSTRUMENT_CLASSES = ("qtof", "orbitrap_ft", "ion_trap", "qqq_or_qtrap", "mixed", "compilation", "unknown")
+ACTIVATION_NAMES = ("strip", "trap", "beam", "ft_cell", "energy", "instrument_trap", "instrument_beam")
 ION_MODES = ("positive", "negative", "both", "unknown")
+# Kinds whose formula tokens may name the absent ion, the observed one, an isobar or a competitor: their term
+# rows are flagged role_unverified and kept out of groups until a reader says which token is absent.
+NEGATIVE_KINDS = ("absence", "veto")
 
 # Element masses. tools/ws8_p2/p2_diagnostics.py:76 sums RDKit GetMostCommonIsotopeMass; these are those values
 # (RDKit 2026.09.2), copied rather than imported so this tool stays stdlib only.
@@ -174,8 +181,28 @@ def load_family_map(path=FAMILY_MAP):
     return table
 
 
+def load_family_override(path=FAMILY_OVERRIDE, family_map=None):
+    """(source, id) -> {family_original, family, family_group, scope, reason}; the target family must be a
+    unified family of the family map, which gives its group and scope."""
+    family_map = load_family_map() if family_map is None else family_map
+    unified = {v["family"]: v for v in family_map.values()}
+    table = {}
+    for row in read_table(path):
+        key = (row["source"], row["id"])
+        if key in table:
+            raise NormaliseError(f"family override: duplicate row {key}")
+        if row["family"] not in unified:
+            raise NormaliseError(f"family override: {row['family']!r} is not a family of the family map")
+        target = unified[row["family"]]
+        table[key] = {"family_original": row["family_original"], "family": row["family"],
+                      "family_group": target["family_group"], "scope": target["scope"], "reason": row["reason"]}
+    return table
+
+
 def load_instrument_map(path=INSTRUMENT_MAP):
-    defines, rules = {}, []
+    """{'rules': [(name, regex, class, strat, energy_only_strat)], 'activation': {name: regex}}.
+    A rule whose strat is 'activation' takes its stratum from instrument_activation()."""
+    defines, rules, activation = {}, [], {}
 
     def expand(pattern):
         return re.sub(r"%([A-Z0-9_]+)%", lambda m: "(?:" + defines[m.group(1)] + ")", pattern)
@@ -183,14 +210,26 @@ def load_instrument_map(path=INSTRUMENT_MAP):
     for row in read_table(path):
         if row["kind"] == "define":
             defines[row["name"]] = expand(row["pattern"])
+        elif row["kind"] == "activation":
+            if row["name"] not in ACTIVATION_NAMES or row["name"] in activation:
+                raise NormaliseError(f"instrument map: unknown or repeated activation row {row['name']!r}")
+            activation[row["name"]] = re.compile(row["pattern"], re.IGNORECASE)
         elif row["kind"] == "rule":
-            if row["instrument_class"] not in INSTRUMENT_CLASSES or row["instrument_strat"] not in INSTRUMENT_CLASSES:
+            strat, energy_only = row["instrument_strat"], row.get("energy_only_strat") or ""
+            if row["instrument_class"] not in INSTRUMENT_CLASSES or (
+                    strat not in INSTRUMENT_CLASSES and strat != "activation"):
                 raise NormaliseError(f"instrument map: unknown class in rule {row['name']!r}")
+            if (strat == "activation") != bool(energy_only) or (energy_only and energy_only not in INSTRUMENT_CLASSES):
+                raise NormaliseError(f"instrument map: rule {row['name']!r} needs energy_only_strat exactly when "
+                                     "its strat is activation")
             rules.append((row["name"], re.compile(expand(row["pattern"]), re.IGNORECASE),
-                          row["instrument_class"], row["instrument_strat"]))
+                          row["instrument_class"], strat, energy_only))
         else:
             raise NormaliseError(f"instrument map: unknown row kind {row['kind']!r}")
-    return rules
+    missing = sorted(set(ACTIVATION_NAMES) - set(activation))
+    if missing:
+        raise NormaliseError(f"instrument map: activation rows missing: {missing}")
+    return {"rules": rules, "activation": activation}
 
 
 def load_paper_map(path=PAPER_MAP):
@@ -198,8 +237,9 @@ def load_paper_map(path=PAPER_MAP):
 
 
 def load_maps():
-    return {"kind": load_kind_map(), "family": load_family_map(), "instrument": load_instrument_map(),
-            "paper": load_paper_map()}
+    family = load_family_map()
+    return {"kind": load_kind_map(), "family": family, "family_override": load_family_override(family_map=family),
+            "instrument": load_instrument_map(), "paper": load_paper_map()}
 
 
 # ------------------------------------------------------------------------------------------ field normalisers
@@ -314,14 +354,64 @@ def adduct_sign(adduct):
     return m.group(1) if m else ""
 
 
-def classify_instrument(raw, rules):
-    """Return (instrument_class, instrument_strat, rule) or None when no rule matches."""
+def instrument_activation(instrument, collision, condition, activation):
+    """The activation a record names, as (marks, origin). marks is a subset of {trap, beam, ft_cell} read from
+    the collision field and from explicit phrases in the instrument text ('CID in the linear ion trap'); the
+    condition field is read only when those give nothing. In-source and pre-trap activation and negated
+    mentions ('not CID') are removed first. When no activation is named but the collision field gives a
+    normalised or percentage energy, marks is {energy}."""
+    def clean(text):
+        return activation["strip"].sub(" ", normalise_text(text))
+
+    def read(text):
+        return {n for n in ("trap", "beam", "ft_cell") if activation[n].search(text)}
+
+    marks, origin = read(clean(collision)), []
+    if marks:
+        origin.append("collision")
+    inst = normalise_text(instrument)
+    inst_marks = ({"trap"} if activation["instrument_trap"].search(inst) else set()) | (
+        {"beam"} if activation["instrument_beam"].search(inst) else set())
+    if inst_marks:
+        marks |= inst_marks
+        origin.append("instrument")
+    if not marks:
+        marks = read(clean(condition))
+        if marks:
+            origin.append("condition")
+    if not marks and activation["energy"].search(clean(collision)):
+        marks, origin = {"energy"}, ["collision"]
+    return marks, "+".join(origin)
+
+
+def activation_stratum(marks, energy_only):
+    """trap CID -> ion_trap; HCD, beam-type or FT-cell activation -> orbitrap_ft; both -> mixed; a bare energy
+    -> the rule's energy_only_strat; nothing -> mixed."""
+    trap, other = "trap" in marks, bool(marks & {"beam", "ft_cell"})
+    if trap and other:
+        return "mixed"
+    if trap:
+        return "ion_trap"
+    if other:
+        return "orbitrap_ft"
+    if "energy" in marks:
+        return energy_only
+    return "mixed"
+
+
+def classify_instrument(raw, imap, collision=None, condition=None):
+    """Return (instrument_class, instrument_strat, rule, activation) or None when no rule matches. activation is
+    '' unless the rule derives its stratum from the activation, then 'trap', 'beam+trap' ... with its origin."""
     if raw is None or not str(raw).strip():
-        return "unknown", "unknown", "missing"
+        return "unknown", "unknown", "missing", ""
     text = normalise_text(raw)
-    for name, pattern, klass, strat in rules:
+    for name, pattern, klass, strat, energy_only in imap["rules"]:
         if pattern.search(text):
-            return klass, strat, name
+            if strat != "activation":
+                return klass, strat, name, ""
+            marks, origin = instrument_activation(text, collision, condition, imap["activation"])
+            label = "+".join(sorted(marks)) or "none"
+            return klass, activation_stratum(marks, energy_only), name, label + (f" ({origin})" if origin else "")
     return None
 
 
@@ -380,22 +470,32 @@ def odd_electron(counts, z):
     return (sum(ATOMIC_NUMBER[e] * n for e, n in counts.items()) - z) % 2 == 1
 
 
+CHARGE_RE = re.compile(r"([+-])(?![A-Za-z0-9(\[])| (\d)([+-])(?![A-Za-z0-9(\[])")
+
+
 def _read_charge(text, pos):
-    """Charge written at text[pos]: returns (z, radical_dot, dot_after_charge, end)."""
+    """Charge written at text[pos]: returns (z, radical_mark, dot_after_charge, end).
+
+    A radical mark is '•' anywhere around the charge, '*' or '.' directly before the charge ('C7H6O.-',
+    'C19H15NO4*+'), '*' directly after it ('C8H15N-*'), or '*' after an uncharged body ('CH3*'). A '.' after
+    the charge may end a sentence, so it is returned as dot_after_charge and counts only for an odd-electron
+    ion."""
     radical = False
-    if pos < len(text) and text[pos] == RADICAL:
+    if pos < len(text) and (text[pos] == RADICAL or (text[pos] in "*." and CHARGE_RE.match(text, pos + 1))):
         radical, pos = True, pos + 1
     z = 0
-    m = re.match(r"([+-])(?![A-Za-z0-9(\[])", text[pos:])
+    m = CHARGE_RE.match(text, pos)
     if m:
-        z, pos = (1 if m.group(1) == "+" else -1), pos + 1
-    else:
-        m = re.match(r" (\d)([+-])(?![A-Za-z0-9(\[])", text[pos:])
-        if m:
-            z = int(m.group(1)) * (1 if m.group(2) == "+" else -1)
-            pos += len(m.group(0))
+        if m.group(1):
+            z = 1 if m.group(1) == "+" else -1
+        else:
+            z = int(m.group(2)) * (1 if m.group(3) == "+" else -1)
+        pos = m.end()
     dot = False
     if pos < len(text) and text[pos] == RADICAL:
+        radical, pos = True, pos + 1
+    elif pos < len(text) and text[pos] == "*" and (z or not radical) and (
+            pos + 1 == len(text) or not text[pos + 1].isalnum()):
         radical, pos = True, pos + 1
     elif z and pos < len(text) and text[pos] == "." and (pos + 1 == len(text) or text[pos + 1] in " ,;)/"):
         dot = True
@@ -433,23 +533,71 @@ def _make_token(body, counts, z, radical, dot, label, original):
     }
 
 
+# Words and notations that say a formula is the precursor (or the intact molecule), not a product or a loss.
+PRECURSOR_WORDS = (r"precursors?(?:\s+ions?)?|parent(?:\s+ions?)?|molecular\s+ions?|(?:de)?protonated\s+molecules?|"
+                   r"pseudomolecular\s+ions?")
+PRECURSOR_ADDUCT = (r"\[M(?:[+-](?:H|Na|K|NH4|Li|HCOO|CH3COO|Cl|2H|FA-H|2Na-H))?\]\d*[+-]" + RADICAL + r"?"
+                    r"|(?<![\w\]])M[+-]" + RADICAL + r"?(?![\w\[(])|(?<![\w\]])MH[+-](?!\w)"
+                    r"|(?<![\w\]])\(M[+-](?:H|Na|K|NH4)\)[+-]")
+PRECURSOR_BEFORE_RE = re.compile(r"(?:(?i:" + PRECURSOR_WORDS + r")|" + PRECURSOR_ADDUCT + r")$")
+PRECURSOR_LABEL_RE = re.compile(r"\s*(?:(?i:" + PRECURSOR_WORDS + r")\b|(?:" + PRECURSOR_ADDUCT + r")"
+                                r"(?=\s*$|\s*[,;]|\s+(?:theor|calc|m/z|\d)))")
+CLAUSE_SEPARATOR_RE = re.compile(r";|->|→")
+LIST_GAP_RE = re.compile(r"(?:[\s,()]|m/z|\d+(?:\.\d+)?)*")
+# 'A+B', 'A + 2B', 'RCOOH + NH3': formulas joined into one loss. A '+' attached to a formula and followed by a
+# space or the end is a charge instead.
+OPERAND = r"\d*(?:R\d*'?|[A-Z][a-z]?\d*)+"
+COMPOSITE_RE = re.compile(r"(?<![A-Za-z0-9])" + OPERAND + r"(?:(?:\+|\s+\+\s+)" + OPERAND + r")+(?![a-z])")
+MULTIPLIED_RE = re.compile(r"(?<![A-Za-z0-9.,])(\d+)((?:[A-Z][a-z]?\d*){2,})(?![a-z])")
+TEMPLATE_RE = re.compile(r"(?:R\d*'?|[A-Z][a-z]?\d*)+")
+
+
+def precursor_role(text, start, label):
+    """('precursor', evidence) when the text says the token at text[start] is the precursor or the intact
+    molecule: its clause starts with 'precursors', the words just before it are 'precursor', 'parent',
+    'molecular ion', '[M-H]-', 'M+', 'MH+' ... (numbers, 'm/z' and '(' in between are skipped), or its
+    parenthetical label starts with one of them. Otherwise ('', '')."""
+    clause_start = 0
+    for m in CLAUSE_SEPARATOR_RE.finditer(text, 0, start):
+        clause_start = m.end()
+    clause = text[clause_start:start]
+    if re.match(r"\s*precursors\b", clause, re.IGNORECASE):
+        return "precursor", "clause"
+    tail = re.sub(r"(?:[\s(:=]|m/z|\d+(?:\.\d+)?)+$", "", clause)
+    if PRECURSOR_BEFORE_RE.search(tail):
+        return "precursor", "before"
+    if label and PRECURSOR_LABEL_RE.match(label):
+        return "precursor", "label"
+    return "", ""
+
+
 def tokenise_formulas(text, from_value=False):
-    """Formula tokens in a text. Returns (tokens, rejected): rejected lists formula-like strings (starting with
-    an element, with a digit) that use a symbol that is not an element. Tokens inside ion notations such as
-    [M-H-CO2]- are not terms; a bracket holding only a formula, followed by a charge ([C4H5O2]+), is one.
-    Uncharged single-element tokens and short digit-free words (PC, SI ...) are not formulas, except as the
-    leading token of a formula field ('O', 'I (calc ...)'). With from_value, a token must start with carbon
-    and contain hydrogen."""
+    """Formula tokens in a text. Returns (tokens, rejected, composites).
+
+    Tokens inside ion notations such as [M-H-CO2]- are not terms; a bracket holding only a formula, followed
+    by a charge ([C4H5O2]+), is one. Uncharged single-element tokens and short digit-free words (PC, SI ...)
+    are not formulas, except as the leading token of a formula field ('O', 'I (calc ...)'). With from_value,
+    a token must start with carbon and contain hydrogen. Each token carries its position (start, end) in the
+    normalised text, a role ('precursor' or '') and composite_part (it only occurs inside a composite).
+
+    rejected lists formula-like fragments that are not terms: strings starting with an element, with a digit,
+    that use a symbol that is not an element; templates with an R group (RCOOH); multiplied formulas (2H2O).
+    composites lists expressions that join formulas into one loss ('CH2O+2H2O', 'RCOOH + NH3'); their parts
+    become terms with composite_part set, the expression itself is not a term."""
     text = normalise_text(text)
     tokens, rejected = [], []
 
-    def accept(body, counts, z, radical, dot, label, original, leading=False):
+    def accept(body, counts, z, radical, dot, label, original, start, end, leading=False):
         if body in NOTATIONS:
             return
         if counts is None:
             first = PART_RE.match(body)
             if re.search(r"\d", body) and first and first.group(1) in ATOMIC_NUMBER:
                 rejected.append(body)
+            elif "R" in body and TEMPLATE_RE.fullmatch(body):
+                rest = re.sub(r"R\d*'?", "", body)
+                if rest and parse_body(rest) is not None:
+                    rejected.append(body)
             return
         if z == 0 and not leading:
             if len(counts) == 1 and body not in SINGLE_ELEMENT_NEUTRALS:
@@ -458,7 +606,10 @@ def tokenise_formulas(text, from_value=False):
                 return
         if from_value and (PART_RE.match(body).group(1) != "C" or "H" not in counts):
             return
-        tokens.append(_make_token(body, counts, z, radical, dot, label, original))
+        tok = _make_token(body, counts, z, radical, dot, label, original)
+        tok["start"], tok["end"] = start, end
+        tok["role"], tok["role_evidence"] = precursor_role(text, start, label)
+        tokens.append(tok)
 
     masked = list(text)
     for m in re.finditer(r"\[([^\[\]]*)\]", text):
@@ -467,11 +618,19 @@ def tokenise_formulas(text, from_value=False):
         if re.fullmatch(r"(?:[A-Z][a-z]?\d*)+", inner):
             z, radical, dot, end2 = _read_charge(text, end)
             if z:
-                accept(inner, parse_body(inner), z, radical, dot, _label_after(text, end2), text[m.start():end2])
+                accept(inner, parse_body(inner), z, radical, dot, _label_after(text, end2), text[m.start():end2],
+                       m.start(), end2)
                 end = end2
         for i in range(m.start(), end):
             masked[i] = " "
     masked = "".join(masked)
+
+    composites = [(m.start(), m.end(), m.group(0)) for m in COMPOSITE_RE.finditer(masked)
+                  if all(_operand_is_formula(op) for op in re.split(r"\s*\+\s*", m.group(0)))]
+    if not from_value:
+        for m in MULTIPLIED_RE.finditer(masked):
+            if parse_body(m.group(2)) is not None:
+                rejected.append(m.group(0))
 
     for m in BODY_RE.finditer(masked):
         body, start, end = m.group(1), m.start(), m.end()
@@ -489,23 +648,57 @@ def tokenise_formulas(text, from_value=False):
             continue
         rest = masked[end2:].lstrip()
         leading = not from_value and not masked[:start].strip() and (not rest or rest[0] in "(;,")
-        accept(body, parse_body(body), z, radical, dot, _label_after(masked, end2), masked[start:end2].strip(),
-               leading)
-    return tokens, rejected
+        # the label is read from the unmasked text, where ion notations such as [M-H]- are still visible
+        accept(body, parse_body(body), z, radical, dot, _label_after(text, end2), masked[start:end2].strip(),
+               start, end2, leading)
+    tokens.sort(key=lambda t: t["start"])
+    for prev, tok in zip(tokens, tokens[1:]):
+        # a list that continues a precursor: 'precursor m/z 910 (C36H44O22S2), 928 (C36H46O23S2)'
+        if prev["role"] == "precursor" and not tok["role"] and LIST_GAP_RE.fullmatch(text, prev["end"], tok["start"]):
+            tok["role"], tok["role_evidence"] = "precursor", "list"
+    for tok in tokens:
+        tok["composite_part"] = any(s <= tok["start"] and tok["end"] <= e for s, e, _ in composites)
+    return tokens, rejected, [c for _, _, c in composites]
+
+
+def _operand_is_formula(operand):
+    """An operand of a composite: a formula, with an optional multiplier and R groups ('2H2O', 'RCOOH')."""
+    body = re.sub(r"R\d*'?", "", re.sub(r"^\d+\s?", "", operand.strip()))
+    return bool(body) and parse_body(body) is not None
 
 
 # ------------------------------------------------------------------------------------------- mass check
-NUMBER_RE = re.compile(r"(?<![\d.])(\d+)\.(\d+)(?![\d.])(?!\s*(?:%|ppm|eV|kV|V\b|min\b|mDa|mM|uM|µ|"
+# A decimal number; a full stop after it (end of a sentence) is allowed, a further digit group is not.
+NUMBER_RE = re.compile(r"(?<![\d.])(\d+)\.(\d+)(?!\d)(?!\.\d)(?!\s*(?:%|ppm|eV|kV|V\b|min\b|mDa|mM|uM|µ|"
                        r"°|ms\b|s\b|h\b))")
+# Text allowed between a formula and the number it labels: 'C9H7O3+ 163.0390', 'C9H7O3+ (calc 163.0390)',
+# '163.0390 (C9H7O3+)'.
+PAIR_BEFORE_RE = re.compile(r"[\s(=:]*(?:(?:calc(?:d|ulated)?|computed|theor(?:etical)?|exact|m/z)\.?[\s(=:]*)?")
+PAIR_AFTER_RE = re.compile(r"\s*\(\s*")
 
 
 def printed_numbers(*texts):
-    """Decimal numbers in the texts as (value, decimals, printed text); intensities, ppm, eV and times are
-    skipped."""
+    """Decimal numbers in the texts as (value, decimals, printed text, paired hill); intensities, ppm, eV and
+    times are skipped. paired hill is the Hill formula written right next to the number (before it, or in
+    parentheses after it), or None."""
     out = []
     for text in texts:
-        for m in NUMBER_RE.finditer(normalise_text(text)):
-            out.append((float(m.group(0)), len(m.group(2)), m.group(0)))
+        text = normalise_text(text)
+        if not text:
+            continue
+        tokens = tokenise_formulas(text)[0]
+        for m in NUMBER_RE.finditer(text):
+            paired = None
+            for tok in sorted(tokens, key=lambda t: -t["end"]):
+                if tok["end"] <= m.start() and PAIR_BEFORE_RE.fullmatch(text, tok["end"], m.start()):
+                    paired = tok["hill"]
+                    break
+            if paired is None:
+                for tok in tokens:
+                    if tok["start"] >= m.end() and PAIR_AFTER_RE.fullmatch(text, m.end(), tok["start"]):
+                        paired = tok["hill"]
+                        break
+            out.append((float(m.group(0)), len(m.group(2)), m.group(0), paired))
     return out
 
 
@@ -513,21 +706,30 @@ def product_tolerance(mass):
     return max(PRODUCT_TOL_DA, PRODUCT_TOL_PPM * 1e-6 * mass)
 
 
-def mass_check(mass, printed, fallback=()):
-    """Compare a computed m/z (or neutral mass) with printed decimals (value, decimals, text).
+def mass_check(mass, printed, fallback=(), hill_formula=None):
+    """Compare a computed m/z (or neutral mass) with printed decimals (value, decimals, text[, paired hill]).
 
-    Numbers within NEAR_WINDOW_DA of the mass are compared; the fallback numbers (the note) are used only
-    when the primary ones (the value) hold none, so a misprint in the value is not hidden by a recomputed
-    mass in the note. A number printed with d decimals matches when |printed - mass| <= tol + 0.5 * 10^-d.
-    When none matches, the flag is printed_mismatch if any near number could resolve the tolerance, and
-    lowres_printed if all have fewer than LOWRES_DECIMALS decimals and half their last digit is >= tol.
-    Status: matched | printed_mismatch | lowres_printed | no_printed_value | no_mass."""
+    Numbers within NEAR_WINDOW_DA of the mass are compared, except a number written next to a different
+    formula (it is that formula's mass). The fallback numbers (the note) are used only when the primary ones
+    (the value) hold none, so a misprint in the value is not hidden by a recomputed mass in the note. A number
+    printed with d decimals matches when |printed - mass| <= tol + 0.5 * 10^-d. When none matches, the flag is
+    printed_mismatch if any near number could resolve the tolerance, and lowres_printed if all have fewer than
+    LOWRES_DECIMALS decimals and half their last digit is >= tol. A mismatch found in the note, which mostly
+    holds masses recomputed by the extractor, is advisory: note_mismatch or note_lowres.
+    Status: matched | printed_mismatch | lowres_printed | note_mismatch | note_lowres | no_printed_value |
+    no_mass."""
     if mass is None:
         return {"status": "no_mass"}
     tol = product_tolerance(mass)
+
+    def usable(x):
+        paired = x[3] if len(x) > 3 else None
+        return abs(x[0] - mass) <= NEAR_WINDOW_DA and (paired is None or hill_formula is None
+                                                        or paired == hill_formula)
+
     near, origin = [], ""
     for origin, numbers in (("value", printed), ("note", fallback)):
-        near = [x for x in numbers if abs(x[0] - mass) <= NEAR_WINDOW_DA]
+        near = [x for x in numbers if usable(x)]
         if near:
             break
     if not near:
@@ -535,36 +737,46 @@ def mass_check(mass, printed, fallback=()):
     nearest = min(near, key=lambda x: (abs(x[0] - mass), -x[1]))
     result = {"tolerance": tol, "printed_from": origin, "printed_near": sorted({x[2] for x in near}),
               "nearest": nearest[2], "nearest_decimals": nearest[1], "nearest_diff": nearest[0] - mass}
-    if any(abs(p - mass) <= tol + 0.5 * 10 ** -d for p, d, _ in near):
+    if any(abs(x[0] - mass) <= tol + 0.5 * 10 ** -x[1] for x in near):
         result["status"] = "matched"
         return result
     resolving = [x for x in near if x[1] >= LOWRES_DECIMALS or 0.5 * 10 ** -x[1] < tol]
-    result["status"] = "printed_mismatch" if resolving else "lowres_printed"
+    status = "printed_mismatch" if resolving else "lowres_printed"
+    if origin == "note":
+        status = "note_mismatch" if resolving else "note_lowres"
+    result["status"] = status
     return result
 
 
 # --------------------------------------------------------------------------------------------- the build
 RECORD_FIELDS = [
     "source", "id", "paper_id", "paper_key", "doi", "family_original", "family", "family_group", "scope",
-    "kind_original", "kind", "evidence_sense", "manual_queue", "ion_mode_original", "ion_mode", "ion_mode_inferred",
-    "adduct_original", "adduct", "adduct_flags", "instrument_original", "instrument_class", "instrument_strat",
-    "instrument_rule", "standards_based", "formula_original", "formula_from", "n_formula_tokens", "n_term_rows",
-    "term_status", "class_scope", "value", "condition", "collision", "standards", "location", "note", "citation",
-    "source_text", "primary_refs", "author_reviewed",
+    "family_override", "kind_original", "kind", "evidence_sense", "manual_queue", "ion_mode_original", "ion_mode",
+    "ion_mode_inferred", "adduct_original", "adduct", "adduct_flags", "instrument_original", "instrument_class",
+    "instrument_strat", "instrument_rule", "instrument_activation", "standards_based", "formula_original",
+    "formula_from", "formula_flags", "n_formula_tokens", "n_term_rows", "term_status", "class_scope", "value",
+    "condition", "collision", "standards", "location", "note", "citation", "source_text", "primary_refs",
+    "author_reviewed",
 ]
 TERM_FIELDS = [
     "term_id", "record_id", "source", "paper_key", "family", "family_group", "scope", "kind", "kind_original",
-    "ion_mode", "expanded_from_both", "adduct", "token_original", "token_label", "formula_from", "formula", "hill",
-    "charge", "term_type", "odd_electron", "radical_printed", "mass", "unsupported_elements", "flags",
-    "mass_check", "tolerance", "printed_from", "nearest_printed", "nearest_diff", "instrument_class",
-    "instrument_strat",
-    "standards_based", "group_id",
+    "ion_mode", "expanded_from_both", "adduct", "expanded_from_adducts", "token_original", "token_label",
+    "formula_from", "formula", "hill", "charge", "term_type", "role", "role_evidence", "odd_electron",
+    "radical_printed", "mass", "unsupported_elements", "flags", "mass_check", "tolerance", "printed_from",
+    "nearest_printed", "nearest_diff", "instrument_class", "instrument_strat", "standards_based", "group_exclusion",
+    "group_id", "support_id",
 ]
 MASS_FLAG_FIELDS = ["term_id", "record_id", "source", "family", "kind", "formula", "term_type", "mass", "tolerance",
-                    "flag", "printed_from", "printed_near", "nearest_printed", "nearest_decimals", "nearest_diff"]
+                    "flag", "advisory", "printed_from", "printed_near", "nearest_printed", "nearest_decimals",
+                    "nearest_diff"]
+MASS_FLAGS = ("printed_mismatch", "lowres_printed", "note_mismatch", "note_lowres")
+ADVISORY_MASS_FLAGS = ("note_mismatch", "note_lowres")
 MANUAL_FIELDS = ["source", "id", "paper_key", "family", "family_original", "kind_original", "reason", "ion_mode",
                  "adduct", "instrument_class", "standards_based", "value", "formula_original", "note", "citation"]
 UNMAPPED_FIELDS = ["field", "value", "n_records", "record_ids"]
+SUPPORT_FIELDS = ["support_id", "family", "family_group", "scope", "kind", "ion_mode", "formula", "term_type", "mass",
+                  "n_groups", "adducts", "n_term_rows", "n_records", "n_papers", "n_standards_papers", "sources",
+                  "instrument_strata", "paper_keys", "standards_paper_keys", "group_ids"]
 
 
 def load_inputs(pairs):
@@ -650,8 +862,14 @@ def build(inputs, maps):
             if fm is None:
                 unmapped[("family", str(family_original))].append(rid)
                 fm = {"family": str(family_original or ""), "family_group": "", "scope": "unmapped"}
+            override = maps.get("family_override", {}).get((label, rid))
+            if override is not None:
+                if override["family_original"] != family_original:
+                    raise NormaliseError(f"family override for {label}:{rid} expects family "
+                                         f"{override['family_original']!r}, the record has {family_original!r}")
+                fm = override
             row.update(family_original=family_original, family=fm["family"], family_group=fm["family_group"],
-                       scope=fm["scope"])
+                       scope=fm["scope"], family_override=override["reason"] if override else "")
             # ion mode
             mode = normalise_ion_mode(rec.get("ion_mode"))
             if mode is None:
@@ -668,12 +886,13 @@ def build(inputs, maps):
                 aflags.append("adduct_mode_conflict")
             row.update(adduct_original=rec.get("adduct"), adduct=adducts, adduct_flags=aflags)
             # instrument
-            inst = classify_instrument(rec.get("instrument"), maps["instrument"])
+            inst = classify_instrument(rec.get("instrument"), maps["instrument"], rec.get("collision"),
+                                       rec.get("condition"))
             if inst is None:
                 unmapped[("instrument", str(rec.get("instrument")))].append(rid)
-                inst = ("unknown", "unknown", "unmapped")
+                inst = ("unknown", "unknown", "unmapped", "")
             row.update(instrument_original=rec.get("instrument"), instrument_class=inst[0],
-                       instrument_strat=inst[1], instrument_rule=inst[2])
+                       instrument_strat=inst[1], instrument_rule=inst[2], instrument_activation=inst[3])
             # paper and citations
             doi = None
             if label in {s for s, _, _ in maps["paper"]}:
@@ -698,18 +917,25 @@ def build(inputs, maps):
                        author_reviewed=rec.get("author_reviewed"), formula_original=rec.get("formula"))
             # terms
             formula_field = rec.get("formula")
+            formula_flags = []
             if isinstance(formula_field, str) and formula_field.strip():
-                tokens, rejected = tokenise_formulas(formula_field)
+                tokens, rejected, composites = tokenise_formulas(formula_field)
                 formula_from = "formula"
-                for body in rejected:
-                    unmapped[("formula_token", body)].append(rid)
+                for fragment in rejected:
+                    unmapped[("formula_fragment", fragment)].append(rid)
+                for expression in composites:
+                    unmapped[("formula_composite", expression)].append(rid)
+                if rejected:
+                    formula_flags.append("fragment_not_a_term")
+                if composites:
+                    formula_flags.append("composite_expression")
                 if tokens:
                     status = "has_terms"
                 else:
                     status = "formula_unparsed"
                     unmapped[("formula", formula_field)].append(rid)
             else:
-                tokens, _ = tokenise_formulas(rec.get("value") or "", from_value=True)
+                tokens = tokenise_formulas(rec.get("value") or "", from_value=True)[0]
                 formula_from = "value" if tokens else ""
                 status = "has_terms" if tokens else "no_formula"
             unique = {}
@@ -718,6 +944,10 @@ def build(inputs, maps):
                     prev = unique[tok["formula"]]
                     if tok["label"] and tok["label"] not in prev["label"]:
                         prev["label"] = (prev["label"] + " | " + tok["label"]).strip(" |")
+                    # a role or a composite part holds only when every occurrence says so
+                    prev["composite_part"] = prev["composite_part"] and tok["composite_part"]
+                    if prev["role"] != tok["role"]:
+                        prev["role"], prev["role_evidence"] = "", ""
                     continue
                 unique[tok["formula"]] = dict(tok)
             tokens = list(unique.values())
@@ -725,74 +955,104 @@ def build(inputs, maps):
             printed_note = printed_numbers(rec.get("note"))
             n_rows = 0
             for k, tok in enumerate(tokens, 1):
-                check = mass_check(tok["mass"], printed_value, printed_note)
+                check = mass_check(tok["mass"], printed_value, printed_note, tok["hill"])
                 if mode[0] == "both":
                     pols = ["positive"] if tok["charge"] > 0 else ["negative"] if tok["charge"] < 0 else \
                         ["positive", "negative"]
                 else:
                     pols = [mode[0]]
-                for pol in pols:
-                    if mode[0] == "both":
-                        sign = "+" if pol == "positive" else "-"
-                        pol_adducts = [a for a in adducts if adduct_sign(a) in (sign, "")] or ["unstated"]
-                        term_id = f"{rid}#t{k}.{pol[:3]}"
-                    else:
-                        pol_adducts = adducts
-                        term_id = f"{rid}#t{k}"
-                    flags = []
+                exclusion = []
+                if tok["role"] == "precursor":
+                    exclusion.append("precursor")
+                if km["kind"] in NEGATIVE_KINDS:
+                    exclusion.append("role_unverified")
+                if tok["composite_part"]:
+                    exclusion.append("composite_part")
+                flags = []
+                if tok["role"] != "precursor":
                     if km["kind"] == "neutral_loss" and tok["charge"]:
                         flags.append("kind_conflict")
                     if km["kind"] == "product_ion" and not tok["charge"]:
                         flags.append("kind_conflict")
-                    if tok["unsupported_elements"]:
-                        flags.append("unsupported_element")
+                if km["kind"] == "neutral_loss" and not tok["charge"] and tok["odd_electron"]:
+                    flags.append("odd_electron_neutral")
+                if tok["unsupported_elements"]:
+                    flags.append("unsupported_element")
+                if tok["radical_mark_mismatch"]:
+                    flags.append("radical_mark_mismatch")
+                if check["status"] in MASS_FLAGS:
+                    flags.append(check["status"])
+                flags += [f for f in ("precursor", "role_unverified", "composite_part") if f in exclusion]
+                for pol in pols:
+                    if mode[0] == "both":
+                        sign = "+" if pol == "positive" else "-"
+                        pol_adducts = [a for a in adducts if adduct_sign(a) in (sign, "")] or ["unstated"]
+                    else:
+                        pol_adducts = adducts
+                    pol_adducts = list(dict.fromkeys(pol_adducts))
+                    pol_flags = list(flags)
                     if (pol == "positive" and tok["charge"] < 0) or (pol == "negative" and tok["charge"] > 0):
-                        flags.append("charge_mode_conflict")
-                    if tok["radical_mark_mismatch"]:
-                        flags.append("radical_mark_mismatch")
-                    if check["status"] in ("printed_mismatch", "lowres_printed"):
-                        flags.append(check["status"])
-                    terms.append({
-                        "term_id": term_id, "record_id": rid, "source": label, "paper_key": row["paper_key"],
-                        "doi": row["doi"], "family": row["family"], "family_group": row["family_group"],
-                        "scope": row["scope"], "kind": row["kind"], "kind_original": kind_original, "ion_mode": pol,
-                        "expanded_from_both": mode[0] == "both", "adduct": sorted(set(pol_adducts)),
-                        "token_original": tok["token_original"], "token_label": tok["label"],
-                        "formula_from": formula_from, "formula": tok["formula"], "hill": tok["hill"],
-                        "charge": tok["charge"], "term_type": "ion" if tok["charge"] else "neutral",
-                        "odd_electron": tok["odd_electron"], "radical_printed": tok["radical_printed"],
-                        "mass": tok["mass"], "unsupported_elements": tok["unsupported_elements"], "flags": flags,
-                        "mass_check": check["status"], "check": check, "tolerance": check.get("tolerance"),
-                        "printed_from": check.get("printed_from"),
-                        "nearest_printed": check.get("nearest"), "nearest_diff": check.get("nearest_diff"),
-                        "instrument_class": row["instrument_class"], "instrument_strat": row["instrument_strat"],
-                        "standards_based": row["standards_based"],
-                        "secondary": json.loads(row["primary_refs"]) if row["primary_refs"] else [],
-                        "citation_text": rec.get("citation") or rec.get("source") or "",
-                    })
-                    n_rows += 1
-            row.update(formula_from=formula_from, n_formula_tokens=len(tokens), n_term_rows=n_rows,
-                       term_status=status, manual_queue=row["kind"] == "manual")
+                        pol_flags.append("charge_mode_conflict")
+                    for j, adduct in enumerate(pol_adducts, 1):
+                        term_id = (f"{rid}#t{k}" + (f".{pol[:3]}" if mode[0] == "both" else "")
+                                   + (f".a{j}" if len(pol_adducts) > 1 else ""))
+                        terms.append({
+                            "term_id": term_id, "record_id": rid, "source": label, "paper_key": row["paper_key"],
+                            "doi": row["doi"], "family": row["family"], "family_group": row["family_group"],
+                            "scope": row["scope"], "kind": row["kind"], "kind_original": kind_original,
+                            "ion_mode": pol, "expanded_from_both": mode[0] == "both", "adduct": adduct,
+                            "expanded_from_adducts": len(pol_adducts) > 1,
+                            "token_original": tok["token_original"], "token_label": tok["label"],
+                            "formula_from": formula_from, "formula": tok["formula"], "hill": tok["hill"],
+                            "charge": tok["charge"], "term_type": "ion" if tok["charge"] else "neutral",
+                            "role": tok["role"], "role_evidence": tok["role_evidence"],
+                            "odd_electron": tok["odd_electron"], "radical_printed": tok["radical_printed"],
+                            "mass": tok["mass"], "unsupported_elements": tok["unsupported_elements"],
+                            "flags": pol_flags, "mass_check": check["status"], "check": check,
+                            "tolerance": check.get("tolerance"), "printed_from": check.get("printed_from"),
+                            "nearest_printed": check.get("nearest"), "nearest_diff": check.get("nearest_diff"),
+                            "instrument_class": row["instrument_class"], "instrument_strat": row["instrument_strat"],
+                            "standards_based": row["standards_based"], "group_exclusion": exclusion,
+                            "group_id": "", "support_id": "",
+                            "secondary": json.loads(row["primary_refs"]) if row["primary_refs"] else [],
+                            "citation_text": rec.get("citation") or rec.get("source") or "",
+                        })
+                        n_rows += 1
+            row.update(formula_from=formula_from, formula_flags=formula_flags, n_formula_tokens=len(tokens),
+                       n_term_rows=n_rows, term_status=status, manual_queue=row["kind"] == "manual")
             records.append(row)
             if row["kind"] == "manual":
                 reason = "kind_other" if kind_original == "other" else "kind_unmapped"
                 manual.append({**row, "reason": reason, "adduct": adducts})
     groups = group_terms(terms)
-    return {"records": records, "terms": terms, "groups": groups, "manual": manual, "unmapped": unmapped}
+    support = support_rollup(terms, groups)
+    return {"records": records, "terms": terms, "groups": groups, "support": support, "manual": manual,
+            "unmapped": unmapped}
 
 
 def group_key(term):
-    return (term["family"], term["kind"], term["ion_mode"], ";".join(term["adduct"]), term["formula"])
+    return (term["family"], term["kind"], term["ion_mode"], term["adduct"], term["formula"])
+
+
+def support_key(term):
+    """The term without its adduct: the roll-up that counts every paper supporting a term."""
+    return (term["family"], term["kind"], term["ion_mode"], term["formula"])
+
+
+def _short_id(prefix, key):
+    return prefix + hashlib.sha256(json.dumps(key).encode("utf-8")).hexdigest()[:12]
 
 
 def group_terms(terms):
+    """Group the term rows that carry no group_exclusion by group_key; excluded rows keep group_id ''."""
     by_key = defaultdict(list)
     for t in terms:
-        by_key[group_key(t)].append(t)
+        if not t["group_exclusion"]:
+            by_key[group_key(t)].append(t)
     groups = []
     for key in sorted(by_key):
         members = by_key[key]
-        gid = "g-" + hashlib.sha256(json.dumps(key).encode("utf-8")).hexdigest()[:12]
+        gid = _short_id("g-", key)
         papers = sorted({t["paper_key"] for t in members if t["paper_key"]})
         std_papers = sorted({t["paper_key"] for t in members if t["paper_key"] and t["standards_based"] is True})
         flag_counts = Counter(f for t in members for f in t["flags"])
@@ -800,8 +1060,8 @@ def group_terms(terms):
         for t in members:
             t["group_id"] = gid
         groups.append({
-            "group_id": gid, "family": key[0], "kind": key[1], "ion_mode": key[2],
-            "adduct": key[3].split(";") if key[3] else [], "formula": key[4],
+            "group_id": gid, "family": key[0], "kind": key[1], "ion_mode": key[2], "adduct": key[3],
+            "formula": key[4],
             "family_group": first["family_group"], "scope": first["scope"], "term_type": first["term_type"],
             "mass": round(first["mass"], 6) if first["mass"] is not None else None,
             "n_term_rows": len(members), "record_ids": sorted({t["record_id"] for t in members}),
@@ -816,9 +1076,45 @@ def group_terms(terms):
             "instrument_strata": dict(sorted(Counter(t["instrument_strat"] for t in members).items())),
             "kind_original": sorted({str(t["kind_original"]) for t in members}),
             "expanded_from_both": sum(1 for t in members if t["expanded_from_both"]),
+            "expanded_from_adducts": sum(1 for t in members if t["expanded_from_adducts"]),
             "flags": dict(sorted(flag_counts.items())),
         })
     return groups
+
+
+def support_rollup(terms, groups):
+    """Per-term support across adducts: the grouped term rows by (family, kind, ion_mode, formula), with the union
+    of papers and standards-based papers over every adduct group, 'unstated' included. Sets support_id on the
+    term rows and support_* on each group."""
+    by_key = defaultdict(list)
+    for t in terms:
+        if t["group_id"]:
+            by_key[support_key(t)].append(t)
+    group_index = {g["group_id"]: g for g in groups}
+    rows = []
+    for key in sorted(by_key):
+        members = by_key[key]
+        sid = _short_id("s-", key)
+        papers = sorted({t["paper_key"] for t in members if t["paper_key"]})
+        std_papers = sorted({t["paper_key"] for t in members if t["paper_key"] and t["standards_based"] is True})
+        gids = sorted({t["group_id"] for t in members})
+        for t in members:
+            t["support_id"] = sid
+        for gid in gids:
+            group_index[gid].update(support_id=sid, support_n_papers=len(papers),
+                                    support_n_standards_papers=len(std_papers), support_n_groups=len(gids))
+        first = members[0]
+        rows.append({
+            "support_id": sid, "family": key[0], "family_group": first["family_group"], "scope": first["scope"],
+            "kind": key[1], "ion_mode": key[2], "formula": key[3], "term_type": first["term_type"],
+            "mass": first["mass"], "n_groups": len(gids), "adducts": sorted({t["adduct"] for t in members}),
+            "n_term_rows": len(members), "n_records": len({t["record_id"] for t in members}),
+            "n_papers": len(papers), "n_standards_papers": len(std_papers),
+            "sources": sorted({t["source"] for t in members}),
+            "instrument_strata": dict(sorted(Counter(t["instrument_strat"] for t in members).items())),
+            "paper_keys": papers, "standards_paper_keys": std_papers, "group_ids": gids,
+        })
+    return rows
 
 
 def counts_family_kind(records, sources):
@@ -844,7 +1140,9 @@ def counts_family_group(records, terms, groups):
     def summarise(recs, trms, grps):
         papers = {r["paper_key"] for r in recs if r["paper_key"]}
         std = {r["paper_key"] for r in recs if r["paper_key"] and r["standards_based"] is True}
-        return {"n_records": len(recs), "n_term_rows": len(trms), "n_groups": len(grps), "n_papers": len(papers),
+        return {"n_records": len(recs), "n_term_rows": len(trms),
+                "n_term_rows_grouped": sum(1 for t in trms if t["group_id"]), "n_groups": len(grps),
+                "n_terms_supported": len({g.get("support_id") for g in grps}), "n_papers": len(papers),
                 "n_standards_papers": len(std),
                 "n_records_standards_based": sum(1 for r in recs if r["standards_based"] is True),
                 "n_records_no_term": sum(1 for r in recs if not r["n_term_rows"])}
@@ -869,8 +1167,8 @@ def counts_family_group(records, terms, groups):
             rows.append({"family_group": fg, "family": k[1], "scope": scope[k],
                          **summarise(rec_by[k], term_by[k], group_by[k])})
     rows.append({"family_group": "TOTAL", "family": "", "scope": "", **summarise(records, terms, groups)})
-    fields = ["family_group", "family", "scope", "n_records", "n_term_rows", "n_groups", "n_papers",
-              "n_standards_papers", "n_records_standards_based", "n_records_no_term"]
+    fields = ["family_group", "family", "scope", "n_records", "n_term_rows", "n_term_rows_grouped", "n_groups",
+              "n_terms_supported", "n_papers", "n_standards_papers", "n_records_standards_based", "n_records_no_term"]
     return fields, rows
 
 
@@ -904,20 +1202,29 @@ def write_outputs(out, inputs, result, argv):
     write_tsv(out / "counts_family_kind.tsv", fields, rows)
     fields, rows = counts_family_group(records, terms, groups)
     write_tsv(out / "counts_family_group.tsv", fields, rows)
+    write_tsv(out / "term_support.tsv", SUPPORT_FIELDS, result["support"])
     write_tsv(out / "manual_queue.tsv", MANUAL_FIELDS, result["manual"])
-    flag_rows = []
+    flag_rows, seen = [], set()
     for t in terms:
-        if t["mass_check"] in ("printed_mismatch", "lowres_printed"):
+        # one row per term token: the polarity and adduct copies of a token share its mass check
+        key = (t["record_id"], t["formula"])
+        if t["mass_check"] in MASS_FLAGS and key not in seen:
+            seen.add(key)
             c = t["check"]
-            flag_rows.append({**t, "flag": t["mass_check"], "printed_from": c["printed_from"],
-                              "printed_near": c["printed_near"], "nearest_decimals": c["nearest_decimals"]})
+            flag_rows.append({**t, "flag": t["mass_check"], "advisory": t["mass_check"] in ADVISORY_MASS_FLAGS,
+                              "printed_from": c["printed_from"], "printed_near": c["printed_near"],
+                              "nearest_decimals": c["nearest_decimals"]})
     write_tsv(out / "mass_flags.tsv", MASS_FLAG_FIELDS, flag_rows)
-    unmapped_rows = [{"field": f, "value": v, "n_records": len(ids), "record_ids": sorted(set(ids))}
+    unmapped_rows = [{"field": f, "value": v, "n_records": len(set(ids)), "record_ids": sorted(set(ids))}
                      for (f, v), ids in sorted(result["unmapped"].items())]
     write_tsv(out / "unmapped.tsv", UNMAPPED_FIELDS, unmapped_rows)
     counts = {
         "n_records_in": reconciliation["n_input"], "n_records_out": len(records), "n_terms": len(terms),
-        "n_groups": len(groups), "n_manual_queue": len(result["manual"]), "n_mass_flags": len(flag_rows),
+        "n_term_tokens": len({(t["record_id"], t["formula"]) for t in terms}),
+        "n_terms_grouped": sum(1 for t in terms if t["group_id"]),
+        "terms_excluded_from_groups": dict(Counter(e for t in terms for e in t["group_exclusion"])),
+        "n_groups": len(groups), "n_term_support_rows": len(result["support"]),
+        "n_manual_queue": len(result["manual"]), "n_mass_flags": len(flag_rows),
         "mass_flags": dict(Counter(r["flag"] for r in flag_rows)),
         "n_unmapped_values": len(unmapped_rows),
         "unmapped_by_field": dict(Counter(r["field"] for r in unmapped_rows)),
@@ -930,9 +1237,15 @@ def write_outputs(out, inputs, result, argv):
         "ion_mode": dict(Counter(r["ion_mode"] for r in records)),
         "instrument_class": dict(Counter(r["instrument_class"] for r in records)),
         "instrument_strat": dict(Counter(r["instrument_strat"] for r in records)),
+        "instrument_class_by_strat": {f"{c}->{s}": n for (c, s), n in sorted(
+            Counter((r["instrument_class"], r["instrument_strat"]) for r in records).items())},
+        "family_overrides": dict(Counter(r["family"] for r in records if r["family_override"])),
+        "formula_flags": dict(Counter(f for r in records for f in r["formula_flags"])),
         "term_flags": dict(Counter(f for t in terms for f in t["flags"])),
+        "term_roles": dict(Counter(t["role"] or "term" for t in terms)),
         "mass_check": dict(Counter(t["mass_check"] for t in terms)),
         "terms_expanded_from_both": sum(1 for t in terms if t["expanded_from_both"]),
+        "terms_expanded_from_adducts": sum(1 for t in terms if t["expanded_from_adducts"]),
         "adduct_tokens": dict(Counter(a for r in records for a in r["adduct"]).most_common()),
         "groups_by_scope": dict(Counter(g["scope"] for g in groups)),
     }
@@ -948,7 +1261,7 @@ def write_outputs(out, inputs, result, argv):
         "inputs": [{"label": label, "path": str(path), "sha256": sha256_file(path), "n_records": len(recs)}
                    for label, (path, recs) in inputs.items()],
         "code": {**git_state(), "script_sha256": sha256_file(Path(__file__)),
-                 "mapping_files": {p.name: sha256_file(p) for p in (KIND_MAP, FAMILY_MAP, INSTRUMENT_MAP, PAPER_MAP)}},
+                 "mapping_files": {p.name: sha256_file(p) for p in MAP_FILES}},
         "environment": {"python": platform.python_version(), "implementation": platform.python_implementation(),
                         "platform": platform.system()},
         "parameters": {
@@ -960,7 +1273,15 @@ def write_outputs(out, inputs, result, argv):
             "near_window_da": NEAR_WINDOW_DA, "printed_precision_allowance": "0.5 * 10^-decimals",
             "lowres_decimals": LOWRES_DECIMALS,
             "lowres_rule": "a non-matching value with fewer decimals whose half last digit is >= the tolerance",
+            "mass_check_sources": "value first, note only when value has no number within the window; a note "
+            "mismatch is advisory (note_mismatch, note_lowres); a number written next to a different formula is "
+            "not compared",
             "group_key": ["family", "kind", "ion_mode", "adduct", "formula"],
+            "support_key": ["family", "kind", "ion_mode", "formula"],
+            "term_rows": "one per formula token, polarity (ion mode both) and adduct",
+            "group_exclusion": {"precursor": "the token is the precursor or intact molecule (label or nearby text)",
+                                "role_unverified": f"kinds {list(NEGATIVE_KINDS)}: which token is absent is not "
+                                "assigned", "composite_part": "the token occurs only inside a composite expression"},
         },
         "counts": counts,
         "doi_shared_by_paper_ids": {d: sorted(p) for d, p in sorted(doi_papers.items()) if len(p) > 1},

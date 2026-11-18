@@ -5,40 +5,54 @@
 # instrument_strat is the class a record counts toward when measurements are stratified: the instrument that
 # produced the fragmentation. A mixed record whose ions came from both instruments, or from an instrument the text
 # does not identify, keeps instrument_strat = mixed and is counted in no single-instrument stratum.
+# instrument_strat = activation (Orbitrap/FT hybrids with an ion trap) derives the stratum from the activation the
+# record names, read from its collision field and from the activation rows below (see the README): trap CID gives
+# ion_trap, HCD or beam-type CID gives orbitrap_ft, IRMPD or SORI-CID in the FT cell gives orbitrap_ft, both kinds
+# give mixed, nothing gives mixed. energy_only_strat is the stratum when the collision field gives only a
+# normalised or percentage energy without naming the activation (the trap is the default on LTQ-based hybrids).
 # unknown also covers instruments outside the five tandem classes (sector, single quadrupole, TOF without precursor
 # selection); the rule name says which.
-kind	name	pattern	instrument_class	instrument_strat	comment
-define	IT	(?<!quadrupole linear )ion[- ]?traps?|\bQIT\b|\bLCQ\b|\bLXQ\b|Esquire|\bHCT\b|\bXCT\b|amaZon|LC/MSD[^;,]*\bTrap\b|\bG2445A\b|\b63[24]0\b|IT-TOF|\bLTQ\b(?![- ]?(?:Orbitrap|FT))			ion traps (3D and linear) and IT-TOF; the LTQ of an Orbitrap or FT hybrid is excluded
-define	QTOF	Q[-/]?TOF|QqTOF|TripleTOF|ZenoTOF|Synapt|Xevo G2|micrOTOF-Q|microQ-TOF|UltroTOF-Q|BioTOF Q|Impact (?:II|HD)|timsTOF|QSTAR|X500[RB]|\b65(?:10|20|30|40|45|50|60)\b|LCMS-9030|maXis			quadrupole time-of-flight instruments
-define	ORB	Orbitrap|Exactive|Exploris|\bFusion\b|Lumos|\bFTMS\b			Orbitrap instruments
-define	FT	FT-?ICR|\bFT\b|solariX|\bApex\b|IonSpec			FT-ICR instruments
-define	QQQ	triple[- ]?quad\w*|\bQqQ\b|\bTQ\b|\bTQ-|Quattro|\bTSQ\b|\bAPI[- ]?(?:2000|3000|3200|4000|III)|Q-?TRAP|QqLIT|\b64(?:30|60|70)\b|LCMS-8050			triple quadrupoles and QTRAPs
-define	TOF1	micrOTOF(?!-Q)|\bLCT\b|G1969A|\b6220\b|MALDI|Voyager			TOF without a quadrupole, and MALDI instruments
-define	SECTOR	AutoSpec|VG 70|\bEBQQ\b|\bEBE\b|magnetic sector|MAT ?95			sector and sector hybrids
-define	SQ	single[- ]quadrupole|\bZMD\b			single quadrupoles
-rule	compilation.multi_source_row	not printed per row|ion trap / QTRAP sources	compilation	compilation	a review row drawing on several cited instruments
-rule	unknown.not_stated	^\s*(?:none|not stated|not printed|not specified|unspecified)\b	unknown	unknown	instrument not stated
-rule	unknown.non_tandem_db	non-tandem	unknown	unknown	database spectra from a non-tandem instrument
-rule	compilation.review	\breview\b|literature|\bvarious\b|compilation|multiple vendors|several platforms|\b\d+ platforms|repository|MassBank|\bbeam\b|sectors	compilation	compilation	reviews, literature values, repositories and multi-platform statements
-rule	mixed.hybrid_trap_fragmentation	^(?=.*(?:%ORB%|%FT%)).*(?:MSn in the LTQ|LTQ MSn|ion[- ]trap (?:CID|MSn|full scan)|linear ion trap MSn|CID in the linear ion trap)	mixed	ion_trap	Orbitrap or FT hybrid whose spectra were fragmented and read in the ion trap
-rule	orbitrap_ft.hybrid_named	ion trap-Orbitrap	orbitrap_ft	orbitrap_ft	the hybrid named as one instrument
-rule	ion_trap.generic_named	^ion trap \(	ion_trap	ion_trap	ion trap named first, instruments in parentheses
-rule	mixed.it_and_tof_both_fragment	(?=.*%IT%)(?=.*(?:in-source losses|accurate MS2))	mixed	mixed	the TOF also produced fragments (in-source or accurate MS2)
-rule	mixed.it_qqq	(?=.*%IT%)(?=.*%QQQ%)	mixed	mixed	ion trap and triple quadrupole both fragmented
-rule	mixed.it_with_accurate_mass	(?=.*%IT%)(?=.*(?:%QTOF%|%ORB%|%FT%|%TOF1%|%SECTOR%))(?=.*(?:for accurate|accurate mass (?:on|in)|\(accurate mass|for HRESIMS|for formulas?\b|formulas (?:by|confirmed)))	mixed	ion_trap	ion trap for MSn; the other instrument only for accurate mass or formulas
-rule	mixed.it_other	(?=.*%IT%)(?=.*(?:%QTOF%|%ORB%|%FT%|%SECTOR%))	mixed	mixed	ion trap and another tandem instrument, roles not separated
-rule	mixed.it_tof1	(?=.*%IT%)(?=.*%TOF1%)	mixed	ion_trap	ion trap with a TOF that has no precursor selection
-rule	mixed.qqq_with_accurate_mass	(?=.*%QQQ%)(?=.*(?:%QTOF%|%ORB%|%FT%|%TOF1%))(?=.*(?:for accurate|accurate mass on|confirmed on|cross-checked on|for formulas?\b))	mixed	qqq_or_qtrap	triple quadrupole or QTRAP for MS/MS; the other instrument only for accurate mass or a cross-check
-rule	mixed.qqq_other	(?=.*%QQQ%)(?=.*(?:%QTOF%|%ORB%|%FT%))	mixed	mixed	triple quadrupole or QTRAP and another tandem instrument, roles not separated
-rule	mixed.qqq_sq	(?=.*%QQQ%)(?=.*%SQ%)	mixed	qqq_or_qtrap	single quadrupole for MS1 only
-rule	mixed.orbitrap_qtof_validation	(?=.*(?:%ORB%|%FT%))(?=.*%QTOF%)(?=.*validated on)	mixed	orbitrap_ft	QTOF spectra used for validation only
-rule	mixed.orbitrap_qtof	(?=.*(?:%ORB%|%FT%))(?=.*%QTOF%)	mixed	mixed	Orbitrap or FT and QTOF, roles not separated
-rule	mixed.qtof_secondary	(?=.*%QTOF%)(?=.*(?:%SQ%|%TOF1%))	mixed	qtof	QTOF with a single quadrupole or MALDI instrument used alongside
-rule	orbitrap_ft	%ORB%|%FT%	orbitrap_ft	orbitrap_ft
-rule	qtof	%QTOF%	qtof	qtof
-rule	qqq_or_qtrap	%QQQ%	qqq_or_qtrap	qqq_or_qtrap
-rule	ion_trap	%IT%	ion_trap	ion_trap
-rule	unknown.sector	%SECTOR%	unknown	unknown	sector instrument, outside the tandem classes
-rule	unknown.single_quadrupole	%SQ%	unknown	unknown	single quadrupole, MS1 or in-source fragmentation only
-rule	unknown.tof_ms1	%TOF1%	unknown	unknown	TOF without precursor selection
-rule	unknown.cited_or_implied	\bcited\b|implied|not stated	unknown	unknown	instrument not named in the record
+kind	name	pattern	instrument_class	instrument_strat	energy_only_strat	comment
+define	IT	(?<!quadrupole linear )ion[- ]?traps?|\bQIT\b|\bLCQ\b|\bLXQ\b|Esquire|\bHCT\b|\bXCT\b|amaZon|LC/MSD[^;,]*\bTrap\b|\bG2445A\b|\b63[24]0\b|IT-TOF|\bLTQ\b(?![- ]?(?:Orbitrap|FT))				ion traps (3D and linear) and IT-TOF; the LTQ of an Orbitrap or FT hybrid is excluded
+define	QTOF	Q[-/]?TOF|QqTOF|TripleTOF|ZenoTOF|Synapt|Xevo G2|micrOTOF-Q|microQ-TOF|UltroTOF-Q|BioTOF Q|Impact (?:II|HD)|timsTOF|QSTAR|X500[RB]|\b65(?:10|20|30|40|45|50|60)\b|LCMS-9030|maXis				quadrupole time-of-flight instruments
+define	ORB	Orbitrap|Exactive|Exploris|\bFusion\b|Lumos|\bFTMS\b				Orbitrap instruments
+define	FT	FT-?ICR|\bFT\b|solariX|\bApex\b|IonSpec				FT-ICR instruments
+define	HYB_LTQ	LTQ[- ]?(?:Orbitrap|FT)|\bLIT[- ]?FT|Orbitrap[- ](?:Elite|Velos)|ion[- ]trap[- ]Orbitrap				LTQ- or LIT-based Orbitrap and FT-ICR hybrids, whose MSn is ion-trap CID by default
+define	TRIBRID	Orbitrap[- ](?:Fusion|Eclipse|Ascend|ID-X)|\bFusion\b|\bLumos\b|\bTribrid\b				Orbitrap tribrids, with both ion-trap CID and HCD
+define	QQQ	triple[- ]?quad\w*|\bQqQ\b|\bTQ\b|\bTQ-|Quattro|\bTSQ\b|\bAPI[- ]?(?:2000|3000|3200|4000|III)|Q-?TRAP|QqLIT|\b64(?:30|60|70)\b|LCMS-8050				triple quadrupoles and QTRAPs
+define	TOF1	micrOTOF(?!-Q)|\bLCT\b|G1969A|\b6220\b|MALDI|Voyager				TOF without a quadrupole, and MALDI instruments
+define	SECTOR	AutoSpec|VG 70|\bEBQQ\b|\bEBE\b|magnetic sector|MAT ?95				sector and sector hybrids
+define	SQ	single[- ]quadrupole|\bZMD\b				single quadrupoles
+activation	strip	(?:\b(?:in[- ]source|source|pre[- ]?trap|cone|nozzle[- ]skimmer)(?:\s*/\s*(?:in[- ]source|source|pre[- ]?trap))?\s+(?:CID|SID|CAD|fragmentation|activation|dissociation)|\bSID\b)(?:,?\s*(?:at\s+)?\d+(?:\.\d+)?(?:\s*-\s*\d+(?:\.\d+)?)?\s*(?:%|eV\b|V\b))?|\bnot (?:by )?(?:CID|HCD|IRMPD)\b|\boutside (?:the )?CID/HCD\b				removed before reading activation: in-source and pre-trap activation, and negated mentions
+activation	trap	\bCID\b|\bCAD\b|\bLIT\b|\bPQD\b|ion[- ]trap|linear trap|\bresonan(?:t|ce)\b				resonance CID in an ion trap (on these hybrids CID means trap CID)
+activation	beam	\bHCD\b|beam[- ]type|higher[- ]energy (?:collision|C[- ]?trap)				beam-type CID (HCD) in the collision cell
+activation	ft_cell	\bIRMPD\b|\bSORI\b|\bECD\b				activation in the FT-ICR cell
+activation	energy	\bNCE\b|\bRCE\b|normali[sz]ed (?:collision|CID|CE)|^\s*\d+(?:\.\d+)?(?:\s*-\s*\d+(?:\.\d+)?)?\s*%				a normalised or percentage energy that names no activation (collision field only)
+activation	instrument_trap	MSn in the LTQ|LTQ MSn|ion[- ]trap (?:CID|MSn|MS2|full scan)|linear ion trap MSn|CID in the (?:linear )?ion trap				activation named in the instrument text: ion trap
+activation	instrument_beam	\bHCD\b				activation named in the instrument text: HCD
+rule	compilation.multi_source_row	not printed per row|ion trap / QTRAP sources	compilation	compilation		a review row drawing on several cited instruments
+rule	unknown.not_stated	^\s*(?:none|not stated|not printed|not specified|unspecified)\b	unknown	unknown		instrument not stated
+rule	unknown.non_tandem_db	non-tandem	unknown	unknown		database spectra from a non-tandem instrument
+rule	compilation.review	\breview\b|literature|\bvarious\b|compilation|multiple vendors|several platforms|\b\d+ platforms|repository|MassBank|\bbeam\b|sectors	compilation	compilation		reviews, literature values, repositories and multi-platform statements
+rule	mixed.ltq_hybrid	^(?!.*(?:%QTOF%|%QQQ%|%SECTOR%))(?=.*%HYB_LTQ%)	mixed	activation	ion_trap	LTQ- or LIT-based Orbitrap/FT hybrid (LTQ Orbitrap, LTQ FT, LIT-FTICR, Orbitrap Elite and Velos); stratum from the activation
+rule	mixed.tribrid	^(?!.*(?:%QTOF%|%QQQ%|%SECTOR%))(?=.*%TRIBRID%)	mixed	activation	mixed	Orbitrap tribrid (Fusion, Lumos, Eclipse, Ascend); stratum from the activation; a bare NCE does not say which
+rule	ion_trap.generic_named	^ion trap \(	ion_trap	ion_trap		ion trap named first, instruments in parentheses
+rule	mixed.it_and_tof_both_fragment	(?=.*%IT%)(?=.*(?:in-source losses|accurate MS2))	mixed	mixed		the TOF also produced fragments (in-source or accurate MS2)
+rule	mixed.it_qqq	(?=.*%IT%)(?=.*%QQQ%)	mixed	mixed		ion trap and triple quadrupole both fragmented
+rule	mixed.it_with_accurate_mass	(?=.*%IT%)(?=.*(?:%QTOF%|%ORB%|%FT%|%TOF1%|%SECTOR%))(?=.*(?:for accurate|accurate mass (?:on|in)|\(accurate mass|for HRESIMS|for formulas?\b|formulas (?:by|confirmed)))	mixed	ion_trap		ion trap for MSn; the other instrument only for accurate mass or formulas
+rule	mixed.it_other	(?=.*%IT%)(?=.*(?:%QTOF%|%ORB%|%FT%|%SECTOR%))	mixed	mixed		ion trap and another tandem instrument, roles not separated
+rule	mixed.it_tof1	(?=.*%IT%)(?=.*%TOF1%)	mixed	ion_trap		ion trap with a TOF that has no precursor selection
+rule	mixed.qqq_with_accurate_mass	(?=.*%QQQ%)(?=.*(?:%QTOF%|%ORB%|%FT%|%TOF1%))(?=.*(?:for accurate|accurate mass on|confirmed on|cross-checked on|for formulas?\b))	mixed	qqq_or_qtrap		triple quadrupole or QTRAP for MS/MS; the other instrument only for accurate mass or a cross-check
+rule	mixed.qqq_other	(?=.*%QQQ%)(?=.*(?:%QTOF%|%ORB%|%FT%))	mixed	mixed		triple quadrupole or QTRAP and another tandem instrument, roles not separated
+rule	mixed.qqq_sq	(?=.*%QQQ%)(?=.*%SQ%)	mixed	qqq_or_qtrap		single quadrupole for MS1 only
+rule	mixed.orbitrap_qtof_validation	(?=.*(?:%ORB%|%FT%))(?=.*%QTOF%)(?=.*validated on)	mixed	orbitrap_ft		QTOF spectra used for validation only
+rule	mixed.orbitrap_qtof	(?=.*(?:%ORB%|%FT%))(?=.*%QTOF%)	mixed	mixed		Orbitrap or FT and QTOF, roles not separated
+rule	mixed.qtof_secondary	(?=.*%QTOF%)(?=.*(?:%SQ%|%TOF1%))	mixed	qtof		QTOF with a single quadrupole or MALDI instrument used alongside
+rule	orbitrap_ft	%ORB%|%FT%	orbitrap_ft	orbitrap_ft		Orbitrap and FT-ICR instruments without an ion trap (Q Exactive, Exploris, Exactive, solariX, IonSpec)
+rule	qtof	%QTOF%	qtof	qtof		plain qtof instrument
+rule	qqq_or_qtrap	%QQQ%	qqq_or_qtrap	qqq_or_qtrap		plain qqq_or_qtrap instrument
+rule	ion_trap	%IT%	ion_trap	ion_trap		plain ion_trap instrument
+rule	unknown.sector	%SECTOR%	unknown	unknown		sector instrument, outside the tandem classes
+rule	unknown.single_quadrupole	%SQ%	unknown	unknown		single quadrupole, MS1 or in-source fragmentation only
+rule	unknown.tof_ms1	%TOF1%	unknown	unknown		TOF without precursor selection
+rule	unknown.cited_or_implied	\bcited\b|implied|not stated	unknown	unknown		instrument not named in the record

@@ -10,7 +10,7 @@ flavone_isoflavone	flavone_isoflavone	flavonoid_glycoside_aglycone	in_scope	dist
 flavonoid_C_glycoside	flavonoid_c_glycoside	flavonoid_c_glycoside	in_scope	synonym set flavone_C_glycoside / flavone_c_glycoside / flavonoid_C_glycoside; P3 v1 family
 flavone_C_glycoside	flavonoid_c_glycoside	flavonoid_c_glycoside	in_scope	synonym of flavonoid_C_glycoside
 flavone_c_glycoside	flavonoid_c_glycoside	flavonoid_c_glycoside	in_scope	case variant of flavone_C_glycoside
-flavone_CC_glycoside	flavone_di_c_glycoside	flavonoid_c_glycoside	in_scope	records are about di-C-glycosides specifically; kept as their own label
+flavone_CC_glycoside	flavonoid_di_c_glycoside	flavonoid_c_glycoside	in_scope	records are about di-C-glycosides specifically; kept as their own label (also the target of family-override-p3.tsv)
 prenylated_flavonoid	prenylated_flavonoid	prenylated_flavonoid	in_scope	new candidate family
 prenylated_flavanone	prenylated_flavanone	prenylated_flavonoid	in_scope	flavanone subclass, kept; grouped with prenylated flavonoids
 anthocyanin	anthocyanin	anthocyanin	in_scope	new candidate family (not measured in P3 v1, P3-Q17)
@@ -34,7 +34,7 @@ steroidal_glycoalkaloid	steroidal_glycoalkaloid	steroidal_glycoside	in_scope	new
 steroidal_saponin_glycoalkaloid	steroidal_saponin_glycoalkaloid	steroidal_glycoside	in_scope	combined section-level record, kept as its own label
 glucosinolate	glucosinolate	glucosinolate	in_scope	P3 v1 family
 cyanogenic_glycoside	cyanogenic_glycoside	cyanogenic_glycoside	in_scope	new candidate family
-acylcarnitine	acylcarnitine	acylcarnitine	in_scope	P3 v1 family named in the directive's drafting order, although it is a fatty-acyl class
+acylcarnitine	acylcarnitine	acylcarnitine	in_scope	P3 v1 family named in the directive's drafting order, although it is a fatty-acyl class (CAR); open question for the author, see the README
 betaine	betaine	acylcarnitine	in_scope	confounder class of the acylcarnitine rules (stage-2 README)
 steryl_glycoside	steryl_glycoside	steryl_glycoside	in_scope	P3 v1 family named in the directive's drafting order
 sterol	sterol	steryl_glycoside	in_scope	free sterols; aglycone ions of steryl glycosides
