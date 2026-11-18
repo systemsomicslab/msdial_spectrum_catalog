@@ -23,7 +23,7 @@ memory and again after re-reading the file).
 
 | File | Content |
 |---|---|
-| `records.tsv` | One row per input record: every normalised column next to the original field |
+| `records.tsv` | One row per input record: every normalised column next to the original field, with its record flags and the citation label (`citation`, `citation_original`, `citation_fix`) |
 | `terms.tsv` | One row per formula token, polarity (`both` records) and adduct, with mass, role, flags, group and support ids |
 | `groups.json` | Grouped term rows by (family, kind, ion mode, adduct, formula), with record ids, citations, paper counts, instrument strata, collision regimes, `kind_consistent` and the roll-up counts of their term |
 | `term_support.tsv` | The roll-up over adducts: one row per (family, kind, ion mode, formula) with the union of papers and standards-based papers |
@@ -32,7 +32,7 @@ memory and again after re-reading the file).
 | `manual_queue.tsv` | Records to read by hand: stage-3 `other`, and any kind not in the map |
 | `mass_flags.tsv` | One row per flagged formula token: `printed_mismatch`, `lowres_printed`, and the advisory `note_mismatch`, `note_lowres` |
 | `unmapped.tsv` | Field, value and record ids of everything that could not be mapped or was not made a grouped term |
-| `run.json` | Input paths and sha256, code commit, script and mapping sha256, parameters, counts, override use, reconciliation |
+| `run.json` | Input paths and sha256, code commit, script and mapping sha256, parameters, counts, override, paper-map and record-flag use, reconciliation |
 
 ## Mapping files (labels, record ids and formulas only)
 
@@ -73,7 +73,19 @@ memory and again after re-reading the file).
 - `term-override-p3.tsv`: (source, id, canonical formula) to a token role (`precursor`, `not_observed`,
   `printed_as`) where the record says it but the tokeniser cannot read it. A row naming a formula that the
   record does not hold stops the run.
-- `paper-map-p3.tsv`: DOIs of records without a `paper_id` (the NPR review and PlantMAT).
+- `paper-map-p3.tsv`: (source, id regex) or (source, DOI) to a DOI and a journal reference; DOIs and journal
+  references only, never author names. It gives the DOI of records without a `paper_id` (the NPR review and
+  PlantMAT), and, with a `reference`, replaces a citation label that names a wrong author, no author or an inverted
+  name by `<reference>, <doi>` (`citation`; the input stays in `citation_original`, the row's note in
+  `citation_fix`). A row without an id pattern applies to the records of its source whose own citation carries its
+  DOI; the first matching row wins, and a matching record that cites another DOI stops the run. Papers, groups and
+  counts do not change. The six label fixes are provisional WS0 fixes of 2026-11-19 (Stop A handback, section 6.1).
+- `record-flags-p3.tsv`: (source, id regex, optional canonical formula) to a flag, `msn_level_misplaced` (an ion or
+  loss of a later MSn stage given as MS2) or `source_misread` (the record misreads its source), with a short note.
+  A flagged record keeps its term rows in `terms.tsv`, but they stay out of groups (`record_flag`) until a reader
+  corrects the record; with a formula, only that token's rows. `records.tsv` lists the flags and notes; a row whose
+  formula is not a token of a record it matches stops the run, and rows that match nothing are listed in `run.json`.
+  The three rows are provisional WS0 fixes of 2026-11-19.
 
 ## Rules
 
@@ -120,7 +132,8 @@ memory and again after re-reading the file).
   - its record is an `absence` or `veto` (`role_unverified`: the token may be the absent ion, the observed one,
     an isobar or a competitor, and a reader must say which);
   - its record has kind `manual` (stage-3 `other`), until a reader assigns a kind;
-  - it occurs only inside a composite expression (`composite_part`).
+  - it occurs only inside a composite expression (`composite_part`);
+  - `record-flags-p3.tsv` flags its record, or this token of it (`record_flag`; the flag name is in `flags`).
   `not_observed` and `printed_as` tokens are also listed in `unmapped.tsv`. A group is `kind_consistent` when no
   member carries `kind_conflict`.
 - Masses: element masses are RDKit's most-common-isotope masses, which `tools/ws8_p2/p2_diagnostics.py:73-77`

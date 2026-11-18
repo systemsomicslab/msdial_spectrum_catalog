@@ -1,5 +1,18 @@
-# Papers of records that carry no paper_id: (source, id regex) -> DOI. Citations only.
+# Papers and citation labels: (source, id regex) or (source, DOI) -> DOI and journal reference. Citations only:
+# DOIs and journal references, never author names or text from papers. A row with an id_pattern applies to the
+# records of its source whose id matches; a row without one applies to the records of its source whose own
+# citation carries its DOI. The first matching row wins, and a matching record that cites another DOI stops the run.
+# With a reference, the citation label becomes '<reference>, <doi>' and the input stays in citation_original.
 # The npr input cites two papers (literature README section 1); npr-a and npr-b are one paper.
-source	id_pattern	doi	note
-npr	^npr-[ab]-	doi:10.1039/d1np00014d	NPR review, Nat Prod Rep 2021, 38, 1729-1759
-npr	^plantmat-	doi:10.1021/acs.analchem.6b00906	PlantMAT, Anal Chem 2016, 88, 11373-11383 (DOI as printed)
+# The rows with a reference are provisional WS0 fixes of 2026-11-19 (Stop A handback, section 6.1 'upstream'),
+# each checked against candidates-20261118/records.tsv: the record citations name a wrong author, no author or an
+# inverted name.
+source	id_pattern	doi	reference	note
+npr	^npr-[ab]-	doi:10.1039/d1np00014d		NPR review, Nat Prod Rep 2021, 38, 1729-1759
+npr	^plantmat-	doi:10.1021/acs.analchem.6b00906		PlantMAT, Anal Chem 2016, 88, 11373-11383 (DOI as printed)
+stage2		doi:10.5478/msl.2013.4.4.79	Mass Spectrom Lett 2013	p3r045: the record citations name a wrong first author (provisional WS0 2026-11-19)
+stage3	^s3-p3r330-	doi:10.1002/rcm.3746	Rapid Commun Mass Spectrom 2008	p3r330: the record citations name no author (provisional WS0 2026-11-19)
+stage3	^s3-p3r332-	doi:10.1002/jms.1246	J Mass Spectrom 2007	p3r332: the record citations name no author (provisional WS0 2026-11-19)
+stage3		doi:10.1002/pca.2496	Phytochem Anal 2014, 25, 229-240	p3r273: the record citations name no author (provisional WS0 2026-11-19)
+stage3		doi:10.1021/jf102005z	J Agric Food Chem 2010, 58, 9020-9027	p3r415: the record citations name no author (provisional WS0 2026-11-19)
+stage3		doi:10.1002/pca.1312	Phytochem Anal 2011	p3r277: the record citations invert the author's name, as the paper's running head prints it (provisional WS0 2026-11-19)

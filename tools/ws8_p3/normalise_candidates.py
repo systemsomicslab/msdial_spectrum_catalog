@@ -30,7 +30,9 @@ PAPER_MAP = HERE / "paper-map-p3.tsv"
 FAMILY_OVERRIDE = HERE / "family-override-p3.tsv"
 TERM_OVERRIDE = HERE / "term-override-p3.tsv"
 STRATUM_OVERRIDE = HERE / "stratum-override-p3.tsv"
-MAP_FILES = (KIND_MAP, FAMILY_MAP, FAMILY_OVERRIDE, INSTRUMENT_MAP, PAPER_MAP, TERM_OVERRIDE, STRATUM_OVERRIDE)
+RECORD_FLAGS = HERE / "record-flags-p3.tsv"
+MAP_FILES = (KIND_MAP, FAMILY_MAP, FAMILY_OVERRIDE, INSTRUMENT_MAP, PAPER_MAP, TERM_OVERRIDE, STRATUM_OVERRIDE,
+             RECORD_FLAGS)
 
 KINDS = ("product_ion", "neutral_loss", "ion_ratio", "absence", "veto", "sequence", "precondition",
          "adduct_behaviour", "manual")
@@ -50,6 +52,9 @@ NEGATIVE_KINDS = ("absence", "veto")
 # which the extractor does not vouch for. All three are kept out of groups.
 ROLES = ("precursor", "not_observed", "printed_as")
 UNOBSERVED_ROLES = ("not_observed", "printed_as")
+# Record-content flags (record-flags-p3.tsv): an ion or loss of a later MSn stage given as MS2, or a record that
+# misreads its source. The flagged term rows stay in terms.tsv and are kept out of groups (record_flag).
+RECORD_FLAG_NAMES = ("msn_level_misplaced", "source_misread")
 
 # Element masses. tools/ws8_p2/p2_diagnostics.py:73-77 holds no table: formula_mass() sums RDKit's
 # GetMostCommonIsotopeMass at run time. These are the values RDKit 2026.09.2 returns (checked equal, difference
@@ -245,7 +250,54 @@ def load_instrument_map(path=INSTRUMENT_MAP):
 
 
 def load_paper_map(path=PAPER_MAP):
-    return [(row["source"], re.compile(row["id_pattern"]), normalise_doi(row["doi"])) for row in read_table(path)]
+    """Rows in file order: {key, source, pattern (id regex, or None), doi, reference, note}. A row with an id pattern
+    applies to the records of its source whose id matches; a row without one applies to the records of its source
+    whose own citation (or source field) carries its DOI. With a reference, the record's citation label becomes
+    '<reference>, <doi>'. DOIs and journal references only, never author names."""
+    rows, keys = [], set()
+    for row in read_table(path):
+        doi = normalise_doi(row["doi"])
+        if doi is None or doi != row["doi"].strip():
+            raise NormaliseError(f"paper map: {row['doi']!r} is not a DOI written as doi:10.xxx in lower case")
+        pattern = row["id_pattern"].strip()
+        key = f"{row['source']}:{pattern or doi}"
+        if key in keys:
+            raise NormaliseError(f"paper map: duplicate row {key}")
+        keys.add(key)
+        reference = (row.get("reference") or "").strip()
+        if reference and ("doi" in reference.lower() or "\t" in reference):
+            raise NormaliseError(f"paper map: reference of {key} must be a journal reference without the DOI")
+        rows.append({"key": key, "source": row["source"], "pattern": re.compile(pattern) if pattern else None,
+                     "doi": doi, "reference": reference, "note": (row.get("note") or "").strip()})
+    return rows
+
+
+def match_paper_map(rows, label, rid, own_doi):
+    """The first paper-map row that applies to a record, or None."""
+    for row in rows:
+        if row["source"] != label:
+            continue
+        if row["pattern"].search(rid) if row["pattern"] is not None else own_doi == row["doi"]:
+            return row
+    return None
+
+
+def load_record_flags(path=RECORD_FLAGS):
+    """[{key, source, pattern, formula, flag, note}]: record-content flags. The term rows of a flagged record stay in
+    terms.tsv and are kept out of groups (record_flag); with a formula, only the rows of that token. A row whose
+    formula is not a formula token of a record it matches stops the run (build)."""
+    rows, keys = [], set()
+    for row in read_table(path):
+        if row["flag"] not in RECORD_FLAG_NAMES:
+            raise NormaliseError(f"record flags: unknown flag {row['flag']!r}")
+        formula = (row.get("formula") or "").strip()
+        key = f"{row['source']}:{row['id_pattern']}" + (f":{formula}" if formula else "") + f":{row['flag']}"
+        if key in keys:
+            raise NormaliseError(f"record flags: duplicate row {key}")
+        keys.add(key)
+        rows.append({"key": key, "source": row["source"], "pattern": re.compile(row["id_pattern"]),
+                     "formula": formula, "flag": row["flag"], "note": (row.get("note") or "").strip()})
+    return rows
 
 
 def load_term_override(path=TERM_OVERRIDE):
@@ -279,7 +331,7 @@ def load_maps():
     family = load_family_map()
     return {"kind": load_kind_map(), "family": family, "family_override": load_family_override(family_map=family),
             "instrument": load_instrument_map(), "paper": load_paper_map(), "term_override": load_term_override(),
-            "stratum_override": load_stratum_override()}
+            "stratum_override": load_stratum_override(), "record_flags": load_record_flags()}
 
 
 # ------------------------------------------------------------------------------------------ field normalisers
@@ -1017,8 +1069,8 @@ RECORD_FIELDS = [
     "instrument_strat", "instrument_strat_computed", "instrument_rule", "instrument_activation",
     "instrument_override", "collision_regime", "collision_regime_basis", "in_source_mentioned", "standards_based",
     "formula_original", "formula_from", "formula_flags", "n_formula_tokens", "n_term_rows", "term_status",
-    "class_scope", "value", "condition", "collision", "standards", "location", "note", "citation", "source_text",
-    "primary_refs", "author_reviewed",
+    "record_flags", "record_flag_notes", "class_scope", "value", "condition", "collision", "standards", "location",
+    "note", "citation", "citation_original", "citation_fix", "source_text", "primary_refs", "author_reviewed",
 ]
 TERM_FIELDS = [
     "term_id", "record_id", "source", "paper_key", "family", "family_group", "scope", "kind", "kind_original",
@@ -1112,6 +1164,9 @@ def build(inputs, maps):
     term_overrides = maps.get("term_override", {})
     record_keys = {(label, r["id"]) for label, (_, recs) in inputs.items() for r in recs}
     used_term_overrides = set()
+    paper_rows = maps.get("paper", ())
+    record_flag_rows = maps.get("record_flags", ())
+    used_paper_rows, used_record_flags = set(), set()
     for label, (_, recs) in inputs.items():
         for rec in recs:
             rid = rec["id"]
@@ -1171,15 +1226,21 @@ def build(inputs, maps):
                        instrument_strat=strat, instrument_strat_computed=inst[1], instrument_rule=inst[2],
                        instrument_activation=inst[3], instrument_override=instrument_override,
                        collision_regime=regime[0], collision_regime_basis=regime[1], in_source_mentioned=regime[2])
-            # paper and citations
-            doi = None
-            if label in {s for s, _, _ in maps["paper"]}:
-                for source, pattern, mapped_doi in maps["paper"]:
-                    if source == label and pattern.search(rid):
-                        doi = mapped_doi
-                        break
-            if doi is None:
-                doi = normalise_doi(rec.get("citation") or rec.get("source") or "")
+            # paper and citations: the paper map gives the DOI of records that carry none, and replaces citation
+            # labels that name a wrong author (DOI and journal reference only)
+            own_doi = normalise_doi(rec.get("citation") or rec.get("source") or "")
+            paper = match_paper_map(paper_rows, label, rid, own_doi)
+            citation, citation_fix = rec.get("citation"), ""
+            if paper is None:
+                doi = own_doi
+            else:
+                if own_doi and own_doi != paper["doi"]:
+                    raise NormaliseError(f"paper map row {paper['key']} gives {paper['doi']}, but {label}:{rid} "
+                                         f"cites {own_doi}")
+                used_paper_rows.add(paper["key"])
+                doi = paper["doi"]
+                if paper["reference"]:
+                    citation, citation_fix = f"{paper['reference']}, {paper['doi']}", paper["note"] or "paper map"
             paper_key = rec.get("paper_id") or doi
             if not paper_key:
                 unmapped[("paper", rid)].append(rid)
@@ -1189,7 +1250,8 @@ def build(inputs, maps):
             # originals
             row.update(class_scope=rec.get("scope"), value=rec.get("value"), condition=rec.get("condition"),
                        collision=rec.get("collision"), standards=rec.get("standards"), location=rec.get("location"),
-                       note=rec.get("note"), citation=rec.get("citation"), source_text=rec.get("source"),
+                       note=rec.get("note"), citation=citation, citation_original=rec.get("citation"),
+                       citation_fix=citation_fix, source_text=rec.get("source"),
                        primary_refs=json.dumps(rec.get("primary_refs"), ensure_ascii=False)
                        if rec.get("primary_refs") is not None else "",
                        author_reviewed=rec.get("author_reviewed"), formula_original=rec.get("formula"))
@@ -1252,6 +1314,15 @@ def build(inputs, maps):
                                              "formula token of the record")
                     unique[o_formula]["role"], unique[o_formula]["role_evidence"] = override["role"], "override"
                     used_term_overrides.add((o_source, o_id, o_formula))
+            # record-content flags: the record (or one token of it) misreads its source
+            flags_here = [f for f in record_flag_rows if f["source"] == label and f["pattern"].search(rid)]
+            for f in flags_here:
+                if f["formula"] and f["formula"] not in unique:
+                    raise NormaliseError(f"record flag {f['key']} names {f['formula']}, which is not a formula "
+                                         f"token of {label}:{rid}")
+                used_record_flags.add(f["key"])
+            row.update(record_flags=list(dict.fromkeys(f["flag"] for f in flags_here)),
+                       record_flag_notes=[f["note"] for f in flags_here])
             tokens = list(unique.values())
             for tok in tokens:
                 if tok["role"] in UNOBSERVED_ROLES:
@@ -1283,6 +1354,10 @@ def build(inputs, maps):
                     exclusion.append("manual")
                 if tok["composite_part"]:
                     exclusion.append("composite_part")
+                token_flags = list(dict.fromkeys(f["flag"] for f in flags_here
+                                                 if not f["formula"] or f["formula"] == tok["formula"]))
+                if token_flags:
+                    exclusion.append("record_flag")
                 flags = []
                 if tok["role"] != "precursor":
                     if km["kind"] == "neutral_loss" and tok["charge"]:
@@ -1299,6 +1374,7 @@ def build(inputs, maps):
                     flags.append(check["status"])
                 flags += polarity_flags
                 flags += [f for f in (*ROLES, "role_unverified", "manual", "composite_part") if f in exclusion]
+                flags += token_flags
                 for pol in pols:
                     if mode[0] == "both":
                         sign = "+" if pol == "positive" else "-"
@@ -1333,7 +1409,7 @@ def build(inputs, maps):
                             "standards_based": row["standards_based"], "group_exclusion": exclusion,
                             "group_id": "", "support_id": "",
                             "secondary": json.loads(row["primary_refs"]) if row["primary_refs"] else [],
-                            "citation_text": rec.get("citation") or rec.get("source") or "",
+                            "citation_text": citation or rec.get("source") or "",
                         })
                         n_rows += 1
             row.update(formula_from=formula_from, formula_flags=formula_flags, n_formula_tokens=len(tokens),
@@ -1351,6 +1427,10 @@ def build(inputs, maps):
         "term_override_rows_used": len(used_term_overrides),
         "term_override_rows_without_record": sorted(":".join(k) for k in term_overrides
                                                     if (k[0], k[1]) not in record_keys),
+        "paper_map_rows_used": sorted(used_paper_rows),
+        "paper_map_rows_unused": sorted(r["key"] for r in paper_rows if r["key"] not in used_paper_rows),
+        "record_flag_rows_used": sorted(used_record_flags),
+        "record_flag_rows_unused": sorted(r["key"] for r in record_flag_rows if r["key"] not in used_record_flags),
     }
     return {"records": records, "terms": terms, "groups": groups, "support": support, "manual": manual,
             "unmapped": unmapped, "overrides": overrides}
@@ -1578,6 +1658,9 @@ def write_outputs(out, inputs, result, argv):
         "collision_regime_basis": dict(Counter(r["collision_regime_basis"] for r in records)),
         "in_source_mentioned": sum(1 for r in records if r["in_source_mentioned"]),
         "family_overrides": dict(Counter(r["family"] for r in records if r["family_override"])),
+        "record_flags": dict(Counter(f for r in records for f in r["record_flags"])),
+        "records_flagged": sum(1 for r in records if r["record_flags"]),
+        "citation_fixes": sum(1 for r in records if r["citation_fix"]),
         "formula_flags": dict(Counter(f for r in records for f in r["formula_flags"])),
         "term_flags": dict(Counter(f for t in terms for f in t["flags"])),
         "term_roles": dict(Counter(t["role"] or "term" for t in terms)),
@@ -1633,7 +1716,12 @@ def write_outputs(out, inputs, result, argv):
                                 "formula",
                                 "role_unverified": f"kinds {list(NEGATIVE_KINDS)}: which token is absent is not "
                                 "assigned", "manual": "kind manual (stage-3 other): no kind until a reader assigns one",
-                                "composite_part": "the token occurs only inside a composite expression"},
+                                "composite_part": "the token occurs only inside a composite expression",
+                                "record_flag": "record-flags-p3.tsv flags the record (or this token of it) as "
+                                "misreading its source, until a reader corrects the record"},
+            "paper_map": "paper-map-p3.tsv gives the DOI of records without one and, with a journal reference, "
+            "replaces a citation label that names a wrong author by '<reference>, <doi>' (citation_original keeps "
+            "the input)",
             "collision_regime": "in_source (in-source activation only, or only a source voltage named), trap, "
             "beam, ft_cell, mixed or unknown, from the collision field and the fragmenting instrument; "
             "stratum-override-p3.tsv sets stratum and regime for the records of one paper",

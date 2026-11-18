@@ -28,6 +28,10 @@ def stage2(rid, paper, **kw):
     return record(rid, paper_id=paper, citation=f"Author A 2020, J Synth, doi:10.1000/{paper.upper()}", **kw)
 
 
+def cited(rid, paper, citation, **kw):
+    return record(rid, paper_id=paper, citation=citation, **kw)
+
+
 def quiet_main(argv):
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         return nc.main(argv)
@@ -914,6 +918,159 @@ class GroupingTests(unittest.TestCase):
                          (3, 2, 1, 1))
 
 
+def write_table(tmp, name, header, rows):
+    path = Path(tmp) / name
+    path.write_text("# synthetic\n" + "\t".join(header) + "\n" + "".join("\t".join(r) + "\n" for r in rows),
+                    encoding="utf-8")
+    return path
+
+
+PAPER_HEADER = ("source", "id_pattern", "doi", "reference", "note")
+FLAG_HEADER = ("source", "id_pattern", "formula", "flag", "note")
+
+
+class PaperMapTests(unittest.TestCase):
+    def maps_with(self, rows):
+        with tempfile.TemporaryDirectory() as tmp:
+            maps = nc.load_maps()
+            maps["paper"] = nc.load_paper_map(write_table(tmp, "paper.tsv", PAPER_HEADER, rows))
+        return maps
+
+    def test_shipped_rows_load_and_carry_dois_and_references_only(self):
+        rows = nc.load_paper_map()
+        self.assertEqual([r["key"] for r in rows[:2]], ["npr:^npr-[ab]-", "npr:^plantmat-"])
+        self.assertEqual([r["reference"] for r in rows[:2]], ["", ""])
+        fixes = [r for r in rows if r["reference"]]
+        self.assertEqual(len(fixes), 6)
+        for r in fixes:
+            self.assertRegex(r["doi"], r"^doi:10\.[0-9]+/[!-~]+$")
+            self.assertRegex(r["reference"], r"^[A-Z][A-Za-z ]+ (19|20)[0-9]{2}(, [0-9]+, [0-9]+-[0-9]+)?$")
+            self.assertIn("provisional WS0 2026-11-19", r["note"])
+
+    def test_label_fixed_by_doi_and_by_id_pattern(self):
+        maps = self.maps_with([
+            ("stage2", "", "doi:10.1000/wrong.2013", "J Synth Lett 2013", "wrong first author"),
+            ("stage3", "^s3-p3q001-", "doi:10.1000/none.2008", "J Synth 2008", "no author"),
+        ])
+        recs = {"stage2": [cited("s2-p3q045-001", "p3q045", "Wrong A 2013, J Synth Lett, doi:10.1000/WRONG.2013",
+                                 formula="C9H7O3+"),
+                           stage2("s2-p3q046-001", "p3q046", formula="C9H7O3+")],
+                "stage3": [cited("s3-p3q001-001", "p3q001", "Unknown 2008, J Synth, doi:10.1000/none.2008",
+                                 formula="C9H7O3+"),
+                           # a DOI row is source-specific: the stage2 row does not touch stage3 records
+                           cited("s3-p3q002-001", "p3q002", "Wrong A 2013, J Synth Lett, doi:10.1000/wrong.2013",
+                                 formula="C9H7O3+")]}
+        result = nc.build({k: (Path(f"{k}.json"), v) for k, v in recs.items()}, maps)
+        by_id = {r["id"]: r for r in result["records"]}
+        fixed = by_id["s2-p3q045-001"]
+        self.assertEqual(fixed["citation"], "J Synth Lett 2013, doi:10.1000/wrong.2013")
+        self.assertEqual(fixed["citation_original"], "Wrong A 2013, J Synth Lett, doi:10.1000/WRONG.2013")
+        self.assertEqual((fixed["citation_fix"], fixed["doi"], fixed["paper_key"]),
+                         ("wrong first author", "doi:10.1000/wrong.2013", "p3q045"))
+        self.assertEqual(by_id["s3-p3q001-001"]["citation"], "J Synth 2008, doi:10.1000/none.2008")
+        for rid in ("s2-p3q046-001", "s3-p3q002-001"):
+            self.assertEqual(by_id[rid]["citation"], by_id[rid]["citation_original"])
+            self.assertEqual(by_id[rid]["citation_fix"], "")
+        # papers, groups and counts do not change; only the label does
+        (group,) = result["groups"]
+        self.assertEqual(group["n_papers"], 4)
+        self.assertIn("doi:10.1000/wrong.2013", group["citations"])
+        self.assertEqual(result["overrides"]["paper_map_rows_used"],
+                         ["stage2:doi:10.1000/wrong.2013", "stage3:^s3-p3q001-"])
+        self.assertEqual(result["overrides"]["paper_map_rows_unused"], [])
+
+    def test_npr_rows_give_the_doi_without_a_label(self):
+        result = build({"npr": [record("npr-a-001", formula="C9H7O3+", source="NPR 2021, p.1")]})
+        (row,) = result["records"]
+        self.assertEqual((row["doi"], row["citation"], row["citation_fix"]), ("doi:10.1039/d1np00014d", None, ""))
+        self.assertIn("npr:^plantmat-", result["overrides"]["paper_map_rows_unused"])
+
+    def test_a_record_citing_another_doi_stops_the_run(self):
+        maps = self.maps_with([("stage3", "^s3-p3q001-", "doi:10.1000/none.2008", "J Synth 2008", "x")])
+        recs = {"stage3": [cited("s3-p3q001-001", "p3q001", "Other B 2009, J X, doi:10.1000/other")]}
+        with self.assertRaises(nc.NormaliseError):
+            nc.build({k: (Path(f"{k}.json"), v) for k, v in recs.items()}, maps)
+
+    def test_loader_refuses_bad_rows(self):
+        bad = {
+            "uppercase DOI": [("stage2", "", "doi:10.1000/ABC", "", "")],
+            "no DOI": [("stage2", "", "J Synth 2013", "", "")],
+            "duplicate": [("stage2", "^a", "doi:10.1000/a", "", ""), ("stage2", "^a", "doi:10.1000/b", "", "")],
+            "DOI in reference": [("stage2", "^a", "doi:10.1000/a", "J Synth 2013, doi:10.1000/a", "")],
+        }
+        for label, rows in bad.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(nc.NormaliseError):
+                    nc.load_paper_map(write_table(tmp, "paper.tsv", PAPER_HEADER, rows))
+
+
+class RecordFlagTests(unittest.TestCase):
+    def maps_with(self, rows):
+        with tempfile.TemporaryDirectory() as tmp:
+            maps = nc.load_maps()
+            maps["record_flags"] = nc.load_record_flags(write_table(tmp, "flags.tsv", FLAG_HEADER, rows))
+        return maps
+
+    def records(self):
+        common = dict(family="stilbene", kind="neutral_loss", ion_mode="both", adduct="[M+H]+; [M-H]-")
+        return {"stage2": [stage2("s2-p3q035-001", "p3q035", formula="C6H6O, C6H6O2, C7H6O", **common),
+                           stage2("s2-p3q036-001", "p3q036", formula="C6H6O, C6H6O2", **common)],
+                "stage3": [stage2("s3-p3q175-011", "p3q175", formula="C9H7O3+", ion_mode="positive",
+                                  family="stilbene"),
+                           stage2("s3-p3q175-012", "p3q175", formula="C9H7O3+", ion_mode="positive",
+                                  family="stilbene")]}
+
+    def run_build(self, rows):
+        return nc.build({k: (Path(f"{k}.json"), v) for k, v in self.records().items()}, self.maps_with(rows))
+
+    def test_shipped_rows(self):
+        rows = nc.load_record_flags()
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(r["flag"] in nc.RECORD_FLAG_NAMES for r in rows))
+        self.assertEqual([r["formula"] for r in rows], ["C6H6O2", "", ""])
+        self.assertTrue(all(r["pattern"].pattern.endswith("$") for r in rows))
+
+    def test_token_flag_keeps_rows_but_not_in_groups(self):
+        result = self.run_build([("stage2", "^s2-p3q035-001$", "C6H6O2", "msn_level_misplaced", "MS3 loss in MS2"),
+                                 ("stage3", "^s3-p3q175-011$", "", "source_misread", "misreads Table 4")])
+        rows = {(t["record_id"], t["formula"], t["ion_mode"]): t for t in result["terms"]}
+        flagged = [t for k, t in rows.items() if k[:2] == ("s2-p3q035-001", "C6H6O2")]
+        self.assertEqual(len(flagged), 2)  # one per polarity, both kept in terms.tsv
+        for t in flagged:
+            self.assertEqual((t["group_exclusion"], t["group_id"]), (["record_flag"], ""))
+            self.assertIn("msn_level_misplaced", t["flags"])
+        self.assertTrue(rows[("s2-p3q035-001", "C6H6O", "negative")]["group_id"])
+        self.assertTrue(rows[("s2-p3q035-001", "C7H6O", "positive")]["group_id"])
+        # the other paper's C6H6O2 still forms its group, with one paper
+        c6h6o2 = [g for g in result["groups"] if g["formula"] == "C6H6O2"]
+        self.assertEqual([g["record_ids"] for g in c6h6o2], [["s2-p3q036-001"], ["s2-p3q036-001"]])
+        # a record-level flag excludes every token of the record
+        self.assertEqual(rows[("s3-p3q175-011", "C9H7O3+", "positive")]["group_exclusion"], ["record_flag"])
+        (g,) = [g for g in result["groups"] if g["formula"] == "C9H7O3+"]
+        self.assertEqual(g["record_ids"], ["s3-p3q175-012"])
+        by_id = {r["id"]: r for r in result["records"]}
+        self.assertEqual((by_id["s2-p3q035-001"]["record_flags"], by_id["s2-p3q035-001"]["record_flag_notes"]),
+                         (["msn_level_misplaced"], ["MS3 loss in MS2"]))
+        self.assertEqual(by_id["s3-p3q175-012"]["record_flags"], [])
+        self.assertEqual(result["overrides"]["record_flag_rows_unused"], [])
+        self.assertEqual(len(result["overrides"]["record_flag_rows_used"]), 2)
+
+    def test_unused_rows_are_reported_and_a_missing_token_stops_the_run(self):
+        result = self.run_build([("stage3", "^s3-nothing$", "", "source_misread", "")])
+        self.assertEqual(result["overrides"]["record_flag_rows_unused"], ["stage3:^s3-nothing$:source_misread"])
+        self.assertTrue(all(not t["group_exclusion"] for t in result["terms"] if t["kind"] == "neutral_loss"))
+        with self.assertRaises(nc.NormaliseError):
+            self.run_build([("stage2", "^s2-p3q035-001$", "C8H8O", "msn_level_misplaced", "stale")])
+
+    def test_loader_refuses_bad_rows(self):
+        bad = {"unknown flag": [("stage2", "^a$", "", "wrong", "")],
+               "duplicate": [("stage2", "^a$", "", "source_misread", ""), ("stage2", "^a$", "", "source_misread", "")]}
+        for label, rows in bad.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(nc.NormaliseError):
+                    nc.load_record_flags(write_table(tmp, "flags.tsv", FLAG_HEADER, rows))
+
+
 class OutputFolderTests(unittest.TestCase):
     def test_folder_name_rules(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -972,11 +1129,15 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(set(run["code"]["mapping_files"]), {p.name for p in nc.MAP_FILES})
             self.assertIn("term-override-p3.tsv", run["code"]["mapping_files"])
             self.assertIn("stratum-override-p3.tsv", run["code"]["mapping_files"])
+            self.assertIn("record-flags-p3.tsv", run["code"]["mapping_files"])
             self.assertIn("collision_regime", run["counts"])
+            self.assertEqual((run["counts"]["record_flags"], run["counts"]["citation_fixes"]), ({}, 0))
+            self.assertIn("paper_map_rows_unused", run["counts"]["overrides"])
             self.assertEqual(run["counts"]["terms_excluded_from_groups"], {"role_unverified": 1})
             with open(out / "records.tsv", encoding="utf-8", newline="") as f:
                 rows = list(csv.DictReader(f, delimiter="\t"))
             self.assertEqual(sorted(r["id"] for r in rows), sorted(r["id"] for v in inputs.values() for r in v))
+            self.assertEqual(list(rows[0]), nc.RECORD_FIELDS)
             with open(out / "manual_queue.tsv", encoding="utf-8", newline="") as f:
                 self.assertEqual([r["id"] for r in csv.DictReader(f, delimiter="\t")], ["s3-b-001"])
             with open(out / "mass_flags.tsv", encoding="utf-8", newline="") as f:
