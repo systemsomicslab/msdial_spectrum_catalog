@@ -156,3 +156,58 @@ memory and again after re-reading the file).
   `odd_electron_neutral` when its formula is odd-electron).
 
 Tests use synthetic records only: `tests/test_ws8_p3_normalise.py`.
+
+# WS8 P3: rule-file format reference (`rule_format.py`)
+
+`rule_format.py` is the stdlib Python reference of the MS-FINDER diagnostic-rule format in the WS8-P3 C# design
+(section 3 and the arithmetic of sections 4.1-4.7). It reads and checks rule sets; it never evaluates a spectrum
+(that is the C# engine, followed later by a Python port).
+
+```powershell
+python -B tools/ws8_p3/rule_format.py validate <RuleSet> [--draft] [--rules <glob>]
+python -B tools/ws8_p3/rule_format.py fmt <file>
+python -B tools/ws8_p3/rule_format.py sha <RuleSet> [--draft]
+python -B tools/ws8_p3/rule_format.py masses <RuleSet> --rule <rule_id> [--draft]
+```
+
+- `validate` prints every `RuleLoadError` as `code<TAB>file<TAB>RFC 6901 pointer`, sorted by (file, pointer,
+  code), then `OK n_rules=<n>` (exit 0) or `ERRORS n=<n>` (exit 1). `--rules` checks only the matching rule files;
+  the tables are always checked.
+- `--draft` treats the directory as an unpinned draft: it skips the version pin, accepts a missing
+  `tables/motifs.json` and `tables/motif_nesting.json`, and merges in memory, after the table rows and in path
+  order, `_motifs/*.json` and `_nesting/*.json` (top-level arrays of rows) and `_requests/*.json`
+  (`{"units": [rows], "adducts": [rows]}`). An id defined twice across files is `duplicate_id`. Staging files are
+  never hashed, and `_audit/` is ignored. Without `--draft`, a `*.json` under a `_` folder is `unexpected_file`.
+- `fmt` rewrites a file in storage form (`json.dumps(obj, sort_keys=True, indent=1, ensure_ascii=True) + "\n"`,
+  LF), after checking that the strict reader accepts the result.
+- `sha` prints the rule-set sha256, each hashed file's canonical sha256 and each loaded rule's
+  `rule_semantic_sha256` (the value a review block must carry).
+- `masses` prints, for one rule, every hypothesis (composition x adduct in `adduct_ambiguous` order) with its
+  neutral formula and precursor m/z, and every term member target; members within 1.0 Da of the precursor are
+  marked `precursor_region`.
+
+Format decisions this reference makes where the design is silent or inconsistent (the C# loader mirrors them):
+
+- **Tables are objects.** Design 3.4 calls `adducts.json`, `units.json`, `motifs.json` and `motif_nesting.json`
+  arrays, but its reader refuses a top-level array (`top_level_not_object`) and every `*.json` is hashed through
+  that reader. Each is therefore `{"format": "msfinder-diagnostic-<adducts|units|motifs|motif-nesting>",
+  "format_version": 1, "<adducts|units|motifs|nesting>": [rows]}`, like `elements.json`.
+- **Error codes the design leaves open:** `bad_type`, `bad_value`, `kind_field_choice`, `missing_file`,
+  `unexpected_file`, `duplicate_id`, `adduct_polarity`, `adduct_name_mismatch`, `missing_required_unit`,
+  `nesting_cycle`, `mode_mismatch`, `unknown_variable`, `series_empty`, `review_not_allowed`, `history_format`.
+  `ERROR_CODES` in the module lists every code with its meaning. Reader errors carry the pointer `""`.
+- A float field needs a decimal point (`0.0`, not `0`). A canonical adduct name must agree with its multiplier,
+  `add` and `remove` (`[M+HCOO]-` has `add` `CHO2`); aliases are free spellings, unique with spaces stripped.
+- A `scaffold_ions` key must be present, with a non-empty list for the rule's mode, in every entry of the list.
+- A direct term child of `k_of` must be `counted`; a `not` inside a `not`, and a `k_of` inside a `not`, are
+  `role_placement`. `than` is required for `ordering` and `veto_stronger_than` and null otherwise; `ratio` needs
+  `than`, and `ratio_source` is set exactly when `ratio` is.
+- `claim_terms_too_few` does not stop the two-ion passes (design 3.6 item 6 expects it with `claim_single_ion`).
+  The precursor region of the load-time check is |target - precursor| <= 1.0 Da + 1e-10 Da (100 pDa).
+- `mass_range` also refuses an ion or loss whose mass is not positive (an empty composition).
+- `rule_semantic_sha256`'s `elements` covers the symbols written in the formulas the rule resolves; the hydrogen
+  that the Y0 forms add or remove counts only when a formula holds H.
+
+Tests use synthetic rule sets only: `tests/test_ws8_p3_rule_format.py` (one single-defect case per error code,
+canonical-JSON vectors, masses against hand sums, the two-ion and precursor-target examples of design 3.6,
+`parameters_origin` derivation, review staleness, draft merging and the version pin).
