@@ -211,3 +211,30 @@ Format decisions this reference makes where the design is silent or inconsistent
 Tests use synthetic rule sets only: `tests/test_ws8_p3_rule_format.py` (one single-defect case per error code,
 canonical-JSON vectors, masses against hand sums, the two-ion and precursor-target examples of design 3.6,
 `parameters_origin` derivation, review staleness, draft merging and the version pin).
+
+# WS8 P3: shared tables (`build_tables.py`)
+
+`build_tables.py` holds the rows it wrote for the draft rule set (`ruleset-draft-20261118`): `ruleset.json`,
+`tables/elements.json` (the RDKit masses and electron of `rule_format.py`), `tables/adducts.json` (10 adducts, from
+the MS-DIAL adduct resource and, for `[M]+`, two anthocyanin papers), `tables/units.json` (12 units) and
+`scaffolds/flavonoid_aglycones.json` (51 aglycones with their A-ring RDA ions). Rows and citations were transcribed
+from the normalised candidates (`candidates-20261118`: DOI and locator of each record, the source field of the NPR
+records). Before writing, it checks each aglycone against the ions the records give: the NPR `[A+H]+` formulas, the
+nominal aglycone ions printed elsewhere, and the accurate m/z of the RDA ions.
+
+```powershell
+python -B tools/ws8_p3/build_tables.py write <RuleSet> [--rule-set-version 0.1.0-draft]
+python -B tools/ws8_p3/build_tables.py compare <RuleSet>
+```
+
+- `write` creates the five files in storage form and prints `write`, `unchanged` or `differs` per file. A file that
+  holds other content is never overwritten: the run stops with exit 1 before writing anything.
+- `compare` prints, per table, how many built rows are equal, differ or are missing, the rows the builder does not
+  produce (`extra`), and whether the built rows still lead the table (the unit order is the canonical order). Exit 0
+  when every built row is present and equal; extra rows are allowed.
+- **The builder reproduces only its own rows.** The tables were later extended by the merged unit and adduct
+  requests (26 units, and `[M+H-2H2O]+`; the request files now sit under the draft's `_staging/_requests`). Those
+  rows exist only in the rule set's own `tables/`, and `compare` lists them as `extra`. The scaffold lists of the
+  individual families are written by their drafters, not by this script.
+
+Tests use temporary directories and synthetic rows only: `tests/test_ws8_p3_build_tables.py`.
