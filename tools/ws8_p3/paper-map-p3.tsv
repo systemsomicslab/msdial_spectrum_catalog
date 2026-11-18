@@ -1,0 +1,5 @@
+# Papers of records that carry no paper_id: (source, id regex) -> DOI. Citations only.
+# The npr input cites two papers (literature README section 1); npr-a and npr-b are one paper.
+source	id_pattern	doi	note
+npr	^npr-[ab]-	doi:10.1039/d1np00014d	Tsugawa et al., Nat Prod Rep 2021, 38, 1729-1759
+npr	^plantmat-	doi:10.1021/acs.analchem.6b00906	Qiu et al., Anal Chem 2016, 88, 11373-11383 (DOI as printed)

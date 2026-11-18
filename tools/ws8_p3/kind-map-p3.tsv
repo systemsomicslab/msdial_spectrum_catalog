@@ -1,0 +1,22 @@
+# (source, kind_original) -> unified kind. Labels only. evidence_sense: presence | negative | context | manual.
+# stage2 veto and stage3 diagnostic_absence get separate kinds: the stage-3 README says they correspond only
+# "roughly", stage-2 veto also holds confounders, isobars and stated limits of MS/MS, and stage 3 put such
+# caveats under "other". Both carry evidence_sense negative so they can be selected together.
+source	kind_original	kind	evidence_sense	note
+npr	fragment_ion	product_ion	presence
+npr	neutral_loss	neutral_loss	presence
+npr	ion_ratio	ion_ratio	presence
+npr	sequence	sequence	presence
+npr	precondition	precondition	context
+stage2	fragment_ion	product_ion	presence
+stage2	neutral_loss	neutral_loss	presence
+stage2	ion_ratio	ion_ratio	presence
+stage2	sequence	sequence	presence
+stage2	precondition	precondition	context
+stage2	veto	veto	negative	negative evidence: an absent ion, a confounder or isobar, or a stated limit of MS/MS
+stage3	fragment_ion	product_ion	presence
+stage3	neutral_loss	neutral_loss	presence
+stage3	ion_ratio	ion_ratio	presence
+stage3	diagnostic_absence	absence	negative	an ion or loss stated to be absent
+stage3	adduct_behaviour	adduct_behaviour	context
+stage3	other	manual	manual	rules, caveats and conditions that are not one ion or loss; read by hand, never guessed

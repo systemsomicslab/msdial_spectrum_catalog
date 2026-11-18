@@ -1,0 +1,83 @@
+# family_original -> unified family. Only spelling, case and synonyms are unified; distinct classes keep their
+# own label and share a family_group for drafting. scope: in_scope | out_of_scope | generic.
+# generic = tool notes, general heuristics and generic substructure priors: kept and counted, not drafted as class rules.
+family_original	family	family_group	scope	reason
+flavonoid_O_glycoside	flavonoid_o_glycoside	flavonoid_glycoside_aglycone	in_scope	case only; P3 v1 family
+flavonoid_aglycone	flavonoid_aglycone	flavonoid_glycoside_aglycone	in_scope	P3 v1 family (aglycone and RDA ions)
+flavonol	flavonol	flavonoid_glycoside_aglycone	in_scope	distinct subclass, kept; grouped with flavonoid glycosides and aglycones
+flavanone	flavanone	flavonoid_glycoside_aglycone	in_scope	distinct subclass, kept; grouped with flavonoid glycosides and aglycones
+flavone_isoflavone	flavone_isoflavone	flavonoid_glycoside_aglycone	in_scope	distinct subclass label, kept; grouped with flavonoid glycosides and aglycones
+flavonoid_C_glycoside	flavonoid_c_glycoside	flavonoid_c_glycoside	in_scope	synonym set flavone_C_glycoside / flavone_c_glycoside / flavonoid_C_glycoside; P3 v1 family
+flavone_C_glycoside	flavonoid_c_glycoside	flavonoid_c_glycoside	in_scope	synonym of flavonoid_C_glycoside
+flavone_c_glycoside	flavonoid_c_glycoside	flavonoid_c_glycoside	in_scope	case variant of flavone_C_glycoside
+flavone_CC_glycoside	flavone_di_c_glycoside	flavonoid_c_glycoside	in_scope	records are about di-C-glycosides specifically; kept as their own label
+prenylated_flavonoid	prenylated_flavonoid	prenylated_flavonoid	in_scope	new candidate family
+prenylated_flavanone	prenylated_flavanone	prenylated_flavonoid	in_scope	flavanone subclass, kept; grouped with prenylated flavonoids
+anthocyanin	anthocyanin	anthocyanin	in_scope	new candidate family (not measured in P3 v1, P3-Q17)
+proanthocyanidin	proanthocyanidin	proanthocyanidin	in_scope	new candidate family
+ellagitannin	ellagitannin	ellagitannin	in_scope	new candidate family (includes gallotannins as extracted)
+acylated_glycoside	acylated_glycoside	acylated_glycoside_ester	in_scope	P3 v1 family (acylated glycosides)
+phenylpropanoid_acyl	phenylpropanoid_acyl	acylated_glycoside_ester	in_scope	synonym set phenylpropanoid_acyl / acyl_phenylpropanoid (stage-2 README)
+acyl_phenylpropanoid	phenylpropanoid_acyl	acylated_glycoside_ester	in_scope	synonym of phenylpropanoid_acyl
+hydroxycinnamoyl_hexose_ester	hydroxycinnamoyl_hexose_ester	acylated_glycoside_ester	in_scope	P3 v1 family (hydroxycinnamoyl hexose esters)
+hydroxycinnamoyl_quinate	hydroxycinnamoyl_quinate	hydroxycinnamoyl_quinate	in_scope	P3 v1 family
+shikimic_acid_ester	shikimic_acid_ester	hydroxycinnamoyl_quinate	in_scope	distinct class, kept; grouped with quinates as their nearest competitor
+hydroxycinnamic_acid_amide	hydroxycinnamic_acid_amide	hydroxycinnamic_acid_amide	in_scope	new candidate family
+plant_glycoside_ms2	plant_glycoside_ms2	glycoside_general	in_scope	PlantMAT loss-series and sequencing records (P3 ion_series term) and the soyasaponin demo ions
+plant_glycoside_validation	plant_glycoside_validation	glycoside_general	in_scope	PlantMAT Table 1 compositions (candidate positive examples)
+sugar_loss	sugar_loss	glycoside_general	in_scope	glycosidic sugar-loss records
+oligosaccharide	oligosaccharide	oligosaccharide	in_scope	new candidate family
+triterpenoid_saponin	triterpenoid_saponin	triterpenoid_saponin	in_scope	P3 v1 family
+triterpene_saponin	triterpenoid_saponin	triterpenoid_saponin	in_scope	synonym of triterpenoid_saponin
+steroidal_saponin	steroidal_saponin	steroidal_glycoside	in_scope	new candidate family
+steroidal_glycoalkaloid	steroidal_glycoalkaloid	steroidal_glycoside	in_scope	new candidate family
+steroidal_saponin_glycoalkaloid	steroidal_saponin_glycoalkaloid	steroidal_glycoside	in_scope	combined section-level record, kept as its own label
+glucosinolate	glucosinolate	glucosinolate	in_scope	P3 v1 family
+cyanogenic_glycoside	cyanogenic_glycoside	cyanogenic_glycoside	in_scope	new candidate family
+acylcarnitine	acylcarnitine	acylcarnitine	in_scope	P3 v1 family named in the directive's drafting order, although it is a fatty-acyl class
+betaine	betaine	acylcarnitine	in_scope	confounder class of the acylcarnitine rules (stage-2 README)
+steryl_glycoside	steryl_glycoside	steryl_glycoside	in_scope	P3 v1 family named in the directive's drafting order
+sterol	sterol	steryl_glycoside	in_scope	free sterols; aglycone ions of steryl glycosides
+bile_acid_conjugate	bile_acid_conjugate	bile_acid	in_scope	P3 v1 family (bile-acid conjugates)
+bile_acid_amino_acid_conjugate	bile_acid_amino_acid_conjugate	bile_acid	in_scope	distinct conjugate class, kept; grouped with bile acids
+bile_acid_unconjugated	bile_acid_unconjugated	bile_acid	in_scope	distinct class, kept; grouped with bile acids
+bile_acid_fatty_acid_ester	bile_acid_fatty_acid_ester	bile_acid	out_of_scope	fatty-acyl ester of a bile acid: an acyl-lipid class; directive: lipids out of scope
+acylsugar	acylsugar	acylsugar	out_of_scope	sugar fatty-acyl esters (LIPID MAPS saccharolipid acyl sugars): an acyl-lipid class; directive: lipids out of scope
+lipid	lipid	lipid	out_of_scope	directive: lipids out of scope
+lipid_sn_position	lipid_sn_position	lipid	out_of_scope	directive: lipids out of scope
+lipid_double_bond_position	lipid_double_bond_position	lipid	out_of_scope	directive: lipids out of scope
+alkaloid_monoterpene_indole	alkaloid_monoterpene_indole	alkaloid_monoterpene_indole	in_scope	synonym set alkaloid_MIA / alkaloid_monoterpene_indole; P3 v1 family (MIA)
+alkaloid_MIA	alkaloid_monoterpene_indole	alkaloid_monoterpene_indole	in_scope	synonym of alkaloid_monoterpene_indole (stage-2 README)
+alkaloid_yohimbine_corynanthean	alkaloid_yohimbine_corynanthean	alkaloid_monoterpene_indole	in_scope	MIA subtype, kept as its own label
+alkaloid_strychnos	alkaloid_strychnos	alkaloid_monoterpene_indole	in_scope	MIA subtype, kept as its own label
+alkaloid_macroline	alkaloid_macroline	alkaloid_monoterpene_indole	in_scope	MIA subtype, kept as its own label
+alkaloid_benzylisoquinoline	alkaloid_benzylisoquinoline	alkaloid_benzylisoquinoline	in_scope	new candidate family
+alkaloid_protoberberine	alkaloid_protoberberine	alkaloid_benzylisoquinoline	in_scope	benzylisoquinoline-derived subclass, kept as its own label
+alkaloid_rhoeadine	alkaloid_rhoeadine	alkaloid_benzylisoquinoline	in_scope	benzylisoquinoline-derived subclass, kept as its own label
+alkaloid_pyrrolizidine	alkaloid_pyrrolizidine	alkaloid_pyrrolizidine	in_scope	new candidate family
+alkaloid_quinolizidine	alkaloid_quinolizidine	alkaloid_quinolizidine	in_scope	new candidate family
+alkaloid_tropane	alkaloid_tropane	alkaloid_tropane	in_scope	new candidate family
+alkaloid_indolizidine	alkaloid_indolizidine	alkaloid_indolizidine	in_scope	new candidate family
+alkaloid_aconitane	alkaloid_aconitane	alkaloid_other	in_scope	single-compound subclass, kept as its own label
+alkaloid_cinchona	alkaloid_cinchona	alkaloid_other	in_scope	single-compound subclass, kept as its own label
+alkaloid_other	alkaloid_other	alkaloid_other	in_scope	alkaloids outside the named subclasses
+alkaloid	alkaloid	alkaloid_other	in_scope	section-level overview record of alkaloid subclasses
+benzoxazinoid	benzoxazinoid	benzoxazinoid	in_scope	new candidate family
+iridoid	iridoid	iridoid	in_scope	new candidate family
+lignan	lignan	lignan	in_scope	new candidate family
+coumarin	coumarin	coumarin	in_scope	new candidate family
+stilbene	stilbene	stilbene	in_scope	new candidate family
+anthraquinone	anthraquinone	anthraquinone	in_scope	new candidate family
+nucleoside_nucleotide	nucleoside_nucleotide	nucleoside_nucleotide	in_scope	new candidate family
+sulfated_metabolite	sulfated_metabolite	sulfated_metabolite	in_scope	new candidate family
+sulfur_metabolite	sulfur_metabolite	sulfur_metabolite	in_scope	synonym set sulfur_metabolite / sulfur_metabolites
+sulfur_metabolites	sulfur_metabolite	sulfur_metabolite	in_scope	plural of sulfur_metabolite
+glutathione_conjugate	glutathione_conjugate	glutathione_conjugate	in_scope	new candidate family
+generic_substructure	generic_substructure	generic	generic	library-frequency substructure priors, not class gates
+general_substructure	generic_substructure	generic	generic	synonym of generic_substructure (stage-2 README)
+generic_substructure_ions	generic_substructure	generic	generic	section-level record of the same substructure priors
+hydroxyl_generic	hydroxyl_generic	generic	generic	statistical H2O-loss prior, not a class gate
+general_heuristic	general_heuristic	generic	generic	general heuristic
+alkaloid_general	alkaloid_general	generic	generic	label used for general alkaloid heuristics; records naming one subclass under it stay generic until relabelled by a reader
+tool_note	tool_note	generic	generic	tool and definition notes
+plant_glycoside_combinatorial	plant_glycoside_combinatorial	generic	generic	PlantMAT enumeration constraints and building blocks (tool parameters)
