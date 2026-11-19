@@ -780,6 +780,25 @@ class ReviewTests(unittest.TestCase):
                 mutate(s)
                 self.assertEqual(s.errors(), [])
 
+    def test_ppm_only_msfinder_tolerance_records_abs_da_zero(self):
+        # The evaluator applies a ppm-only MS-FINDER tolerance as {0, X, msfinder}; a review measured at it says so.
+        pointer = "/review/product_tolerance/abs_da"
+        cases = {
+            "msfinder ppm only": ({"abs_da": 0.0, "ppm": 10.0, "source": "msfinder"}, []),
+            "msfinder Da": ({"abs_da": 0.01, "ppm": 0.0, "source": "msfinder"}, []),
+            "msfinder zero": ({"abs_da": 0.0, "ppm": 0.0, "source": "msfinder"}, [("bad_value", RULE_FILE, pointer)]),
+            "p2 abs_da zero": ({"abs_da": 0.0, "ppm": 10.0, "source": "p2"}, [("bad_value", RULE_FILE, pointer)]),
+            "negative abs_da": ({"abs_da": -0.01, "ppm": 10.0, "source": "msfinder"}, [("bad_value", RULE_FILE, pointer)]),
+            "integer ppm": ({"abs_da": 0.0, "ppm": 10, "source": "msfinder"},
+                            [("bad_value", RULE_FILE, pointer),
+                             ("bad_type", RULE_FILE, "/review/product_tolerance/ppm")]),
+        }
+        for name, (tolerance, errors) in cases.items():
+            with self.subTest(name=name):
+                s = self.reviewed()
+                s.rule["review"]["product_tolerance"] = tolerance
+                self.assertEqual(s.errors(), sorted(errors, key=lambda e: (e[1], e[2], e[0])))
+
     def test_engine_semantics_is_hashed(self):
         s = self.reviewed()
         res = s.load()

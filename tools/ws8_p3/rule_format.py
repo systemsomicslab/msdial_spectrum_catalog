@@ -1111,7 +1111,11 @@ def v_review(c, r, ptr):
     pp = jp(ptr, "product_tolerance")
     if pt is not _MISSING and v_obj(c, pt, pp):
         check_keys(c, pt, pp, ("abs_da", "ppm", "source"))
-        v_float(c, pt.get("abs_da", _MISSING), jp(pp, "abs_da"), positive=True)
+        # A ppm-only MS-FINDER tolerance is {0, X, msfinder} as the evaluator applies it (design 4.4), so a review
+        # measured at it records abs_da 0; every other review tolerance has a positive abs_da.
+        ppm = pt.get("ppm", _MISSING)
+        ppm_only = pt.get("source", _MISSING) == "msfinder" and isinstance(ppm, float) and ppm > 0.0
+        v_float(c, pt.get("abs_da", _MISSING), jp(pp, "abs_da"), positive=not ppm_only)
         v_float(c, pt.get("ppm", _MISSING), jp(pp, "ppm"))
         v_enum(c, pt.get("source", _MISSING), jp(pp, "source"), ("p2", "msfinder"))
     v_float(c, r.get("precursor_tolerance_da", _MISSING), jp(ptr, "precursor_tolerance_da"), positive=True)
