@@ -1,0 +1,6 @@
+# Term-level roles: (source, id, canonical formula) -> role, where the record says it but the tokeniser cannot
+# read it. Record ids, formulas and labels only, no text from papers. role: precursor | not_observed | printed_as;
+# every role keeps the token out of groups. A row whose record is present but has no such formula token stops
+# the run.
+source	id	formula	role	reason
+stage2	s2-p3r125-001	C16H17O9-	precursor	the plural label 'precursors inferred' after the list covers this token too; the value names 353 as the mono-CQA precursor marker

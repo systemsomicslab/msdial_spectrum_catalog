@@ -1,0 +1,11 @@
+# Record-content flags: (source, id regex[, canonical formula]) -> flag. Record ids, formulas, flag names and short
+# notes only: no text from papers and no author names. A flagged record keeps its term rows in terms.tsv, but they
+# stay out of groups (group_exclusion record_flag) until a reader corrects the record; with a formula, only the
+# rows of that token. A row whose formula is not a formula token of a record it matches stops the run.
+# flag: msn_level_misplaced (an ion or loss of a later MSn stage given as MS2) | source_misread (the record
+# misreads its source). The rows are provisional WS0 fixes of 2026-11-19 (Stop A handback, section 6.1
+# 'upstream'), each checked against candidates-20261118/records.tsv and the family source checks of the draft.
+source	id_pattern	formula	flag	note
+stage2	^s2-p3r035-001$	C6H6O2	msn_level_misplaced	the source reports the resorcinol loss only from product ions (MS3), never from the precursor in MS2
+stage3	^s3-p3r175-011$		source_misread	misreads the 40 eV base peak in Table 4 of doi:10.1002/rcm.3560
+stage3	^s3-p3r198-006$		source_misread	the N1 isomer also shows m/z 72 in its direct MS/MS; only the source-CID MS/MS of m/z 275 lacks it (doi:10.1002/hlca.19960790809)
