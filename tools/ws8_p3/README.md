@@ -282,3 +282,130 @@ side of the same codes, and the C# step decides whether they replace or compleme
 
 Tests: `tests/test_ws8_p3_cjson_vectors.py` (stable output under two hash seeds, every error code with a loader
 vector that a fresh load reproduces, and the other sections recomputed).
+
+# WS8 P3: rule-level measurement (`p3_measure.py`)
+
+`p3_measure.py` measures every diagnostic-ion rule of the pinned rule set 0.1.0
+(`af4a7ebf2732b30b9610c7e410ba34f50f176b3fc0155d5a4f9a28fb413ab2eb`) on library spectra with known structures,
+by running the C# console's `diagrules` subcommand and joining its evidence to structure-derived truth. This
+phase runs VS20 only. It reuses P2's pure helpers by import (`p2_diagnostics.py` is not modified) and the
+Python rule-format reference (`rule_format.py`) for rule metadata and hypothesis masses.
+
+Stages (positional), all writing into one run directory:
+
+| Stage | Needs | Does |
+|---|---|---|
+| `prepare` | `--ruleset-dir` | P2's record filters and counters, P1 standardisation, truth motif sets from the shipped 106 motif SMARTS (`tables/motifs.json`), record units, within-source clusters, `prepared.parquet`, and the allowlisted MSP shards `msp/vs20/representatives-NN.msp` with `representatives-index.tsv` |
+| `fire` | `--console` | the synthetic chimeric set (`msp/vs20/chimeric-NN.msp`, `chimeric-index.tsv`), then one console run per shard (all 13 passes) at BelowNormal, at most `--workers` at once, into `fire/vs20/<set>/<shard>/`; every manifest is checked (pinned rule set, input sha256 and record count, the 13 passes) |
+| `measure` | `--ruleset-dir` | joins evidence to truth, counts, intervals, the gate, `fires.parquet` and the aggregates; marks the run complete |
+| `all` | both | prepare, fire, measure |
+| `freeze` | both, `--freeze` | writes the freeze file the VS21 pass must match |
+
+Options: `--out` (run directory), `--sources vs20` (or `vs20,vs21`, see VS21), `--workers` 1..8 (default 8:
+chemistry processes, MSP shards and concurrent console processes), `--limit` (deterministic per-file fraction,
+the 1 % smoke), `--seed` (default 20261118; chimeric partners and bootstrap), `--bootstrap` (default 1000),
+`--detach` (P2's WMI launch, log in `run.log`), `--vs21`, `--freeze`.
+
+Run directories are `<annotation-root>\ws8-p3\p3cs-<yyyymmdd>-<sha>` (beside P2's `ws8-p2`) and
+`p3cssmoke-<yyyymmdd>-<sha>`. A smoke name needs `--limit` and a full name refuses it; `<sha>` must be a prefix of
+the checked-out commit; the tree must be clean and the commit pushed; a completed run is immutable, and later
+stages must use the parameters recorded by the first.
+
+```powershell
+$py = '<annotation-py312>\Scripts\python.exe'   # the RDKit environment P2 uses
+# 1 % smoke, from the pin's root
+& $py -B tools/ws8_p3/p3_measure.py all --sources vs20 --workers 8 --limit 0.01 `
+  --ruleset-dir <MsdialWorkbench>\src\Common\CommonStandard\StructureFinder\DiagnosticRules\RuleSet `
+  --console <MsdialWorkbench>\src\MSFINDER\MsfinderConsoleAppCore\bin\Release\net472\MsfinderConsoleApp.exe `
+  --out <annotation-root>\ws8-p3\p3cssmoke-<yyyymmdd>-<shortsha> --detach
+# full VS20 pass: the same without --limit, into p3cs-<yyyymmdd>-<shortsha>
+```
+
+## Outputs
+
+| File | Content |
+|---|---|
+| `prepared.parquet` | one row per representative: record id, first block, Hill formula, motif ids, cluster id, mode, curated adduct, strata, provenance bucket, peaks (local row file) |
+| `msp/`, `fire/` | the console inputs, index tables (file name, record index, record id) and evidence (local) |
+| `fires.parquet` | one row per (set, level, record, pass, rule) where the rule had a hypothesis: `n_hypotheses`, `fired`, `veto_blocked`, the chosen hypothesis' adduct, `motif_match` |
+| `rules_precision.csv` | per (rule, version, ion mode, pass, source, instrument class, energy bin): universe and conditional counts, records and clusters, precision, Wilson, recall within the precondition, coverage, LR+, prior stress, the conditional stress grid, cluster-bootstrap intervals, and for the base pass the decoy fires and FDR |
+| `rules_competitors.csv` | per rule and competitor motif: conditional competitor records and clusters, fires, FPR |
+| `rules_synthetic.csv` | per rule and chimeric level: fires, TP/FP and precision on the chimeric set |
+| `rules_occupancy.csv` | per rule and precondition mode: both occupancy definitions and `non_conditional` |
+| `rules_precision.json` | label `ws8-p3-class-rules`, criteria, per rule: parameters, status, every criterion with its value, the pooled row of every pass, synthetic, occupancy, competitors, provenance breakdown |
+| `review_proposal-<run-id>.json` | rules with status `pass` (none can pass in this phase) and, separately, `incomplete` rules |
+| `report.md`, `run.json` | summary; code commit, pin path, inputs and sha256, rule-set files (raw and canonical sha256), console path and sha256, parameters, exclusions, P2 parity, file hashes |
+
+Aggregates carry ids only (`rule_id`, `motif_id`); `measure` scans them as P2 does (`audit_aggregates`).
+
+## Status
+
+`not_measured` (outside `measure: true` and `source_checked: true`, or refused by the console); `not_estimable`
+(fewer than 100 fired clusters in the primary pass); `fail` (a measured criterion failed); `incomplete` (every
+criterion this run can measure is met, others pending); `pass` (every pre-registered criterion met). In this
+phase the in-source recast set and the VS21 pass are pending for every rule, so no rule can reach `pass`.
+
+## Decisions where the specification was silent
+
+- **Record unit.** The curated precursor type is the rule set's canonical adduct when its alias table
+  (`tables/adducts.json`, spaces stripped, as the console maps it) knows the spelling; otherwise the stripped
+  spelling. Unmapped records stay in the universe and are counted (`adduct_unmapped_records`); the console skips
+  them in `mz_only_curated`, where their precondition therefore does not hold. Charge >= 2 (the adduct table, or a
+  `]n+`/`]n-` suffix) and the declared in-silico tag are excluded after P2's counters and counted in `p3_exclusions`.
+- **P2 parity.** The P2-named counters are compared with P2's `run.json` `exclusions` for every source of a full
+  run (a mismatch stops the run); a smoke records `not_checked`.
+- **Reader.** P3 carries a copy of P2's `iter_msp` that also reads the allowlisted `COMMENT` and reduces it to a
+  provenance bucket at once; a test checks it yields exactly what P2's reader yields.
+- **Provenance.** `provenance-p3.tsv` declares ordered regexes on `COMMENT`. They are provisional: the author
+  should confirm them against the VS20 COMMENT tokens before the full pass. A present but unmatched field is
+  `other`, an absent one `unknown`; if no record is bucketed the report says `provenance_unavailable`. The
+  in-silico detector is the declared tag only (no exact-mass detector).
+- **Per-source criterion.** It uses the library sources (VS20, VS21), as P2 does. Provenance buckets are reported
+  per rule (`by_provenance`, `provenance_flag` when a bucket with >= 30 fired clusters is below 0.95), not gated.
+- **Primary pass.** A rule's declared `primary_precondition_mode` picks the pass that decides its status:
+  `adduct_ambiguous` is `base`, `mz_only` is `mz_only_curated`. Decoy FDR always comes from the base-pass
+  population, as the decoy passes run without adduct evidence.
+- **Populations.** The universe is every representative of the ion mode; records a pass did not evaluate count as
+  precondition-false (`n_not_evaluated`). The conditional population is the records where the rule has at least
+  one hypothesis (the console's compact result lists exactly those).
+- **Clusters.** A cluster fires when any member fires; truth is uniform within it. The gate's n is fired
+  clusters, and prior stress is P2's `statistics()` on the cluster universe table. With zero false positives the
+  zero-cell correction means prior stress >= 0.90 needs roughly 145 true-positive clusters, more than n >= 100.
+- **Bootstrap.** Conditional-population clusters are resampled (multinomial by conditional binomials) with a
+  seed string per cell; intervals for record- and cluster-level precision, for every stratum of `base` and
+  `mz_only_curated` and the pooled cells of the other passes.
+- **Occupancy.** Axis: the fraction of the nominal-mass span of the rule's hypothesis precursors,
+  `[floor(min), floor(max) + 1)` Da, within the rule's precursor tolerance of a hypothesis (common adducts
+  included for `adduct_ambiguous`, the rule's adducts only for `mz_only`). Records: the fraction of motif-negative
+  representatives of the mode whose precondition holds. Either above 5 % makes a rule `non_conditional`.
+- **Chimeric set.** Every representative gets one seeded partner (same mode, another first block, precursor
+  within +-12.5 Da), used at all three levels; the partner's peaks are scaled so its highest peak is 10, 30 or
+  50 % of the primary's base peak (precursor +-1 Da excluded) and merged; the primary's precursor and adduct are
+  kept. Every record is mixed, so the "motif-negative records first" order does not change the set. A level
+  without fires does not fail the criterion; an empty chimeric set leaves it pending. The console runs all 13
+  passes on the chimeric shards (it has no pass selection); only `base` and `mz_only_curated` are read.
+- **Not evaluable.** A criterion whose value cannot be computed (no fires) is pending, never passed or failed;
+  such a rule is `not_estimable` anyway.
+- **Strata.** Instrument class and energy bin are P2's `instrument_bin` and `energy_bin`, with `all` margins; the
+  console's own instrument class is cross-tabulated in `run.json` and the report.
+- **Console.** `diagrules.ini` sets MS-FINDER's product tolerance to 0.01 Da (every measured rule uses its own
+  `p2` tolerance). Representatives are split into `--workers` contiguous MSP shards; the join key is (shard file,
+  record index) through the index table, and `NAME` carries only the record id. `fires.parquet` has the chosen
+  hypothesis only (compact console results), not one row per hypothesis.
+- **VS21.** `--sources vs20,vs21` runs only with `--vs21` and a freeze file
+  (`ws8-p3\freeze-<yyyymmdd>-<sha>.json`, written by `freeze`) whose sha256 of every RuleSet file, the console and
+  the measurement code (`p3_measure.py`, `rule_format.py`, `p2_diagnostics.py`, `mcs_core.py`,
+  `provenance-p3.tsv`) match. VS21 needs VS20 in the same run (deduplication by first block). Its row files and
+  every aggregate are named `*.local-vs21.*`; counts 1-4 are blanked, and so is every rate whose denominator is
+  below 5 and, in such a row, the likelihood-ratio and stress values; criterion values are dropped from the JSON.
+
+## Not done in this phase
+
+The in-source and adduct recast set (no `insource-p3.tsv` exists; it is a scientific input for the author),
+cross-library VS20/VS21 cluster matching by cosine, the all-spectra weighted sensitivity variant, `as_applied`,
+the MS-FINDER-level measurement, the runtime measurement, conditional mining, the precondition decoy and the
+figures. `report.md` and `rules_precision.json` list them too.
+
+Tests use synthetic spectra, public molecules and hand-built counts only: `tests/test_ws8_p3_measure.py`
+(the console integration test runs when `WS8_P3_CONSOLE` and `WS8_P3_RULESET` point to the console and its
+RuleSet folder).
