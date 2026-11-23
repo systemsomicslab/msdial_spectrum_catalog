@@ -344,12 +344,24 @@ class MeasureTests(unittest.TestCase):
         self.assertEqual(len(other), 1)
 
     def test_decoy_fdr_is_mean_over_shifts(self):
-        res = self.core(sc=scenario(tp_clusters=120, members=1, decoy=6))
+        res = self.core(sc=scenario(tp_clusters=160, members=1, decoy=9))
         r = self.gate_row(res)
-        self.assertEqual(r["decoy_fires_plus_5"], 6)
-        self.assertAlmostEqual(r["decoy_fdr"], 6 / 120)
+        self.assertEqual((r["decoy_fires_plus_5"], r["c_decoy_fires_plus_5"]), (9, 9))
+        self.assertAlmostEqual(r["decoy_fdr"], 9 / 160)
         self.assertEqual(res["gates"]["r1"]["status"], "fail")
         self.assertIn("decoy_fdr", res["gates"]["r1"]["failed"])
+
+    def test_gate_counts_decoy_fires_in_clusters(self):
+        """Regression: the gate reads the cluster-level decoy FDR (PR 908); the record-level value is report-only."""
+        res = self.core(sc=scenario(tp_clusters=160, members=4, decoy=36))  # 36 records = 9 clusters
+        r = self.gate_row(res)
+        self.assertAlmostEqual(r["decoy_fdr"], 36 / 640)
+        self.assertAlmostEqual(r["c_decoy_fdr"], 9 / 160)
+        crit = res["gates"]["r1"]["criteria"]["decoy_fdr"]
+        self.assertEqual((crit["value"], crit["unit"], crit["record_level"]), (r["c_decoy_fdr"], "cluster", r["decoy_fdr"]))
+        res = self.core(sc=scenario(tp_clusters=160, members=4, decoy=28))  # 28 records = 7 clusters: 0.0438
+        self.assertGreater(self.gate_row(res)["decoy_fdr"], 0.0)
+        self.assertNotIn("decoy_fdr", res["gates"]["r1"]["failed"])
 
     def test_gate_not_estimable_below_100_clusters(self):
         res = self.core(sc=scenario(tp_clusters=99, members=3))
@@ -385,6 +397,31 @@ class MeasureTests(unittest.TestCase):
         s = [r for r in res["synthetic"] if r["level"] == 0.3][0]
         self.assertEqual((s["fires"], s["fp"]), (340, 20))
         self.assertIn("synthetic_chimeric", res["gates"]["r1"]["failed"])
+
+    def test_gate_counts_chimeric_precision_in_clusters(self):
+        """Regression: 20 false chimeric fires from one cluster fail record-level precision (report only) but are one
+        cluster against 160 at cluster level, which the gate reads."""
+        truth, by_rule, chim = scenario()
+        negs = [u for u in sorted(truth) if not truth[u]["motifs"]][:20]
+        for u in negs:
+            truth[u]["cluster"] = "n_shared"
+        for lv in m.CHIMERIC_LEVELS:
+            chim["by_rule"][lv]["base"]["r1"] += [((u[0], u[1], lv), True, 1, False, None) for u in negs]
+        res = m.measure_core([rule()], truth, by_rule, {}, ["vs20"], replicates=10, chimeric=chim)
+        srow = [r for r in res["synthetic"] if r["level"] == 0.5][0]
+        self.assertLess(srow["precision"], 0.95)
+        self.assertEqual((srow["c_fires"], srow["c_fp"]), (161, 1))
+        g = res["gates"]["r1"]
+        self.assertNotIn("synthetic_chimeric", g["failed"])
+        self.assertEqual(g["criteria"]["synthetic_chimeric"]["unit"], "cluster")
+
+    def test_chimeric_not_evaluated_per_level(self):
+        """Regression: chimeric records a pass did not evaluate are carried into rules_synthetic.csv."""
+        truth, by_rule, chim = scenario()
+        chim["notev"] = {0.3: {"base": {("vs20", 0, 0.3), ("vs20", 2, 0.3)}}}
+        res = m.measure_core([rule()], truth, by_rule, {}, ["vs20"], replicates=10, chimeric=chim)
+        self.assertEqual({r["level"]: r["n_not_evaluated"] for r in res["synthetic"]}, {0.1: 0, 0.3: 2, 0.5: 0})
+        self.assertIn("n_not_evaluated", m.SYNTHETIC_FIELDS)
 
     def test_empty_chimeric_set_is_pending_not_passed(self):
         truth, by_rule, _ = scenario()
@@ -522,17 +559,132 @@ class OutputTests(unittest.TestCase):
             self.assertTrue(all(".local-vs21." in n for n in names), names)
             rows = m.read_rows(Path(d) / "rules_precision.local-vs21.csv")
             gate = next(r for r in rows if (r["pass_id"], r["instrument"], r["energy"]) == ("base", "all", "all"))
-            self.assertEqual(gate["c_fp"], "")  # 2 fired FP clusters: a cell below 5
+            # 2 fired FP clusters: c_fp is small, and c_fires and c_tp go with it, or c_fires - c_tp gives it back.
+            self.assertEqual((gate["c_fp"], gate["c_fires"], gate["c_tp"], gate["c_precision"], gate["c_wilson_lo"]),
+                             ("", "", "", "", ""))
+            self.assertEqual((gate["fp"], gate["fires"], gate["tp"], gate["precision"]), ("", "", "", ""))
             self.assertEqual(gate["lr_plus"], "")
-            self.assertNotEqual(gate["c_precision"], "")  # its denominator is 162
+            self.assertNotEqual(gate["n_universe"], "")
             doc = json.loads((Path(d) / "rules_precision.local-vs21.json").read_text(encoding="utf-8"))
             self.assertNotIn("value", doc["rules"][0]["criteria"]["cluster_wilson_lo"])
 
     def test_suppress(self):
-        row = dict(rule_id="r", version=1, fires=3, tp=3, fp=0, precision=1.0, n_positive=40, coverage=0.5, lr_plus=4.0)
+        row = dict(rule_id="r", version=1, fires=3, tp=3, fp=0, precision=1.0, n_positive=40, n_universe=900,
+                   coverage=0.5, lr_plus=4.0)
         s = m.suppress(row)
-        self.assertEqual((s["fires"], s["tp"], s["fp"], s["precision"], s["coverage"], s["lr_plus"]), (None, None, 0, None, 0.5, None))
-        self.assertEqual(s["version"], 1)
+        self.assertEqual((s["fires"], s["tp"], s["fp"], s["precision"], s["coverage"], s["lr_plus"]),
+                         (None, None, None, None, 0.5, None))
+        self.assertEqual((s["version"], s["n_universe"], s["n_positive"]), (1, 900, 40))
+
+    def test_suppress_complementary_sets(self):
+        """Regression: no blanked count can be recovered by subtracting the others of its set."""
+        row = dict(rule_id="r", version=1, fires=200, tp=197, fp=3, precision=0.985, c_fires=162, c_tp=160, c_fp=2,
+                   c_precision=0.99, c_wilson_lo=0.96, c_coverage=0.8, n_universe=900, n_positive=4, coverage=0.5,
+                   decoy_fires_plus_5=2, decoy_fires_plus_9=0, decoy_fires_minus_7=0, decoy_fdr=0.003,
+                   c_decoy_fires_plus_5=0, c_decoy_fires_plus_9=0, c_decoy_fires_minus_7=0, c_decoy_fdr=0.0)
+        s = m.suppress(row)
+        for k in ("fires", "tp", "fp", "precision", "c_fires", "c_tp", "c_fp", "c_precision", "c_wilson_lo",
+                  "c_coverage", "n_universe", "n_positive", "coverage", "decoy_fires_plus_5", "decoy_fires_plus_9",
+                  "decoy_fires_minus_7", "decoy_fdr", "c_decoy_fdr"):
+            self.assertIsNone(s[k], k)
+        self.assertEqual(s["c_decoy_fires_plus_5"], 0)
+        occ = m.suppress(dict(rule_id="r", n_positive=3, n_negative=897, n_negative_cond=40, record_occupancy=0.04,
+                              c_positive=60, c_negative=700, c_negative_cond=20, c_record_occupancy=0.03))
+        self.assertEqual((occ["n_positive"], occ["n_negative"], occ["record_occupancy"]), (None, None, None))
+        self.assertEqual((occ["c_negative"], occ["c_record_occupancy"]), (700, 0.03))
+
+    def test_suppress_report_counts(self):
+        d = {"vs21:pos:input": 1000, "vs21:pos:nominal_mass": 3, "vs21:pos:no_peaks": 20, "vs21:x": 0}
+        s = m.suppress_counts(d)
+        self.assertEqual(s, {"vs21:pos:input": 1000, "vs21:pos:nominal_mass": None, "vs21:pos:no_peaks": None, "vs21:x": 0})
+        self.assertEqual(m.suppress_counts({"a": 2, "b": 3, "c": 50}), {"a": None, "b": None, "c": 50})
+
+    def test_vs21_report_suppresses_run_counts(self):
+        with tempfile.TemporaryDirectory() as d:
+            doc = self.outputs(d, local=True)
+            run = dict(prepared=dict(vs21=dict(provenance_unavailable=False)),
+                       exclusions={"vs21:pos:input": 5000, "vs21:pos:nominal_mass": 2},
+                       p3_exclusions={"vs21:bucket:gnps": 4000, "vs21:bucket:riken": 3, "vs21:in_silico_records": 0},
+                       instrument_classes={"QTOF-type -> QTOF-type": 900, "other -> unknown": 1},
+                       chimeric={"vs21": dict(no_partner=4, no_base=0, records=3000)},
+                       fire={"vs21/representatives/r-00": dict(counts={"base": dict(skipped=2, errors=0, skipped_by_reason={"skipped:profile": 2})})})
+            m.write_report(d, doc, run, True)
+            text = (Path(d) / "report.local-vs21.md").read_text(encoding="utf-8")
+            self.assertIn('"vs21:pos:nominal_mass": null', text)
+            self.assertIn('"riken": null', text)
+            self.assertIn('"other -> unknown": null', text)
+            self.assertIn('"no_partner": null', text)
+            self.assertIn('"skipped": null', text)
+            self.assertIn("in-silico detector counts suppressed", text)
+
+    def test_report_lists_skip_counts(self):
+        fire = {"vs20/representatives/r-00": dict(counts={"base": dict(skipped=2, errors=0, skipped_by_reason={"skipped:profile": 2}),
+                                                          "mz_only_curated": dict(skipped=5, errors=0, skipped_by_reason={"skipped:adduct_unmapped": 5})}),
+                "vs20/representatives/r-01": dict(counts={"base": dict(skipped=1, errors=0, skipped_by_reason={"skipped:profile": 1})})}
+        sk = m.skip_counts(fire)
+        self.assertEqual(sk["vs20/representatives/base"], {"errors": 0, "skipped": 3, "skipped:skipped:profile": 3})
+        self.assertEqual(sk["vs20/representatives/mz_only_curated"]["skipped"], 5)
+        with tempfile.TemporaryDirectory() as d:
+            doc = self.outputs(d)
+            m.write_report(d, doc, dict(fire=fire), False)
+            self.assertIn("vs20/representatives/mz_only_curated", (Path(d) / "report.md").read_text(encoding="utf-8"))
+
+
+def shard_dir(d, name="r-00", build="b1", engine="e1", errors=0, records=1, msp=None, local=False):
+    out = Path(d) / name
+    out.mkdir(parents=True, exist_ok=True)
+    passes = {p: dict(evidence=f"Diagrules evidence-{p}-1.jsonl", refusals=[], counts=dict(errors=errors, skipped=0))
+              for p in m.PASSES}
+    for p in m.PASSES:
+        (out / passes[p]["evidence"]).write_text("", encoding="utf-8")
+    manifest = dict(rule_set=dict(sha256=m.EXPECTED_RULESET_SHA256, pinned=True, version=m.EXPECTED_RULESET_VERSION),
+                    local_vs21=local, inputs=[dict(sha256=p2.sha256(msp), records=records)], passes=passes,
+                    build_identity=build, engine_semantics=engine)
+    (out / "Diagrules run-1.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return out
+
+
+class ConsoleIdentityTests(unittest.TestCase):
+    def test_shards_must_agree_and_match_the_freeze(self):
+        with tempfile.TemporaryDirectory() as d:
+            msp = Path(d) / "a.msp"
+            msp.write_text("x", encoding="utf-8")
+            r = {f"vs20/representatives/{i}": m.validate_shard(shard_dir(d, f"s{i}", msp=msp), msp, 1, False) for i in range(2)}
+            self.assertEqual(m.check_shards(r), dict(build_identity="b1", engine_semantics="e1"))
+            self.assertTrue(m.check_shards(r, dict(build_identity="b1", engine_semantics="e1")))
+            with self.assertRaisesRegex(RuntimeError, "freeze"):
+                m.check_shards(r, dict(build_identity="b2", engine_semantics="e1"))
+            r["vs20/chimeric/x"] = m.validate_shard(shard_dir(d, "s9", build="b2", msp=msp), msp, 1, False)
+            with self.assertRaisesRegex(RuntimeError, "disagree"):
+                m.check_shards(r)
+
+    def test_fire_fails_on_record_errors(self):
+        with tempfile.TemporaryDirectory() as d:
+            msp = Path(d) / "a.msp"
+            msp.write_text("x", encoding="utf-8")
+            r = {"vs20/representatives/0": m.validate_shard(shard_dir(d, errors=1, msp=msp), msp, 1, False)}
+            with self.assertRaisesRegex(RuntimeError, "record errors"):
+                m.check_shards(r)
+
+    def test_reuse_refused_when_the_manifest_disagrees(self):
+        with tempfile.TemporaryDirectory() as d:
+            msp = Path(d) / "a.msp"
+            msp.write_text("x", encoding="utf-8")
+            out = shard_dir(d, msp=msp, records=1)
+            self.assertEqual(m.run_console(Path(d) / "missing.exe", msp, Path(d) / "x.ini", out, 1, False), "reused")
+            with self.assertRaisesRegex(RuntimeError, "Refusing to reuse"):
+                m.run_console(Path(d) / "missing.exe", msp, Path(d) / "x.ini", out, 2, False)
+            msp.write_text("y", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "Refusing to reuse"):
+                m.run_console(Path(d) / "missing.exe", msp, Path(d) / "x.ini", out, 1, False)
+
+    def test_console_files_cover_the_bin_folder(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = Path(d) / "bin"
+            (b / "lib" / ".svn").mkdir(parents=True)
+            for name in ("app.exe", "app.exe.config", "lib/x.dll", "lib/.svn/y.dll", "readme.txt"):
+                (b / name).write_bytes(name.encode())
+            self.assertEqual(sorted(m.console_files(b / "app.exe")), ["app.exe", "app.exe.config", "lib/x.dll"])
 
 
 class GuardTests(unittest.TestCase):
@@ -540,28 +692,67 @@ class GuardTests(unittest.TestCase):
         rs = Path(d) / "RuleSet"
         (rs / "rules").mkdir(parents=True)
         (rs / "rules/a.json").write_text("{}", encoding="utf-8")
-        console = Path(d) / "console.exe"
+        (Path(d) / "bin").mkdir()
+        console = Path(d) / "bin" / "console.exe"
         console.write_bytes(b"MZ")
+        (Path(d) / "bin" / "lib.dll").write_bytes(b"dll")
         return rs, console
+
+    def freeze(self, d, rs, console, seed=1, bootstrap=10, name="freeze-20261123-abcdef1.json"):
+        path = Path(d) / name
+        path.write_text(json.dumps(dict(m.freeze_hashes(rs, console, seed, bootstrap),
+                                        console_identity=dict(build_identity="b", engine_semantics="e"))), encoding="utf-8")
+        return path
 
     def test_vs21_refused_without_flag_freeze_or_on_mismatch(self):
         with tempfile.TemporaryDirectory() as d:
             rs, console = self.files(d)
             with self.assertRaises(PermissionError):
-                m.vs21_guard(SimpleNamespace(vs21=False, freeze=None, ruleset_dir=rs, console=console))
+                m.vs21_guard(SimpleNamespace(vs21=False, freeze=None, ruleset_dir=rs, console=console), d)
             with self.assertRaises(PermissionError):
-                m.vs21_guard(SimpleNamespace(vs21=True, freeze=None, ruleset_dir=rs, console=console))
-            freeze = Path(d) / "freeze.json"
-            freeze.write_text(json.dumps(m.freeze_hashes(rs, console)), encoding="utf-8")
-            args = SimpleNamespace(vs21=True, freeze=freeze, ruleset_dir=rs, console=console)
-            self.assertTrue(m.vs21_guard(args))
+                m.vs21_guard(SimpleNamespace(vs21=True, freeze=None, ruleset_dir=rs, console=console), d)
+            freeze = self.freeze(d, rs, console)
+            args = SimpleNamespace(vs21=True, freeze=freeze, ruleset_dir=rs, console=console, seed=1, bootstrap=10)
+            self.assertTrue(m.vs21_guard(args, d))
             (rs / "rules/a.json").write_text('{"x": 1}', encoding="utf-8")
             with self.assertRaisesRegex(PermissionError, "ruleset_files"):
-                m.vs21_guard(args)
+                m.vs21_guard(args, d)
             (rs / "rules/a.json").write_text("{}", encoding="utf-8")
             console.write_bytes(b"MZ2")
             with self.assertRaisesRegex(PermissionError, "console"):
-                m.vs21_guard(args)
+                m.vs21_guard(args, d)
+
+    def test_vs21_freeze_covers_dlls_parameters_and_path(self):
+        """Regression: a changed DLL beside the console, another seed or bootstrap, or a freeze file outside the
+        ws8-p3 root is refused."""
+        with tempfile.TemporaryDirectory() as d:
+            rs, console = self.files(d)
+            freeze = self.freeze(d, rs, console)
+            args = SimpleNamespace(vs21=True, freeze=freeze, ruleset_dir=rs, console=console, seed=1, bootstrap=10)
+            self.assertTrue(m.vs21_guard(args, d))
+            for field, value in (("seed", 2), ("bootstrap", 11)):
+                with self.assertRaisesRegex(PermissionError, "parameters"):
+                    m.vs21_guard(SimpleNamespace(**dict(vars(args), **{field: value})), d)
+            frozen = json.loads(freeze.read_text(encoding="utf-8"))
+            self.assertEqual(frozen["parameters"]["console_ini"], m.CONSOLE_INI)
+            frozen["parameters"]["console_ini"] = "Ms2Tolerance=0.02"
+            freeze.write_text(json.dumps(frozen), encoding="utf-8")
+            with self.assertRaisesRegex(PermissionError, "parameters"):
+                m.vs21_guard(args, d)
+            freeze = self.freeze(d, rs, console)
+            (Path(d) / "bin" / "lib.dll").write_bytes(b"other")
+            with self.assertRaisesRegex(PermissionError, "console_files"):
+                m.vs21_guard(args, d)
+            (Path(d) / "bin" / "lib.dll").write_bytes(b"dll")
+            other = self.freeze(d, rs, console, name="frozen.json")
+            with self.assertRaisesRegex(PermissionError, "freeze-"):
+                m.vs21_guard(SimpleNamespace(**dict(vars(args), freeze=other)), d)
+            frozen = json.loads(freeze.read_text(encoding="utf-8"))
+            del frozen["console_identity"]
+            freeze.write_text(json.dumps(frozen), encoding="utf-8")
+            with self.assertRaisesRegex(PermissionError, "console_identity"):
+                m.vs21_guard(args, d)
+
 
     def test_cli_refuses_vs21_before_touching_anything(self):
         with tempfile.TemporaryDirectory() as d:
@@ -621,6 +812,11 @@ class ConsoleIntegrationTests(unittest.TestCase):
             self.assertEqual(run["prepared"]["vs20"]["representatives"], 5)
             quiet(m.fire, args, run)
             self.assertTrue(all(v["counts"]["base"]["errors"] == 0 for v in run["fire"].values()))
+            self.assertIn("MsfinderConsoleApp.exe", run["console"]["files"])
+            self.assertTrue(any(k.endswith(".dll") for k in run["console"]["files"]))
+            self.assertEqual(m.console_identity(CONSOLE), run["console"]["identity"])
+            self.assertEqual(quiet(m.fire, args, run), None)  # every complete shard validates and is reused
+            self.assertEqual({v["state"] for v in run["fire"].values()}, {"reused"})
             quiet(m.measure, args, run)
             fires = list(p2.parquet_rows(out / "fires.parquet"))
             hit = [f for f in fires if f["rule_id"] == rule_id and f["pass_id"] == "base" and f["set"] == "representatives"]

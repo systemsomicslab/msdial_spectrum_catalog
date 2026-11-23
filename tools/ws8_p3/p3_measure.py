@@ -490,11 +490,23 @@ def write_chimeric(out, source, rows, shards):
                ["file_name", "record_index", "level", "record_id", "partner_record_id"])
 
 
-def run_console(console, msp, ini, outdir):
+def console_files(console):
+    """sha256 of every .exe, .dll and .config in the console's bin folder (recursive, dot folders skipped)."""
+    root = Path(console).resolve().parent
+    return {q.relative_to(root).as_posix(): p2.sha256(q) for q in sorted(root.rglob("*"))
+            if q.is_file() and q.suffix.lower() in (".exe", ".dll", ".config")
+            and not any(part.startswith(".") for part in q.relative_to(root).parts)}
+
+
+def run_console(console, msp, ini, outdir, n_records=None, local_vs21=False):
     """One console run per shard at BelowNormal; a shard folder without a manifest is this run's own partial
-    output and is replaced, a complete one is reused."""
+    output and is replaced. A complete one is reused only when its manifest validates against the shard."""
     outdir = Path(outdir)
     if outdir.exists() and list(outdir.glob("Diagrules run-*.json")):
+        try:
+            validate_shard(outdir, msp, n_records, local_vs21)
+        except RuntimeError as exc:
+            raise RuntimeError(f"Refusing to reuse shard {outdir.name}: {exc}") from None
         return "reused"
     if outdir.exists():
         shutil.rmtree(outdir)
@@ -519,7 +531,7 @@ def validate_shard(outdir, msp, n_records, local_vs21):
         raise RuntimeError("Console rule set is not the pinned 0.1.0 set")
     if bool(m["local_vs21"]) != local_vs21:
         raise RuntimeError("Console local_vs21 marking disagrees with the source")
-    if len(m["inputs"]) != 1 or m["inputs"][0]["sha256"] != p2.sha256(msp) or m["inputs"][0]["records"] != n_records:
+    if len(m["inputs"]) != 1 or m["inputs"][0]["sha256"] != p2.sha256(msp) or             (n_records is not None and m["inputs"][0]["records"] != n_records):
         raise RuntimeError("Console manifest input disagrees with the shard MSP")
     if set(m["passes"]) != set(PASSES):
         raise RuntimeError("Console passes differ from the expected 13")
@@ -530,6 +542,31 @@ def validate_shard(outdir, msp, n_records, local_vs21):
                 build_identity=m["build_identity"],
                 refusals={p: m["passes"][p]["refusals"] for p in PASSES if m["passes"][p]["refusals"]},
                 counts={p: m["passes"][p]["counts"] for p in PASSES})
+
+
+def check_shards(results, frozen_identity=None):
+    """Every shard ran the same console build and engine, without record errors; for VS21 the frozen one."""
+    ids = {(r["build_identity"], r["engine_semantics"]) for r in results.values()}
+    if len(ids) > 1:
+        raise RuntimeError("Shards disagree on the console build identity or engine semantics")
+    if frozen_identity is not None and ids and ids != {(frozen_identity["build_identity"], frozen_identity["engine_semantics"])}:
+        raise RuntimeError("Console build identity or engine semantics differ from the freeze")
+    errors = sorted(f"{k}:{p}" for k, r in results.items() for p, c in r["counts"].items() if c["errors"] > 0)
+    if errors:
+        raise RuntimeError("Console reported record errors in " + ", ".join(errors[:5]))
+    return dict(build_identity=next(iter(ids))[0] if ids else None, engine_semantics=next(iter(ids))[1] if ids else None)
+
+
+def console_identity(console):
+    """build_identity and engine_semantics of the console, from one synthetic record in a temporary folder."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        msp, ini, out = Path(d) / "probe.msp", Path(d) / "probe.ini", Path(d) / "out"
+        write_msp(msp, [dict(record_id=0, precursor=200.1, adduct="[M+H]+", mode="pos", mz=[100.1], intensity=[10.0])])
+        ini.write_text(CONSOLE_INI, encoding="ascii", newline="")
+        run_console(console, msp, ini, out)
+        r = validate_shard(out, msp, 1, False)
+        return dict(build_identity=r["build_identity"], engine_semantics=r["engine_semantics"])
 
 
 def shard_jobs(out, source, kind):
@@ -544,7 +581,8 @@ def fire(args, run):
     ini = args.out / "diagrules.ini"
     if not ini.exists():
         ini.write_text(CONSOLE_INI, encoding="ascii", newline="")
-    run["console"] = dict(path=str(console), sha256=p2.sha256(console), ini_sha256=p2.sha256(ini))
+    run["console"] = dict(path=str(console), sha256=p2.sha256(console), ini_sha256=p2.sha256(ini),
+                          files=console_files(console))
     run["chimeric"] = {}
     jobs = []
     for source in args.sources:
@@ -558,12 +596,16 @@ def fire(args, run):
             jobs += [(source, kind, *j) for j in shard_jobs(args.out, source, kind)]
     results = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futures = {ex.submit(run_console, console, msp, ini, outdir): (source, kind, msp, outdir, n)
+        futures = {ex.submit(run_console, console, msp, ini, outdir, n, source == "vs21"): (source, kind, msp, outdir, n)
                    for source, kind, msp, outdir, n in jobs}
         for fut, (source, kind, msp, outdir, n) in futures.items():
             state = fut.result()
             results[f"{source}/{kind}/{outdir.name}"] = dict(state=state, **validate_shard(outdir, msp, n, source == "vs21"))
     run["fire"] = results
+    frozen = None
+    if any_vs21(args.sources):
+        frozen = json.loads(Path(args.freeze).read_text(encoding="utf-8"))["console_identity"]
+    run["console"]["identity"] = check_shards(results, frozen)
     print("fire", len(results), "shards", flush=True)
 
 
@@ -793,13 +835,18 @@ def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BO
                 row = dict(ids, pass_id=p, precondition_mode=mode_of_pass(p), source=cell[0], instrument=cell[1],
                            energy=cell[2], **cell_row(U[cell], C.get(cell, EMPTY_C), nv.get(cell, 0), replicates, rng))
                 if p == "base":
+                    # Decoy fires inside the base conditional population of the cell, in records and in clusters;
+                    # the gate counts clusters (PR 908), the record-level FDR is report-only.
                     base_uids = C.get(cell, EMPTY_C)["uids"]
-                    fdrs = []
+                    fdrs, cfdrs = [], []
                     for d in DECOY_PASSES:
-                        k = sum(1 for e in by_rule.get(d, {}).get(rid, []) if e[1] and e[0] in base_uids)
-                        row["decoy_fires_" + d[6:]] = k
+                        hits = [e[0] for e in by_rule.get(d, {}).get(rid, []) if e[1] and e[0] in base_uids]
+                        k, ck = len(hits), len({truth[u[:2]]["cluster"] for u in hits})
+                        row["decoy_fires_" + d[6:]], row["c_decoy_fires_" + d[6:]] = k, ck
                         fdrs.append(k / row["fires"] if row["fires"] else None)
+                        cfdrs.append(ck / row["c_fires"] if row["c_fires"] else None)
                     row["decoy_fdr"] = sum(fdrs) / len(fdrs) if row["fires"] else None
+                    row["c_decoy_fdr"] = sum(cfdrs) / len(cfdrs) if row["c_fires"] else None
                 cells[(p,) + cell] = row
                 precision_rows.append(row)
         primary = PRIMARY_PASS[rule["primary_mode"]]
@@ -813,7 +860,8 @@ def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BO
             cneg, cneg_cond = r["c_universe"] - r["c_positive"], r["c_cond"] - r["c_cond_positive"]
             ax = rule["axis"].get(pm) or {}
             orow = dict(ids, precondition_mode=pm, axis_occupancy=ax.get("occupancy"), axis_lo_da=ax.get("lo_da"),
-                        axis_hi_da=ax.get("hi_da"), n_hypotheses=ax.get("n_hypotheses"), n_negative=neg,
+                        axis_hi_da=ax.get("hi_da"), n_hypotheses=ax.get("n_hypotheses"), n_positive=r["n_positive"],
+                        c_positive=r["c_positive"], n_negative=neg,
                         n_negative_cond=neg_cond, record_occupancy=neg_cond / neg if neg else None,
                         c_negative=cneg, c_negative_cond=cneg_cond, c_record_occupancy=cneg_cond / cneg if cneg else None)
             orow["non_conditional"] = any(v is not None and v > CRITERIA["occupancy_max"]
@@ -845,10 +893,15 @@ def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BO
             tp = sum(1 for e in fires if motif in truth[e[0][:2]]["motifs"])
             cf = {truth[e[0][:2]]["cluster"]: motif in truth[e[0][:2]]["motifs"] for e in fires}
             lo, hi = p2.wilson(tp, len(fires))
-            srow = dict(ids, pass_id=primary, level=level, n_universe=len(uni), n_cond=len(ents), fires=len(fires),
-                        tp=tp, fp=len(fires) - tp, precision=tp / len(fires) if fires else None,
+            clo, chi = p2.wilson(sum(cf.values()), len(cf))
+            nv = sum(1 for u in chimeric.get("notev", {}).get(level, {}).get(primary, ()) if truth[u[:2]]["mode"] == mode)
+            # The gate reads the cluster-level precision (PR 908); the record-level values are report-only.
+            srow = dict(ids, pass_id=primary, level=level, n_universe=len(uni), n_not_evaluated=nv, n_cond=len(ents),
+                        fires=len(fires), tp=tp, fp=len(fires) - tp, precision=tp / len(fires) if fires else None,
                         wilson_lo=lo if fires else None, wilson_hi=hi if fires else None, c_fires=len(cf),
-                        c_tp=sum(cf.values()), c_precision=sum(cf.values()) / len(cf) if cf else None)
+                        c_tp=sum(cf.values()), c_fp=len(cf) - sum(cf.values()),
+                        c_precision=sum(cf.values()) / len(cf) if cf else None,
+                        c_wilson_lo=clo if cf else None, c_wilson_hi=chi if cf else None)
             synth[level] = srow
             synthetic_rows.append(srow)
         by_source = {s: cells[(primary, s, "all", "all")] for s in sources} if multi else {sources[0]: gate_row}
@@ -882,7 +935,7 @@ def decide(gate_row, decoy_row, by_source, occ, synth, origin):
         return None if v is None else v >= t
 
     chim_ok = None if any(s is None or s["n_universe"] == 0 for s in synth.values()) else \
-        all(s["precision"] is None or s["precision"] >= K["synthetic_precision"] for s in synth.values())
+        all(s["c_precision"] is None or s["c_precision"] >= K["synthetic_precision"] for s in synth.values())
     crit = {
         "n_clusters": dict(value=n, threshold=K["n_min"], ok=n >= K["n_min"]),
         "cluster_wilson_lo": dict(value=gate_row["c_wilson_lo"], threshold=K["wilson_target"],
@@ -893,11 +946,13 @@ def decide(gate_row, decoy_row, by_source, occ, synth, origin):
                                             for r in by_source.values())),
         "prior_stress": dict(value=gate_row["c_prior_stress"], threshold=K["prior_target"],
                              ok=at_least(gate_row["c_prior_stress"], K["prior_target"])),
-        "decoy_fdr": dict(value=decoy_row["decoy_fdr"], threshold=K["decoy_fdr_max"],
-                          ok=None if decoy_row["decoy_fdr"] is None else decoy_row["decoy_fdr"] <= K["decoy_fdr_max"]),
+        "decoy_fdr": dict(value=decoy_row["c_decoy_fdr"], unit="cluster", record_level=decoy_row["decoy_fdr"],
+                          threshold=K["decoy_fdr_max"],
+                          ok=None if decoy_row["c_decoy_fdr"] is None else decoy_row["c_decoy_fdr"] <= K["decoy_fdr_max"]),
         "occupancy": dict(value=dict(axis=occ["axis_occupancy"], records=occ["record_occupancy"]),
                           threshold=K["occupancy_max"], ok=not occ["non_conditional"]),
-        "synthetic_chimeric": dict(value={str(lv): (s["precision"] if s else None) for lv, s in synth.items()},
+        "synthetic_chimeric": dict(value={str(lv): (s["c_precision"] if s else None) for lv, s in synth.items()},
+                                   unit="cluster", record_level={str(lv): (s["precision"] if s else None) for lv, s in synth.items()},
                                    threshold=K["synthetic_precision"], ok=chim_ok),
         "synthetic_insource": dict(value=None, ok=None, pending="in-source/adduct recast set not built in this phase"),
     }
@@ -933,14 +988,16 @@ PRECISION_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "pr
                    [f"stress_pi_{pi}" for pi in CRITERIA["stress_grid_priors"]] + \
                    [f"stress_cond_prev_x{f}" for f in CRITERIA["stress_grid_prevalence_fractions"]] + \
                    ["boot_lo", "boot_hi", "c_boot_lo", "c_boot_hi", "boot_undefined",
-                    "decoy_fires_plus_5", "decoy_fires_plus_9", "decoy_fires_minus_7", "decoy_fdr"]
+                    "decoy_fires_plus_5", "decoy_fires_plus_9", "decoy_fires_minus_7", "decoy_fdr",
+                    "c_decoy_fires_plus_5", "c_decoy_fires_plus_9", "c_decoy_fires_minus_7", "c_decoy_fdr"]
 COMPETITOR_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "competitor_motif_id",
                      "n_universe_competitor", "n_cond", "fires", "fpr", "fpr_wilson_hi", "c_cond", "c_fires", "c_fpr"]
-SYNTHETIC_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "level", "n_universe", "n_cond",
-                    "fires", "tp", "fp", "precision", "wilson_lo", "wilson_hi", "c_fires", "c_tp", "c_precision"]
+SYNTHETIC_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "level", "n_universe", "n_not_evaluated",
+                    "n_cond", "fires", "tp", "fp", "precision", "wilson_lo", "wilson_hi", "c_fires", "c_tp", "c_fp",
+                    "c_precision", "c_wilson_lo", "c_wilson_hi"]
 OCCUPANCY_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "precondition_mode", "axis_occupancy", "axis_lo_da",
-                    "axis_hi_da", "n_hypotheses", "n_negative", "n_negative_cond", "record_occupancy", "c_negative",
-                    "c_negative_cond", "c_record_occupancy", "non_conditional"]
+                    "axis_hi_da", "n_hypotheses", "n_positive", "n_negative", "n_negative_cond", "record_occupancy",
+                    "c_positive", "c_negative", "c_negative_cond", "c_record_occupancy", "non_conditional"]
 # Rates and the count that is their denominator, for VS21 small-cell suppression.
 RATE_DENOMINATOR = {"precision": "fires", "wilson_lo": "fires", "wilson_hi": "fires", "boot_lo": "fires",
                     "boot_hi": "fires", "decoy_fdr": "fires", "recall_cond": "n_cond_positive",
@@ -954,24 +1011,70 @@ ID_FIELDS = {"rule_id", "version", "ion_mode", "motif_id", "pass_id", "precondit
              "non_conditional"}
 
 
+C_RATES = "every c_* value that is not a count"
+DECOYS = ("plus_5", "plus_9", "minus_7")
+# Complementary sets (counts, rates): one small count blanks the whole set, so no member can be recovered by
+# subtraction from the others (for example c_fp = c_fires - c_tp). A count shared by two sets links them.
+SUPPRESSION_GROUPS = [
+    (("fires", "tp", "fp"), ("precision", "wilson_lo", "wilson_hi", "boot_lo", "boot_hi", "recall_cond",
+                             "recall_universe", "fpr", "fpr_wilson_hi")),
+    (("c_fires", "c_tp", "c_fp"), C_RATES),
+    (("n_universe", "n_positive"), ("coverage", "recall_universe")),
+    (("n_cond", "n_cond_positive"), ("recall_cond", "fpr", "fpr_wilson_hi")),
+    (("c_universe", "c_positive"), C_RATES),
+    (("c_cond", "c_cond_positive"), C_RATES),
+    (tuple("decoy_fires_" + d for d in DECOYS), ("decoy_fdr",)),
+    (tuple("c_decoy_fires_" + d for d in DECOYS), ("c_decoy_fdr",)),
+    (("n_positive", "n_negative", "n_negative_cond"), ("record_occupancy",)),
+    (("c_positive", "c_negative", "c_negative_cond"), C_RATES),
+]
+WHOLE_TABLE = ("lr_", "c_lr_", "prior_stress", "c_prior_stress", "stress_", "c_cond_lr", "c_prevalence", "c_cond_prevalence")
+
+
+def is_count(k, v):
+    return k not in ID_FIELDS and isinstance(v, int) and not isinstance(v, bool)
+
+
 def suppress(row, n_min=CRITERIA["vs21_min_cell"]):
-    """VS21 small cells: a count in 1..n_min-1 is blanked, and so is every rate whose denominator is below n_min.
-    Likelihood ratios and stress values (whole-table functions) are blanked when any count of the row is."""
+    """VS21 small cells: a count in 1..n_min-1 is blanked with every count and rate of its complementary sets
+    (closed over shared counts), every rate whose denominator is below n_min is blanked, and likelihood ratios and
+    stress values (whole-table functions) are blanked when any count of the row is."""
     out = dict(row)
-    small = False
-    for k, v in row.items():
-        if k in ID_FIELDS or isinstance(v, bool) or not isinstance(v, int):
-            continue
-        if 0 < v < n_min:
-            out[k] = None
-            small = True
+    blank = {k for k, v in row.items() if is_count(k, v) and 0 < v < n_min}
+    changed = True
+    while changed:
+        changed = False
+        for counts, rates in SUPPRESSION_GROUPS:
+            present = [k for k in counts if k in row]
+            if present and blank & set(present):
+                members = set(present) | ({k for k in row if k.startswith("c_") and not is_count(k, row[k])}
+                                          if rates is C_RATES else {k for k in rates if k in row})
+                if not members <= blank:
+                    blank |= members
+                    changed = True
+    for k in blank:
+        out[k] = None
     for k, d in RATE_DENOMINATOR.items():
         if k in out and isinstance(row.get(d), int) and row[d] < n_min:
             out[k] = None
-    if small:
+    if any(is_count(k, row[k]) for k in blank):
         for k in out:
-            if k.startswith(("lr_", "c_lr_", "prior_stress", "c_prior_stress", "stress_", "c_cond_lr", "c_prevalence", "c_cond_prevalence")):
+            if k.startswith(WHOLE_TABLE):
                 out[k] = None
+    return out
+
+
+def suppress_counts(d, n_min=CRITERIA["vs21_min_cell"]):
+    """A flat {label: count} for a VS21 report: counts in 1..n_min-1 are blanked; when exactly one is, the next
+    smallest positive count is blanked too, so a total elsewhere cannot give the blanked one back."""
+    out = dict(d)
+    small = [k for k, v in d.items() if is_count(k, v) and 0 < v < n_min]
+    for k in small:
+        out[k] = None
+    if len(small) == 1:
+        rest = sorted((v, k) for k, v in d.items() if is_count(k, v) and v > 0 and k not in small)
+        if rest:
+            out[rest[0][1]] = None
     return out
 
 
@@ -1031,8 +1134,26 @@ def audit_aggregates(out):
     return "pass"
 
 
+def skip_counts(fire_results):
+    """Per (source, set, pass), summed over shards: the console's skipped and error counts and skip reasons."""
+    out = {}
+    for key, shard in sorted(fire_results.items()):
+        source, kind = key.split("/")[:2]
+        for p in PASSES:
+            c = shard["counts"].get(p)
+            if c is None:
+                continue
+            agg = out.setdefault(f"{source}/{kind}/{p}", Counter())
+            agg["skipped"] += c["skipped"]
+            agg["errors"] += c["errors"]
+            for reason, n in c.get("skipped_by_reason", {}).items():
+                agg["skipped:" + reason] += n
+    return {k: dict(sorted(v.items())) for k, v in out.items()}
+
+
 def write_report(out, doc, run, local_vs21):
     sfx = ".local-vs21" if local_vs21 else ""
+    sc = suppress_counts if local_vs21 else (lambda d: dict(d))
 
     def fmt(v):
         return "NA" if v is None else f"{v:.4g}" if isinstance(v, float) else str(v)
@@ -1045,51 +1166,64 @@ def write_report(out, doc, run, local_vs21):
              "while others are pending (the in-source recast set and the VS21 pass are not part of this phase); "
              "`not_measured` is outside measure:true and source_checked:true (or refused by the console).", "",
              "Status counts: " + json.dumps(doc["status_counts"], sort_keys=True), "",
+             "Decoy FDR and chimeric precision are cluster-level, as the gate reads them; the record-level values are "
+             "in rules_precision.csv and rules_synthetic.csv (report only).", "",
              "| Rule | v | Mode | Primary pass | Fired clusters | Cluster precision | Cluster Wilson lower | Prior stress | Decoy FDR | Occupancy axis / records | Chimeric precision 10/30/50 % | Status | Failed | Pending |",
              "|---|---:|---|---|---:|---:|---:|---:|---:|---|---|---|---|---|"]
     for g in doc["rules"]:
         if g["status"] == "not_measured":
             continue
         row = g["passes"][g["gate_pass"]]
-        decoy = g["passes"]["base"]["decoy_fdr"]
+        decoy = g["passes"]["base"]["c_decoy_fdr"]
         occ = next((o for o in g["occupancy"] if o["precondition_mode"] == g["primary_precondition_mode"]), {})
-        chim = "/".join(fmt(s["precision"]) for s in g["synthetic"]) or "NA"
+        chim = "/".join(fmt(s["c_precision"]) for s in g["synthetic"]) or "NA"
         lines.append("| " + " | ".join([g["rule_id"], str(g["version"]), g["ion_mode"], g["gate_pass"], fmt(row["c_fires"]),
                                         fmt(row["c_precision"]), fmt(row["c_wilson_lo"]), fmt(row["c_prior_stress"]),
                                         fmt(decoy), fmt(occ.get("axis_occupancy")) + " / " + fmt(occ.get("record_occupancy")),
                                         chim, g["status"], ",".join(g["failed"]) or "-", ",".join(g["pending"]) or "-"]) + " |")
     not_measured = Counter(g["reason"] for g in doc["rules"] if g["status"] == "not_measured")
     lines += ["", "Not measured: " + json.dumps(dict(sorted(not_measured.items())), sort_keys=True), ""]
-    prov = run.get("p3_exclusions", {})
+    prov = sc(run.get("p3_exclusions", {}))
+    raw_prov = run.get("p3_exclusions", {})
     lines += ["## Circularity control", ""]
     for source, stats in sorted(run.get("prepared", {}).items()):
         buckets = {k.split(":")[-1]: v for k, v in prov.items() if k.startswith(source + ":bucket:")}
-        total = sum(buckets.values())
+        raw_buckets = {k.split(":")[-1]: v for k, v in raw_prov.items() if k.startswith(source + ":bucket:")}
+        total = sum(raw_buckets.values())
         if stats.get("provenance_unavailable"):
             lines.append(f"- {source}: `provenance_unavailable`. No record could be bucketed; no record was excluded on guessed provenance.")
         else:
             lines.append(f"- {source}: provenance buckets (record counts) " + json.dumps(buckets, sort_keys=True) + ".")
-        if total and buckets.get("unknown", 0) / total > 0.5:
+        if total and raw_buckets.get("unknown", 0) / total > 0.5:
             lines.append(f"- {source}: `unknown` exceeds 50 %, so label circularity is uncontrolled here and relies on the external set (P3-Q22).")
-        insil = prov.get(source + ":in_silico_records", 0)
-        lines.append(f"- {source}: the declared in-silico detector removed {insil} records "
-                     f"({insil / (insil + total):.4%} of the eligible records)." if insil + total else f"- {source}: no eligible records.")
+        insil = raw_prov.get(source + ":in_silico_records", 0)
+        shown = prov.get(source + ":in_silico_records", 0)
+        if shown is None or any(v is None for v in buckets.values()):
+            lines.append(f"- {source}: in-silico detector counts suppressed (VS21 cells below 5).")
+        else:
+            lines.append(f"- {source}: the declared in-silico detector removed {insil} records "
+                         f"({insil / (insil + total):.4%} of the eligible records)." if insil + total else f"- {source}: no eligible records.")
     flagged = [g["rule_id"] for g in doc["rules"] if g.get("provenance_flag")]
     lines += ["- Rules with a provenance bucket of >= 30 fired clusters below 0.95 cluster precision (report only): "
               + (", ".join(flagged) if flagged else "none") + ".", "",
               "## Exclusions and checks", "", "P2-named counters (must equal P2's run.json for the same library on a full run):",
-              "", "```json", json.dumps(run.get("exclusions", {}), indent=2, sort_keys=True), "```", "",
+              "", "```json", json.dumps(sc(run.get("exclusions", {})), indent=2, sort_keys=True), "```", "",
               "P2 parity: " + json.dumps(run.get("p2_parity", {}), sort_keys=True), "",
               "P3 exclusions and adduct mapping (records; adduct_unmapped records stay in the universe):", "",
               "```json", json.dumps(prov, indent=2, sort_keys=True), "```", "",
-              "Synthetic chimeric set: " + json.dumps(run.get("chimeric", {}), sort_keys=True), "",
-              "Instrument class, P2 bin -> console class, base pass (record counts): " + json.dumps(run.get("instrument_classes", {}), sort_keys=True), "",
+              "Synthetic chimeric set: " + json.dumps({k: sc(v) for k, v in run.get("chimeric", {}).items()}, sort_keys=True), "",
+              "Instrument class, P2 bin -> console class, base pass (record counts): "
+              + json.dumps(sc(run.get("instrument_classes", {})), sort_keys=True), "",
+              "Console skips and errors per source, set and pass (records, summed over shards; `fire` stops on any error):", "",
+              "```json", json.dumps({k: sc(v) for k, v in skip_counts(run.get("fire", {})).items()}, indent=1, sort_keys=True),
+              "```", "",
               "## Definitions", "",
               "- Universe: every representative of the ion mode; conditional population: representatives where the rule "
               "has at least one hypothesis (the console lists the outcome). Precision is the same in both.",
               "- A cluster fires when any member fires; truth is uniform within a cluster. Cluster-bootstrap intervals "
               f"resample the conditional clusters ({BOOTSTRAP} replicates by default, seeded) and give record- and cluster-level precision.",
-              "- Decoy FDR: base-pass conditional population; mean over +5, +9 and -7 Da of decoy fires / real fires (records).",
+              "- Decoy FDR: base-pass conditional population; mean over +5, +9 and -7 Da of decoy fires / real fires, "
+              "in clusters for the gate and in records (report only).",
               "- Occupancy: (axis) the fraction of the nominal-mass span of the rule's hypothesis precursors within the rule's "
               "precursor tolerance of a hypothesis; (records) the fraction of motif-negative representatives of the mode "
               "whose precondition holds. Either above 5 % makes the rule `non_conditional`.",
@@ -1181,15 +1315,15 @@ def measure(args, run):
         for u in uids:
             chim_universe[u[2]].append(u)
     by_rule, notev, inst = collect(main_ev, versions)
-    chim_by_level = {}
+    chim_by_level, chim_notev = {}, {}
     for level in CHIMERIC_LEVELS:
         sel = [{p: [rec for rec in recs if rec[0][2] == level] for p, recs in ev.items()} for ev in chim_ev]
-        chim_by_level[level] = collect(sel, versions)[0]
+        chim_by_level[level], chim_notev[level], _ = collect(sel, versions)
     refused = sorted({r["rule_id"] for shard in run.get("fire", {}).values() for r in shard.get("refusals", {}).get("base", [])})
     pairs = Counter(f"{truth[u[:2]]['instrument']} -> {c}" for u, c in inst.items())
     run["instrument_classes"] = dict(sorted(pairs.items()))
     result = measure_core(rules, truth, by_rule, notev, args.sources, args.seed, args.bootstrap,
-                          dict(by_rule=chim_by_level, universe=chim_universe), refused)
+                          dict(by_rule=chim_by_level, universe=chim_universe, notev=chim_notev), refused)
     local = any_vs21(args.sources)
     schema = pa.schema([("set", pa.string()), ("level", pa.float64()), ("source", pa.string()), ("record_id", pa.int64()),
                         ("pass_id", pa.string()), ("rule_id", pa.string()), ("n_hypotheses", pa.int64()),
@@ -1207,15 +1341,21 @@ def measure(args, run):
 
 
 # ------------------------------------------------------------------------------------------- VS21 and runs
-def freeze_hashes(ruleset_dir, console):
+FREEZE_KEYS = ("ruleset_sha256_expected", "ruleset_files", "console_sha256", "console_files", "code", "parameters")
+
+
+def freeze_hashes(ruleset_dir, console, seed, bootstrap):
     return dict(ruleset_sha256_expected=EXPECTED_RULESET_SHA256,
                 ruleset_files=ruleset_file_hashes(ruleset_dir), console_sha256=p2.sha256(console),
-                code={p.relative_to(ROOT).as_posix(): p2.sha256(p) for p in CODE_FILES})
+                console_files=console_files(console),
+                code={p.relative_to(ROOT).as_posix(): p2.sha256(p) for p in CODE_FILES},
+                parameters=dict(seed=seed, bootstrap=bootstrap, console_ini=CONSOLE_INI))
 
 
-def vs21_guard(args):
-    """The VS21 path runs only with --vs21 and a freeze file whose hashes match the rule set, the console and the
-    measurement code now. It never opens a VS21 file."""
+def vs21_guard(args, out_root=OUT_ROOT):
+    """The VS21 path runs only with --vs21 and a freeze file (named and placed as `freeze` writes it) whose hashes
+    match the rule set, the console's bin folder, the measurement code and the parameters (seed, bootstrap, console
+    INI) now. It never opens a VS21 file."""
     if not getattr(args, "vs21", False):
         raise PermissionError("VS21 needs the explicit --vs21 flag")
     freeze = getattr(args, "freeze", None)
@@ -1223,9 +1363,15 @@ def vs21_guard(args):
         raise PermissionError("VS21 needs a freeze file (--freeze)")
     if not getattr(args, "ruleset_dir", None) or not getattr(args, "console", None):
         raise PermissionError("VS21 needs --ruleset-dir and --console to check the freeze")
+    try:
+        check_freeze_path(freeze, out_root)
+    except ValueError as exc:
+        raise PermissionError(str(exc)) from None
     frozen = json.loads(Path(freeze).read_text(encoding="utf-8"))
-    now = freeze_hashes(args.ruleset_dir, args.console)
-    diffs = [k for k in ("ruleset_sha256_expected", "ruleset_files", "console_sha256", "code") if frozen.get(k) != now[k]]
+    now = freeze_hashes(args.ruleset_dir, args.console, getattr(args, "seed", None), getattr(args, "bootstrap", None))
+    diffs = [k for k in FREEZE_KEYS if frozen.get(k) != now[k]]
+    if not frozen.get("console_identity"):
+        diffs.append("console_identity")
     if diffs:
         raise PermissionError("Freeze mismatch, VS21 refused: " + ", ".join(diffs))
     return True
@@ -1305,7 +1451,8 @@ def main(argv=None):
         path = check_freeze_path(args.freeze)
         if path.exists():
             parser.error("Freeze file exists; a freeze is never rewritten")
-        p2.write_json(path, dict(label="ws8-p3-freeze", code_commit=commit, **freeze_hashes(args.ruleset_dir, args.console)))
+        p2.write_json(path, dict(label="ws8-p3-freeze", code_commit=commit, console_identity=console_identity(args.console),
+                                 **freeze_hashes(args.ruleset_dir, args.console, args.seed, args.bootstrap)))
         print("freeze written", path.name, flush=True)
         return
     if any_vs21(args.sources):
