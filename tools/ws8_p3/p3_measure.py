@@ -5,6 +5,7 @@ representatives and on the synthetic chimeric set), measure (join, counts, inter
 and freeze (the hashes the VS21 pass must match). Optional chemistry (RDKit, pyarrow) stays outside src/.
 """
 import argparse
+from fractions import Fraction
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import csv
@@ -50,6 +51,15 @@ PASSES = ("base", "tol_product_0.003", "tol_product_0.01", "floor_x0.5", "floor_
           "loss_ref_hypothesis", "loss_ref_observed", "decoy_plus_5", "decoy_plus_9", "decoy_minus_7",
           "tol_precursor_0.005", "mz_only_curated")
 DECOY_PASSES = ("decoy_plus_5", "decoy_plus_9", "decoy_minus_7")
+
+
+def decoy_fdr_within(decoy_fires, real_fires, limit):
+    """The mean over the shifts of decoy fires / real fires is at most ``limit``, decided exactly.
+
+    A float mean of three ratios can land a hair above a bound it meets exactly (6/120 = 0.05), so the
+    comparison is made on rationals: sum(decoy) <= limit * n_shifts * real.
+    """
+    return Fraction(sum(decoy_fires)) <= Fraction(str(limit)) * len(decoy_fires) * real_fires
 PRIMARY_PASS = {"adduct_ambiguous": "base", "mz_only": "mz_only_curated"}
 FULL_STRATA_PASSES = ("base", "mz_only_curated")
 CHIMERIC_LEVELS = (0.1, 0.3, 0.5)
@@ -948,7 +958,9 @@ def decide(gate_row, decoy_row, by_source, occ, synth, origin):
                              ok=at_least(gate_row["c_prior_stress"], K["prior_target"])),
         "decoy_fdr": dict(value=decoy_row["c_decoy_fdr"], unit="cluster", record_level=decoy_row["decoy_fdr"],
                           threshold=K["decoy_fdr_max"],
-                          ok=None if decoy_row["c_decoy_fdr"] is None else decoy_row["c_decoy_fdr"] <= K["decoy_fdr_max"]),
+                          ok=None if decoy_row["c_decoy_fdr"] is None else decoy_fdr_within(
+                              [decoy_row["c_decoy_fires_" + d[6:]] for d in DECOY_PASSES], decoy_row["c_fires"],
+                              K["decoy_fdr_max"])),
         "occupancy": dict(value=dict(axis=occ["axis_occupancy"], records=occ["record_occupancy"]),
                           threshold=K["occupancy_max"], ok=not occ["non_conditional"]),
         "synthetic_chimeric": dict(value={str(lv): (s["c_precision"] if s else None) for lv, s in synth.items()},

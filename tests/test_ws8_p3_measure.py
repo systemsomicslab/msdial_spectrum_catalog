@@ -351,6 +351,13 @@ class MeasureTests(unittest.TestCase):
         self.assertEqual(res["gates"]["r1"]["status"], "fail")
         self.assertIn("decoy_fdr", res["gates"]["r1"]["failed"])
 
+    def test_decoy_fdr_exactly_at_the_bound_meets_it(self):
+        """Regression: 6/120 per shift is exactly 0.05, which the bound allows; a float mean must not fail it."""
+        self.assertTrue(m.decoy_fdr_within([6, 6, 6], 120, 0.05))
+        self.assertTrue(m.decoy_fdr_within([5, 6, 7], 120, 0.05))
+        self.assertFalse(m.decoy_fdr_within([6, 6, 7], 120, 0.05))
+        self.assertTrue(m.decoy_fdr_within([0, 0, 0], 1, 0.05))
+
     def test_gate_counts_decoy_fires_in_clusters(self):
         """Regression: the gate reads the cluster-level decoy FDR (PR 908); the record-level value is report-only."""
         res = self.core(sc=scenario(tp_clusters=160, members=4, decoy=36))  # 36 records = 9 clusters
