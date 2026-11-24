@@ -41,6 +41,9 @@ EXPECTED_RULESET_VERSION = "0.1.0"
 VS21 = [("pos", "MSMS-Private-pos-VS21.msp", "0fa0a96bdf1ebbd86349883cb96bb1ff9e327eb6ba7650ee3434056aacb4804f"),
         ("neg", "MSMS-Private-neg-VS21.msp", "7e2581ab31461b5a9102158a6eaf73d0a1702b8564dd75a9281c9b86dc4d132f")]
 PROVENANCE_TABLE = HERE / "provenance-p3.tsv"
+INSOURCE_TABLE = HERE / "insource-p3.tsv"
+INSOURCE_MARGIN_DA = 0.01
+INSOURCE_CAP = 500_000
 PROVENANCE_FIELDS = ("comment",)
 PROVENANCE_BUCKETS = ("massbank", "gnps", "mona", "respect", "riken", "other", "unknown")
 CODE_FILES = (HERE / "p3_measure.py", HERE / "rule_format.py", ROOT / "tools/ws8_p2/p2_diagnostics.py",
@@ -76,7 +79,6 @@ CONSOLE_INI = "MassToleranceType=Da\r\nMs2Tolerance=0.01\r\nIsTmsMeoxDerivative=
 BELOW_NORMAL, NO_WINDOW = 0x4000, 0x08000000
 FORBIDDEN_COLUMN = r"(^|_)(key|first.?block|smiles|name)($|_)"
 NOT_DONE = [
-    "in-source and adduct recast synthetic set (no insource-p3.tsv exists; it is a scientific input for the author)",
     "cross-library VS20/VS21 cluster matching by spectral cosine >= 0.9 and precursor within 0.01 Da",
     "all-spectra sensitivity variant weighted 1/(spectra per compound) (only representatives are fired)",
     "as_applied precision with conflict suppression and nesting (needs the passing rules first)",
@@ -500,6 +502,118 @@ def write_chimeric(out, source, rows, shards):
                ["file_name", "record_index", "level", "record_id", "partner_record_id"])
 
 
+def load_elements(ruleset_dir):
+    """The rule set's element masses (tables/elements.json), as rule_format reads them."""
+    errors = []
+    el = rf.load_elements(rf.Ctx(errors, "tables/elements.json"),
+                          rf.load_strict((Path(ruleset_dir) / "tables/elements.json").read_bytes()))
+    if errors or el is None:
+        raise RuntimeError("tables/elements.json does not load")
+    return el
+
+
+def load_insource(path, motif_ids, adducts, elements):
+    """insource-p3.tsv rows: parent_motif (a shipped motif id or *), parent_adduct, change (a neutral loss with a
+    leading minus), product_adduct, source, note. The row number in file order is the transformation id."""
+    by_name = {row["adduct"]: row for row in adducts}
+    aliases = alias_map(adducts)
+    out = []
+    for i, r in enumerate(read_rows(path)):
+        if r["parent_motif"] != "*" and r["parent_motif"] not in motif_ids:
+            raise ValueError(f"insource row {i}: unknown motif {r['parent_motif']}")
+        parent = aliases.get(r["parent_adduct"].replace(" ", ""))
+        if parent is None:
+            raise ValueError(f"insource row {i}: parent adduct not in the adduct table")
+        if not r["change"].startswith("-"):
+            raise ValueError(f"insource row {i}: change must be a neutral loss with a leading minus")
+        # The table writes losses as chemists do (NH3, SO3, H3PO4), not in Hill order: any order, each symbol once,
+        # every element in the rule set's element table.
+        text = r["change"][1:]
+        symbols = re.findall(r"[A-Z][a-z]?", text)
+        try:
+            change = p2.formula_counts(text)
+        except ValueError:
+            raise ValueError(f"insource row {i}: bad change formula") from None
+        if len(set(symbols)) != len(symbols) or any(e not in elements.pda for e in change) or not change:
+            raise ValueError(f"insource row {i}: change formula repeats a symbol or has an element outside the table")
+        product = aliases.get(r["product_adduct"].replace(" ", ""))
+        if product is not None and (product[1] > 0) != (parent[1] > 0):
+            raise ValueError(f"insource row {i}: product and parent adducts differ in polarity")
+        row = by_name[parent[0]]
+        out.append(dict(row=i, parent_motif=r["parent_motif"], parent_adduct=parent[0], mode="pos" if parent[1] > 0 else "neg",
+                        multiplier=int(row["multiplier"]), add=p2.formula_counts(row["add"]) if row["add"] else {},
+                        remove=p2.formula_counts(row["remove"]) if row["remove"] else {}, change=change,
+                        change_text=r["change"], change_pda=elements.mass_pda(change),
+                        product_adduct=product[0] if product else r["product_adduct"].replace(" ", ""),
+                        product_mapped=product is not None))
+    return out
+
+
+def ion_contains(formula, t):
+    """The parent's precursor ion (truth formula x multiplier, plus the adduct's added atoms, minus its removed ones)
+    holds every atom of the loss. Bookkeeping only: the truth formula never reaches the console."""
+    try:
+        m = p2.formula_counts(formula)
+    except ValueError:
+        return False
+    ion = Counter({e: n * t["multiplier"] for e, n in m.items()})
+    ion.update(t["add"])
+    ion.subtract(t["remove"])
+    return all(ion[e] >= n for e, n in t["change"].items())
+
+
+def build_insource(reps, rows, seed, source="vs20", margin=INSOURCE_MARGIN_DA, cap=INSOURCE_CAP):
+    """In-source and adduct recasts (proposal, library-to-campaign gap): every representative with the row's curated
+    parent adduct, ion mode and (unless *) motif, whose precursor ion holds the loss, is recast to the product's
+    precursor m/z = observed precursor - exact loss mass. Peaks above it + margin are dropped, peaks within the margin
+    of it are replaced by one precursor peak at the base-peak intensity of the kept peaks. The product's own MS/MS is
+    not in the library, so this approximates it. Truth stays the parent's."""
+    out, stats = [], {t["row"]: Counter() for t in rows}
+    pda = rf.PDA_PER_DA
+    for r in sorted(reps, key=lambda r: r["record_id"]):
+        for t in rows:
+            if r["mode"] != t["mode"] or r["adduct"] != t["parent_adduct"]:
+                continue
+            if t["parent_motif"] != "*" and t["parent_motif"] not in r["motifs"]:
+                continue
+            st = stats[t["row"]]
+            if not ion_contains(r["formula"], t):
+                st["atoms_missing"] += 1
+                continue
+            new = r["precursor"] - t["change_pda"] / pda
+            kept = [(m, i) for m, i in zip(r["mz"], r["intensity"]) if m <= new + margin and abs(m - new) > margin]
+            if not kept or new <= 0:
+                st["no_peaks_left"] += 1
+                continue
+            peaks = sorted(kept + [(new, max(i for _, i in kept))])
+            st["records"] += 1
+            if not t["product_mapped"]:
+                st["adduct_unmapped"] += 1
+            out.append(dict(record_id=r["record_id"], row=t["row"], mode=r["mode"], precursor=new, adduct=t["product_adduct"],
+                            instrument_type=r.get("instrument_type", ""), collision_energy=r.get("collision_energy", ""),
+                            mz=[q[0] for q in peaks], intensity=[q[1] for q in peaks]))
+    total = len(out)
+    if total > cap:
+        keep = set(random.Random(f"{seed}|insource|{source}").sample(range(total), cap))
+        out = [x for i, x in enumerate(out) if i in keep]
+    summary = dict(records=len(out), before_cap=total, capped=total > cap, cap=cap, margin_da=margin,
+                   by_row={str(k): dict(sorted(v.items())) for k, v in sorted(stats.items())})
+    return out, summary
+
+
+def write_insource(out, source, rows, shards):
+    msp_dir = Path(out) / "msp" / source
+    msp_dir.mkdir(parents=True, exist_ok=True)
+    rows = sorted(rows, key=lambda r: (r["row"], r["record_id"]))
+    index = []
+    for s_, (lo, hi) in enumerate(shard_blocks(len(rows), shards)):
+        name = f"insource-{s_:02d}{suffix(source)}.msp"
+        for i, r in enumerate(rows[lo:hi]):
+            index.append(dict(file_name=name, record_index=i, row=r["row"], record_id=r["record_id"]))
+        write_msp(msp_dir / name, rows[lo:hi])
+    write_rows(msp_dir / f"insource-index{suffix(source)}.tsv", index, ["file_name", "record_index", "row", "record_id"])
+
+
 def console_files(console):
     """sha256 of every .exe, .dll and .config in the console's bin folder (recursive, dot folders skipped)."""
     root = Path(console).resolve().parent
@@ -593,7 +707,11 @@ def fire(args, run):
         ini.write_text(CONSOLE_INI, encoding="ascii", newline="")
     run["console"] = dict(path=str(console), sha256=p2.sha256(console), ini_sha256=p2.sha256(ini),
                           files=console_files(console))
-    run["chimeric"] = {}
+    run["chimeric"], run["insource"] = {}, {}
+    motif_rows, adducts = read_ruleset_tables(args.ruleset_dir)
+    transforms = load_insource(INSOURCE_TABLE, {r["motif_id"] for r in motif_rows}, adducts, load_elements(args.ruleset_dir))
+    run["inputs"] = [x for x in run.get("inputs", []) if x["name"] != INSOURCE_TABLE.name] + \
+        [dict(name=INSOURCE_TABLE.name, sha256=p2.sha256(INSOURCE_TABLE))]
     jobs = []
     for source in args.sources:
         if source == "vs21":
@@ -602,7 +720,10 @@ def fire(args, run):
         rows, stats = build_chimeric(reps, args.seed, source=source)
         write_chimeric(args.out, source, rows, args.workers)
         run["chimeric"][source] = stats
-        for kind in ("representatives", "chimeric"):
+        rows, stats = build_insource(reps, transforms, args.seed, source)
+        write_insource(args.out, source, rows, args.workers)
+        run["insource"][source] = stats
+        for kind in ("representatives", "chimeric", "insource"):
             jobs += [(source, kind, *j) for j in shard_jobs(args.out, source, kind)]
     results = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
@@ -811,11 +932,28 @@ def mode_of_pass(p):
     return "mz_only" if p == "mz_only_curated" else "adduct_ambiguous"
 
 
-def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BOOTSTRAP, chimeric=None, refused=()):
+def synth_row(ids, primary, ents, uni, nv, truth, motif, **labels):
+    """One synthetic row: by the primary (parent) record's truth, in records (report only) and clusters (gated)."""
+    fires = [e for e in ents if e[1]]
+    tp = sum(1 for e in fires if motif in truth[e[0][:2]]["motifs"])
+    cf = {truth[e[0][:2]]["cluster"]: motif in truth[e[0][:2]]["motifs"] for e in fires}
+    lo, hi = p2.wilson(tp, len(fires))
+    clo, chi = p2.wilson(sum(cf.values()), len(cf))
+    return dict(ids, pass_id=primary, **labels, n_universe=len(uni), n_not_evaluated=nv, n_cond=len(ents),
+                fires=len(fires), tp=tp, fp=len(fires) - tp, precision=tp / len(fires) if fires else None,
+                wilson_lo=lo if fires else None, wilson_hi=hi if fires else None, c_fires=len(cf),
+                c_tp=sum(cf.values()), c_fp=len(cf) - sum(cf.values()),
+                c_precision=sum(cf.values()) / len(cf) if cf else None,
+                c_wilson_lo=clo if cf else None, c_wilson_hi=chi if cf else None)
+
+
+def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BOOTSTRAP, chimeric=None, refused=(),
+                 insource=None):
     """Pure measurement. rules: dicts (rule_id, version, ion_mode, motif_id, competitors, measure, source_checked,
     primary_mode, origin, axis{precondition mode: axis_occupancy()}). truth: {(source, record_id): dict(mode,
     motifs, cluster, instrument, energy, bucket, source)}. by_rule[pass][rule_id] = [(uid, fired, ...)] for the
-    representatives; chimeric = dict(by_rule={level: by_rule}, universe={level: [uids]}, stats)."""
+    representatives; chimeric = dict(by_rule={level: by_rule}, universe={level: [uids]}, notev={level: notev});
+    insource = dict(by_rule={row: by_rule}, universe={row: [uids]}, notev={row: notev}, rows=load_insource())."""
     multi = len(sources) > 1
     truth_by_mode = defaultdict(list)
     for uid in sorted(truth):
@@ -899,21 +1037,32 @@ def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BO
                 continue
             ents = chimeric["by_rule"].get(level, {}).get(primary, {}).get(rid, [])
             uni = [u for u in chimeric["universe"].get(level, ()) if truth[u[:2]]["mode"] == mode]
-            fires = [e for e in ents if e[1]]
-            tp = sum(1 for e in fires if motif in truth[e[0][:2]]["motifs"])
-            cf = {truth[e[0][:2]]["cluster"]: motif in truth[e[0][:2]]["motifs"] for e in fires}
-            lo, hi = p2.wilson(tp, len(fires))
-            clo, chi = p2.wilson(sum(cf.values()), len(cf))
             nv = sum(1 for u in chimeric.get("notev", {}).get(level, {}).get(primary, ()) if truth[u[:2]]["mode"] == mode)
             # The gate reads the cluster-level precision (PR 908); the record-level values are report-only.
-            srow = dict(ids, pass_id=primary, level=level, n_universe=len(uni), n_not_evaluated=nv, n_cond=len(ents),
-                        fires=len(fires), tp=tp, fp=len(fires) - tp, precision=tp / len(fires) if fires else None,
-                        wilson_lo=lo if fires else None, wilson_hi=hi if fires else None, c_fires=len(cf),
-                        c_tp=sum(cf.values()), c_fp=len(cf) - sum(cf.values()),
-                        c_precision=sum(cf.values()) / len(cf) if cf else None,
-                        c_wilson_lo=clo if cf else None, c_wilson_hi=chi if cf else None)
+            srow = synth_row(ids, primary, ents, uni, nv, truth, motif, set="chimeric", level=level, transform=None,
+                             change=None, product_adduct=None)
             synth[level] = srow
             synthetic_rows.append(srow)
+        # In-source and adduct recasts, primary pass, by the parent's truth: per transformation row and pooled ("all",
+        # which the gate reads; a parent cluster fires when any of its recasts fires).
+        ins_all = None
+        if insource is not None:
+            pooled_ents, pooled_uni, pooled_nv = [], [], 0
+            for t in insource["rows"]:
+                if t["mode"] != mode:
+                    continue
+                k = t["row"]
+                ents = insource["by_rule"].get(k, {}).get(primary, {}).get(rid, [])
+                uni = list(insource["universe"].get(k, ()))
+                nv = len(insource.get("notev", {}).get(k, {}).get(primary, ()))
+                pooled_ents += ents
+                pooled_uni += uni
+                pooled_nv += nv
+                synthetic_rows.append(synth_row(ids, primary, ents, uni, nv, truth, motif, set="insource", level=None,
+                                                transform=k, change=t["change_text"], product_adduct=t["product_adduct"]))
+            ins_all = synth_row(ids, primary, pooled_ents, pooled_uni, pooled_nv, truth, motif, set="insource", level=None,
+                                transform="all", change=None, product_adduct=None)
+            synthetic_rows.append(ins_all)
         by_source = {s: cells[(primary, s, "all", "all")] for s in sources} if multi else {sources[0]: gate_row}
         by_prov = {}
         prov_c = conditional(entries, truth, motif, multi, cell_fn=lambda rec: [rec["bucket"]])
@@ -924,7 +1073,7 @@ def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BO
                               c_fires=len(c["fired"]), c_tp=c_tp,
                               c_precision=c_tp / len(c["fired"]) if c["fired"] else None)
         gates[rid] = dict(ids, origin=rule["origin"], primary_precondition_mode=rule["primary_mode"], gate_pass=primary,
-                          **decide(gate_row, decoy_row, by_source, occ[rule["primary_mode"]], synth, rule["origin"]),
+                          **decide(gate_row, decoy_row, by_source, occ[rule["primary_mode"]], synth, rule["origin"], ins_all),
                           by_provenance=by_prov,
                           provenance_flag=any(v["c_fires"] >= CRITERIA["source_n_min"] and v["c_precision"] < CRITERIA["source_precision"]
                                               for v in by_prov.values()))
@@ -936,7 +1085,7 @@ def truth_cluster_positive(cluster, U):
     return cluster in U[("pooled", "all", "all")]["pcl"]
 
 
-def decide(gate_row, decoy_row, by_source, occ, synth, origin):
+def decide(gate_row, decoy_row, by_source, occ, synth, origin, insource=None):
     """The pre-registered gate on the primary-mode pooled cell, counting clusters."""
     K = CRITERIA
     n = gate_row["c_fires"]
@@ -966,7 +1115,11 @@ def decide(gate_row, decoy_row, by_source, occ, synth, origin):
         "synthetic_chimeric": dict(value={str(lv): (s["c_precision"] if s else None) for lv, s in synth.items()},
                                    unit="cluster", record_level={str(lv): (s["precision"] if s else None) for lv, s in synth.items()},
                                    threshold=K["synthetic_precision"], ok=chim_ok),
-        "synthetic_insource": dict(value=None, ok=None, pending="in-source/adduct recast set not built in this phase"),
+        "synthetic_insource": dict(
+            value=insource["c_precision"] if insource else None, unit="cluster",
+            record_level=insource["precision"] if insource else None, threshold=K["synthetic_precision"],
+            ok=None if not insource or insource["n_universe"] == 0 else
+            insource["c_precision"] is None or insource["c_precision"] >= K["synthetic_precision"]),
     }
     if origin == "tuned_vs20":
         crit["heldout"] = dict(ok=None, pending="tuned_vs20: must also pass on VS21 alone")
@@ -976,6 +1129,9 @@ def decide(gate_row, decoy_row, by_source, occ, synth, origin):
         crit["heldout"] = dict(ok=None, pending="as_published: the gate is on VS20 and VS21 pooled")
     if crit["synthetic_chimeric"]["ok"] is None:
         crit["synthetic_chimeric"]["pending"] = "chimeric set not measured"
+    if crit["synthetic_insource"]["ok"] is None:
+        crit["synthetic_insource"]["pending"] = "no in-source recast records in this ion mode" if insource else \
+            "in-source recast set not measured"
     if not crit["n_clusters"]["ok"]:
         status = "not_estimable"
     elif any(c["ok"] is False for c in crit.values()):
@@ -1004,7 +1160,8 @@ PRECISION_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "pr
                     "c_decoy_fires_plus_5", "c_decoy_fires_plus_9", "c_decoy_fires_minus_7", "c_decoy_fdr"]
 COMPETITOR_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "competitor_motif_id",
                      "n_universe_competitor", "n_cond", "fires", "fpr", "fpr_wilson_hi", "c_cond", "c_fires", "c_fpr"]
-SYNTHETIC_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "level", "n_universe", "n_not_evaluated",
+SYNTHETIC_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "set", "level", "transform", "change",
+                    "product_adduct", "n_universe", "n_not_evaluated",
                     "n_cond", "fires", "tp", "fp", "precision", "wilson_lo", "wilson_hi", "c_fires", "c_tp", "c_fp",
                     "c_precision", "c_wilson_lo", "c_wilson_hi"]
 OCCUPANCY_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "precondition_mode", "axis_occupancy", "axis_lo_da",
@@ -1019,7 +1176,7 @@ RATE_DENOMINATOR = {"precision": "fires", "wilson_lo": "fires", "wilson_hi": "fi
                     "fpr_wilson_hi": "n_cond", "c_fpr": "c_cond", "record_occupancy": "n_negative",
                     "c_record_occupancy": "c_negative"}
 ID_FIELDS = {"rule_id", "version", "ion_mode", "motif_id", "pass_id", "precondition_mode", "source", "instrument",
-             "energy", "competitor_motif_id", "level", "axis_lo_da", "axis_hi_da", "n_hypotheses", "axis_occupancy",
+             "energy", "competitor_motif_id", "level", "transform", "axis_lo_da", "axis_hi_da", "n_hypotheses", "axis_occupancy",
              "non_conditional"}
 
 
@@ -1180,19 +1337,20 @@ def write_report(out, doc, run, local_vs21):
              "Status counts: " + json.dumps(doc["status_counts"], sort_keys=True), "",
              "Decoy FDR and chimeric precision are cluster-level, as the gate reads them; the record-level values are "
              "in rules_precision.csv and rules_synthetic.csv (report only).", "",
-             "| Rule | v | Mode | Primary pass | Fired clusters | Cluster precision | Cluster Wilson lower | Prior stress | Decoy FDR | Occupancy axis / records | Chimeric precision 10/30/50 % | Status | Failed | Pending |",
-             "|---|---:|---|---|---:|---:|---:|---:|---:|---|---|---|---|---|"]
+             "| Rule | v | Mode | Primary pass | Fired clusters | Cluster precision | Cluster Wilson lower | Prior stress | Decoy FDR | Occupancy axis / records | Chimeric precision 10/30/50 % | In-source precision | Status | Failed | Pending |",
+             "|---|---:|---|---|---:|---:|---:|---:|---:|---|---|---:|---|---|---|"]
     for g in doc["rules"]:
         if g["status"] == "not_measured":
             continue
         row = g["passes"][g["gate_pass"]]
         decoy = g["passes"]["base"]["c_decoy_fdr"]
         occ = next((o for o in g["occupancy"] if o["precondition_mode"] == g["primary_precondition_mode"]), {})
-        chim = "/".join(fmt(s["c_precision"]) for s in g["synthetic"]) or "NA"
+        chim = "/".join(fmt(s["c_precision"]) for s in g["synthetic"] if s["set"] == "chimeric") or "NA"
+        ins = next((fmt(s["c_precision"]) for s in g["synthetic"] if s["set"] == "insource" and s["transform"] == "all"), "NA")
         lines.append("| " + " | ".join([g["rule_id"], str(g["version"]), g["ion_mode"], g["gate_pass"], fmt(row["c_fires"]),
                                         fmt(row["c_precision"]), fmt(row["c_wilson_lo"]), fmt(row["c_prior_stress"]),
                                         fmt(decoy), fmt(occ.get("axis_occupancy")) + " / " + fmt(occ.get("record_occupancy")),
-                                        chim, g["status"], ",".join(g["failed"]) or "-", ",".join(g["pending"]) or "-"]) + " |")
+                                        chim, ins, g["status"], ",".join(g["failed"]) or "-", ",".join(g["pending"]) or "-"]) + " |")
     not_measured = Counter(g["reason"] for g in doc["rules"] if g["status"] == "not_measured")
     lines += ["", "Not measured: " + json.dumps(dict(sorted(not_measured.items())), sort_keys=True), ""]
     prov = sc(run.get("p3_exclusions", {}))
@@ -1224,6 +1382,10 @@ def write_report(out, doc, run, local_vs21):
               "P3 exclusions and adduct mapping (records; adduct_unmapped records stay in the universe):", "",
               "```json", json.dumps(prov, indent=2, sort_keys=True), "```", "",
               "Synthetic chimeric set: " + json.dumps({k: sc(v) for k, v in run.get("chimeric", {}).items()}, sort_keys=True), "",
+              "In-source and adduct recast set (records per transformation row of insource-p3.tsv; `atoms_missing` rows "
+              "failed the atom check, `adduct_unmapped` records carry a product type the console's alias table lacks):", "",
+              "```json", json.dumps({k: dict(v, by_row={r: sc(c) for r, c in v.get("by_row", {}).items()})
+                                     for k, v in run.get("insource", {}).items()}, indent=1, sort_keys=True), "```", "",
               "Instrument class, P2 bin -> console class, base pass (record counts): "
               + json.dumps(sc(run.get("instrument_classes", {})), sort_keys=True), "",
               "Console skips and errors per source, set and pass (records, summed over shards; `fire` stops on any error):", "",
@@ -1242,6 +1404,8 @@ def write_report(out, doc, run, local_vs21):
               "- Prior stress: P2's statistics() on the cluster universe table (library-wide prevalence of the mode, halved, "
               "LR+ lower bound). The conditional stress grid is report-only.",
               "- Per-source precision uses library sources (VS20, VS21); provenance buckets are reported only.",
+              f"- In-source recasts approximate the product's own MS/MS, which the library does not hold: the parent spectrum "
+              f"cut at the product precursor m/z + {INSOURCE_MARGIN_DA} Da with a precursor peak added. Truth stays the parent's.",
               "", "## Not done in this phase", ""] + [f"- {x}" for x in NOT_DONE]
     (Path(out) / f"report{sfx}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1287,7 +1451,8 @@ def load_set(out, source, kind):
     index = read_rows(msp_dir / f"{kind}-index{suffix(source)}.tsv")
     by_file = defaultdict(list)
     for r in index:
-        uid = (source, int(r["record_id"])) + ((float(r["level"]),) if kind == "chimeric" else ())
+        uid = (source, int(r["record_id"])) + ((float(r["level"]),) if kind == "chimeric" else
+                                                (int(r["row"]),) if kind == "insource" else ())
         by_file[r["file_name"]].append((int(r["record_index"]), uid))
     evidence = []
     for name, ids in sorted(by_file.items()):
@@ -1299,12 +1464,12 @@ def load_set(out, source, kind):
     return evidence, [u for ids in by_file.values() for _, u in ids]
 
 
-def write_fires(sink, by_rule, truth, rules, kind, level=None):
+def write_fires(sink, by_rule, truth, rules, kind, level=None, transform=None):
     motif = {r["rule_id"]: r["motif_id"] for r in rules}
     for p in sorted(by_rule):
         for rid in sorted(by_rule[p]):
             for uid, fired, nh, veto, adduct in by_rule[p][rid]:
-                sink.add(dict(set=kind, level=level, source=uid[0], record_id=uid[1], pass_id=p, rule_id=rid,
+                sink.add(dict(set=kind, level=level, transform=transform, source=uid[0], record_id=uid[1], pass_id=p, rule_id=rid,
                               n_hypotheses=nh, fired=fired, veto_blocked=veto, adduct=adduct,
                               motif_match=motif.get(rid) in truth[uid[:2]]["motifs"]))
 
@@ -1315,7 +1480,9 @@ def measure(args, run):
     run["ruleset"] = dict(path=str(args.ruleset_dir), sha256=res.ruleset_sha256, version=res.rule_set_version,
                           files_raw_sha256=raw, files_canonical_sha256=dict(sorted(res.file_hashes.items())))
     versions = {r["rule_id"]: r["version"] for r in rules}
-    truth, main_ev, chim_ev, chim_universe = {}, [], [], defaultdict(list)
+    truth, main_ev, chim_ev, chim_universe, ins_ev, ins_universe = {}, [], [], defaultdict(list), [], defaultdict(list)
+    motif_rows, adducts = read_ruleset_tables(args.ruleset_dir)
+    transforms = load_insource(INSOURCE_TABLE, {r["motif_id"] for r in motif_rows}, adducts, load_elements(args.ruleset_dir))
     for source in args.sources:
         if source == "vs21":
             vs21_guard(args)
@@ -1326,24 +1493,36 @@ def measure(args, run):
         chim_ev += ev
         for u in uids:
             chim_universe[u[2]].append(u)
+        ev, uids = load_set(args.out, source, "insource")
+        ins_ev += ev
+        for u in uids:
+            ins_universe[u[2]].append(u)
     by_rule, notev, inst = collect(main_ev, versions)
     chim_by_level, chim_notev = {}, {}
     for level in CHIMERIC_LEVELS:
         sel = [{p: [rec for rec in recs if rec[0][2] == level] for p, recs in ev.items()} for ev in chim_ev]
         chim_by_level[level], chim_notev[level], _ = collect(sel, versions)
+    ins_by_row, ins_notev = {}, {}
+    for t in transforms:
+        sel = [{p: [rec for rec in recs if rec[0][2] == t["row"]] for p, recs in ev.items()} for ev in ins_ev]
+        ins_by_row[t["row"]], ins_notev[t["row"]], _ = collect(sel, versions)
     refused = sorted({r["rule_id"] for shard in run.get("fire", {}).values() for r in shard.get("refusals", {}).get("base", [])})
     pairs = Counter(f"{truth[u[:2]]['instrument']} -> {c}" for u, c in inst.items())
     run["instrument_classes"] = dict(sorted(pairs.items()))
     result = measure_core(rules, truth, by_rule, notev, args.sources, args.seed, args.bootstrap,
-                          dict(by_rule=chim_by_level, universe=chim_universe, notev=chim_notev), refused)
+                          dict(by_rule=chim_by_level, universe=chim_universe, notev=chim_notev), refused,
+                          dict(by_rule=ins_by_row, universe=ins_universe, notev=ins_notev, rows=transforms))
     local = any_vs21(args.sources)
-    schema = pa.schema([("set", pa.string()), ("level", pa.float64()), ("source", pa.string()), ("record_id", pa.int64()),
+    schema = pa.schema([("set", pa.string()), ("level", pa.float64()), ("transform", pa.int64()), ("source", pa.string()),
+                        ("record_id", pa.int64()),
                         ("pass_id", pa.string()), ("rule_id", pa.string()), ("n_hypotheses", pa.int64()),
                         ("fired", pa.bool_()), ("veto_blocked", pa.bool_()), ("adduct", pa.string()), ("motif_match", pa.bool_())])
     sink = p2.ParquetRows(args.out / ("fires" + (".local-vs21" if local else "") + ".parquet"), schema)
     write_fires(sink, by_rule, truth, rules, "representatives")
     for level in CHIMERIC_LEVELS:
         write_fires(sink, chim_by_level[level], truth, rules, "chimeric", level)
+    for t in transforms:
+        write_fires(sink, ins_by_row[t["row"]], truth, rules, "insource", transform=t["row"])
     sink.close()
     doc = write_aggregates(args.out, result, args.out.name, rules, local,
                            extra=dict(refused_rule_ids=refused, sources=args.sources))
@@ -1353,7 +1532,8 @@ def measure(args, run):
 
 
 # ------------------------------------------------------------------------------------------- VS21 and runs
-FREEZE_KEYS = ("ruleset_sha256_expected", "ruleset_files", "console_sha256", "console_files", "code", "parameters")
+FREEZE_KEYS = ("ruleset_sha256_expected", "ruleset_files", "console_sha256", "console_files", "code", "parameters",
+               "insource_table")
 
 
 def freeze_hashes(ruleset_dir, console, seed, bootstrap):
@@ -1361,7 +1541,8 @@ def freeze_hashes(ruleset_dir, console, seed, bootstrap):
                 ruleset_files=ruleset_file_hashes(ruleset_dir), console_sha256=p2.sha256(console),
                 console_files=console_files(console),
                 code={p.relative_to(ROOT).as_posix(): p2.sha256(p) for p in CODE_FILES},
-                parameters=dict(seed=seed, bootstrap=bootstrap, console_ini=CONSOLE_INI))
+                parameters=dict(seed=seed, bootstrap=bootstrap, console_ini=CONSOLE_INI),
+                insource_table=p2.sha256(INSOURCE_TABLE))
 
 
 def vs21_guard(args, out_root=OUT_ROOT):
@@ -1454,7 +1635,7 @@ def main(argv=None):
         parser.error("Use --sources vs20 or vs20,vs21 and 1..8 workers")
     if args.limit is not None and not 0 < args.limit <= 1:
         parser.error("--limit must be a fraction in (0,1]")
-    if args.stage in ("prepare", "measure", "all", "freeze") and not args.ruleset_dir:
+    if args.stage in ("prepare", "fire", "measure", "all", "freeze") and not args.ruleset_dir:
         parser.error("--ruleset-dir is required for " + args.stage)
     if args.stage in ("fire", "all", "freeze") and not args.console:
         parser.error("--console is required for " + args.stage)

@@ -296,7 +296,7 @@ Stages (positional), all writing into one run directory:
 | Stage | Needs | Does |
 |---|---|---|
 | `prepare` | `--ruleset-dir` | P2's record filters and counters, P1 standardisation, truth motif sets from the shipped 106 motif SMARTS (`tables/motifs.json`), record units, within-source clusters, `prepared.parquet`, and the allowlisted MSP shards `msp/vs20/representatives-NN.msp` with `representatives-index.tsv` |
-| `fire` | `--console` | the synthetic chimeric set (`msp/vs20/chimeric-NN.msp`, `chimeric-index.tsv`), then one console run per shard (all 13 passes) at BelowNormal, at most `--workers` at once, into `fire/vs20/<set>/<shard>/`; every manifest is checked (pinned rule set, input sha256 and record count, the 13 passes); all shards must report the same `build_identity` and `engine_semantics` (and, for VS21, the frozen ones) and no record errors in any pass, or `fire` stops; an existing shard is reused only when its manifest validates |
+| `fire` | `--console`, `--ruleset-dir` | the synthetic chimeric set (`msp/vs20/chimeric-NN.msp`, `chimeric-index.tsv`) and the in-source recast set (`insource-NN.msp`, `insource-index.tsv`), then one console run per shard (all 13 passes) at BelowNormal, at most `--workers` at once, into `fire/vs20/<set>/<shard>/`; every manifest is checked (pinned rule set, input sha256 and record count, the 13 passes); all shards must report the same `build_identity` and `engine_semantics` (and, for VS21, the frozen ones) and no record errors in any pass, or `fire` stops; an existing shard is reused only when its manifest validates |
 | `measure` | `--ruleset-dir` | joins evidence to truth, counts, intervals, the gate, `fires.parquet` and the aggregates; marks the run complete |
 | `all` | both | prepare, fire, measure |
 | `freeze` | both, `--freeze` | writes the freeze file the VS21 pass must match |
@@ -330,7 +330,7 @@ $py = '<annotation-py312>\Scripts\python.exe'   # the RDKit environment P2 uses
 | `fires.parquet` | one row per (set, level, record, pass, rule) where the rule had a hypothesis: `n_hypotheses`, `fired`, `veto_blocked`, the chosen hypothesis' adduct, `motif_match` |
 | `rules_precision.csv` | per (rule, version, ion mode, pass, source, instrument class, energy bin): universe and conditional counts, records and clusters, precision, Wilson, recall within the precondition, coverage, LR+, prior stress, the conditional stress grid, cluster-bootstrap intervals, and for the base pass the decoy fires and FDR in records (`decoy_*`, report only) and clusters (`c_decoy_*`, gated) |
 | `rules_competitors.csv` | per rule and competitor motif: conditional competitor records and clusters, fires, FPR |
-| `rules_synthetic.csv` | per rule and chimeric level: records not evaluated by the console, fires, TP/FP, precision and Wilson in records (report only) and clusters (gated) |
+| `rules_synthetic.csv` | per rule and synthetic set (`set`): each chimeric level, and each in-source transformation row (`transform`, `change`, `product_adduct`) plus their pool (`transform` = `all`, gated): records not evaluated by the console, fires, TP/FP, precision and Wilson in records (report only) and clusters (gated) |
 | `rules_occupancy.csv` | per rule and precondition mode: both occupancy definitions and `non_conditional` |
 | `rules_precision.json` | label `ws8-p3-class-rules`, criteria, per rule: parameters, status, every criterion with its value, the pooled row of every pass, synthetic, occupancy, competitors, provenance breakdown |
 | `review_proposal-<run-id>.json` | rules with status `pass` (none can pass in this phase) and, separately, `incomplete` rules |
@@ -343,7 +343,7 @@ Aggregates carry ids only (`rule_id`, `motif_id`); `measure` scans them as P2 do
 `not_measured` (outside `measure: true` and `source_checked: true`, or refused by the console); `not_estimable`
 (fewer than 100 fired clusters in the primary pass); `fail` (a measured criterion failed); `incomplete` (every
 criterion this run can measure is met, others pending); `pass` (every pre-registered criterion met). In this
-phase the in-source recast set and the VS21 pass are pending for every rule, so no rule can reach `pass`.
+phase the VS21 pass (held-out criterion) is pending for every rule, so no rule can reach `pass`.
 
 ## Decisions where the specification was silent
 
@@ -391,6 +391,23 @@ phase the in-source recast set and the VS21 pass are pending for every rule, so 
   kept. Every record is mixed, so the "motif-negative records first" order does not change the set. A level
   without fires does not fail the criterion; an empty chimeric set leaves it pending. The console runs all 13
   passes on the chimeric shards (it has no pass selection); only `base` and `mz_only_curated` are read.
+- **In-source recast set.** `insource-p3.tsv` (parent_motif, parent_adduct, change, product_adduct, source,
+  note; rows awaiting the author's confirmation) defines the transformations; the row number in file order is the
+  transformation id. A representative is recast by a row when its curated adduct is the row's parent adduct (alias-
+  mapped), its ion mode is that adduct's polarity, its truth motif set holds `parent_motif` (any record for `*`),
+  and its precursor ion (truth Hill formula x multiplier, plus the adduct table's added atoms, minus its removed
+  ones) holds every atom of the loss; the truth formula is used for this check only and never reaches the console.
+  The new precursor m/z is the observed one minus the exact loss mass from the rule set's `tables/elements.json`.
+  Peaks above the new precursor + 0.01 Da are dropped; peaks within 0.01 Da of it are replaced by one precursor
+  peak at the base-peak intensity of the kept peaks; a record with no kept peak is counted (`no_peaks_left`) and
+  dropped. PRECURSORTYPE is the product adduct (canonical when the alias table maps it, else the stripped spelling,
+  counted as `adduct_unmapped`; the base pass ignores it, `mz_only_curated` skips it). Truth stays the parent's.
+  Losses are read in any element order (`NH3`, `SO3`, `H3PO4`), each symbol once, every element in the element
+  table; a row whose parent motif or parent adduct is unknown, or whose product adduct has the other polarity,
+  stops the run. The set is built deterministically; above 500,000 records it is cut to a seeded sample of
+  500,000 and `run.json` says so. The gate reads the pooled cluster precision (>= 0.95, or no fires); a mode
+  without recast records leaves the criterion pending. The recast approximates the product's own MS/MS, which the
+  library does not hold.
 - **Not evaluable.** A criterion whose value cannot be computed (no fires) is pending, never passed or failed;
   such a rule is `not_estimable` anyway.
 - **Strata.** Instrument class and energy bin are P2's `instrument_bin` and `energy_bin`, with `all` margins; the
@@ -406,7 +423,7 @@ phase the in-source recast set and the VS21 pass are pending for every rule, so 
   (`ws8-p3\freeze-<yyyymmdd>-<sha>.json`, written by `freeze`; the name and folder are checked) whose content
   matches now: the sha256 of every RuleSet file, of the console and of every `.exe`, `.dll` and `.config` in its
   bin folder, of the measurement code (`p3_measure.py`, `rule_format.py`, `p2_diagnostics.py`, `mcs_core.py`,
-  `provenance-p3.tsv`), and the parameters `seed`, `bootstrap` and the console INI text. `freeze` also runs the
+  `provenance-p3.tsv`), of `insource-p3.tsv`, and the parameters `seed`, `bootstrap` and the console INI text. `freeze` also runs the
   console once on a synthetic record and stores its `build_identity` and `engine_semantics`, which every VS21
   shard must match. VS21 needs VS20 in the same run (deduplication by first block). Its row files and every
   aggregate are named `*.local-vs21.*`.
@@ -422,8 +439,7 @@ phase the in-source recast set and the VS21 pass are pending for every rule, so 
 
 ## Not done in this phase
 
-The in-source and adduct recast set (no `insource-p3.tsv` exists; it is a scientific input for the author),
-cross-library VS20/VS21 cluster matching by cosine, the all-spectra weighted sensitivity variant, `as_applied`,
+Cross-library VS20/VS21 cluster matching by cosine, the all-spectra weighted sensitivity variant, `as_applied`,
 the MS-FINDER-level measurement, the runtime measurement, conditional mining, the precondition decoy and the
 figures. `report.md` and `rules_precision.json` list them too.
 

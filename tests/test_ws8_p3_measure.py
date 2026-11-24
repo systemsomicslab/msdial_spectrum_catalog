@@ -229,6 +229,156 @@ class ChimericTests(unittest.TestCase):
         self.assertNotEqual(key(a), key(c))
 
 
+INS_ADDUCTS = [dict(adduct="[M+H]+", aliases=["M+H"], charge=1, multiplier=1, add="H", remove=None),
+               dict(adduct="[M-H]-", aliases=["M-H"], charge=-1, multiplier=1, add=None, remove="H"),
+               dict(adduct="[M+NH4]+", aliases=["M+NH4"], charge=1, multiplier=1, add="H4N", remove=None),
+               dict(adduct="[M+HCOO]-", aliases=["[M+FA-H]-"], charge=-1, multiplier=1, add="CHO2", remove=None),
+               dict(adduct="[M+H-H2O]+", aliases=[], charge=1, multiplier=1, add="H", remove="H2O")]
+INS_HEADER = "parent_motif\tparent_adduct\tchange\tproduct_adduct\tsource\tnote\n"
+INS_ROWS = ("*\t[M+H]+\t-H2O\t[M+H-H2O]+\tsynthetic\tloss\n"
+            "*\t[M+H]+\t-NH3\t[M+H-NH3]+\tsynthetic\tloss needing N\n"
+            "*\t[M+NH4]+\t-NH3\t[M+H]+\tsynthetic\tadduct conversion\n"
+            "*\t[M+HCOO]-\t-CH2O2\t[M-H]-\tsynthetic\tadduct conversion\n"
+            "gly\t[M-H]-\t-C6H10O5\t[M-H-Hex]-\tsynthetic\tmotif-restricted\n")
+
+
+def elements(d):
+    t = Path(d) / "tables"
+    t.mkdir(parents=True, exist_ok=True)
+    doc = {"electron": 0.000549, "elements": {"C": 12.0, "H": 1.007825032, "N": 14.003074, "O": 15.99491462},
+           "format": "msfinder-diagnostic-elements", "format_version": 1}
+    (t / "elements.json").write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
+    return m.load_elements(d)
+
+
+def transforms(d, rows=INS_ROWS):
+    path = Path(d) / "insource-p3.tsv"
+    path.write_text(INS_HEADER + rows, encoding="utf-8")
+    return m.load_insource(path, {"gly", "M"}, INS_ADDUCTS, elements(d))
+
+
+def parent(rid, formula, adduct, mz, peaks, motifs=(), mode=None):
+    return dict(record_id=rid, key=f"K{rid}", formula=formula, motifs=list(motifs), adduct=adduct, precursor=mz,
+                mode=mode or ("pos" if adduct.endswith("+") else "neg"), instrument_type="QTOF", collision_energy="20",
+                mz=[a for a, _ in peaks], intensity=[b for _, b in peaks])
+
+
+class InsourceTests(unittest.TestCase):
+    def reps(self):
+        return [parent(0, "C8H10N4O2", "[M+H]+", 195.0877, [(110.07, 40), (138.0662, 100), (177.08, 7), (180.0, 5)]),
+                parent(2, "C6H12O6", "[M+H]+", 181.0707, [(85.03, 30), (163.06, 100)]),
+                parent(4, "C6H12O6", "[M+NH4]+", 198.0972, [(85.03, 30), (163.06, 100), (181.07, 50)]),
+                parent(1, "C21H20O11", "[M-H]-", 447.0933, [(284.03, 100), (285.04, 80)], motifs=["gly"]),
+                parent(3, "C15H10O6", "[M-H]-", 285.0405, [(133.03, 100)]),
+                parent(5, "C6H12O6", "[M+HCOO]-", 225.0616, [(179.056, 100), (89.02, 20)])]
+
+    def test_rows_load_and_reject_bad_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = transforms(d)
+            self.assertEqual([x["row"] for x in t], [0, 1, 2, 3, 4])
+            self.assertAlmostEqual(t[0]["change_pda"] / 1e12, 18.010564684)
+            self.assertEqual((t[0]["product_adduct"], t[0]["product_mapped"]), ("[M+H-H2O]+", True))
+            self.assertEqual((t[1]["product_adduct"], t[1]["product_mapped"]), ("[M+H-NH3]+", False))
+            self.assertEqual(t[3]["parent_adduct"], "[M+HCOO]-")
+            for bad in ("nope\t[M+H]+\t-H2O\tx\ts\tn\n", "*\t[M+H]+\tH2O\tx\ts\tn\n",
+                        "*\t[M+H]+\t-H2O\t[M-H]-\ts\tn\n", "*\t[M+Q]+\t-H2O\tx\ts\tn\n",
+                        "*\t[M+H]+\t-HOH\tx\ts\tn\n", "*\t[M+H]+\t-SO3\tx\ts\tn\n"):  # repeated symbol; S not in the table
+                with self.assertRaises(ValueError, msg=bad):
+                    transforms(d, bad)
+
+    def test_loss_row_truncates_and_adds_the_precursor_peak(self):
+        with tempfile.TemporaryDirectory() as d:
+            out, stats = m.build_insource(self.reps(), transforms(d), 7)
+        r = next(x for x in out if x["record_id"] == 0 and x["row"] == 0)
+        new = 195.0877 - 18.010564684
+        self.assertAlmostEqual(r["precursor"], new)
+        self.assertEqual(r["adduct"], "[M+H-H2O]+")
+        # 180.0 lies above new + 0.01 and goes; 177.08 lies within 0.01 of the new precursor and is replaced.
+        self.assertEqual([round(x, 4) for x in r["mz"]], [110.07, 138.0662, round(new, 4)])
+        self.assertEqual(r["intensity"][-1], 100)
+        self.assertEqual(r["mz"], sorted(r["mz"]))
+
+    def test_atom_containment_including_adduct_atoms(self):
+        with tempfile.TemporaryDirectory() as d:
+            out, stats = m.build_insource(self.reps(), transforms(d), 7)
+        got = {(x["record_id"], x["row"]) for x in out}
+        self.assertIn((0, 1), got)            # caffeine [M+H]+ holds NH3
+        self.assertNotIn((2, 1), got)         # hexose [M+H]+ has no N
+        self.assertEqual(stats["by_row"]["1"]["atoms_missing"], 1)
+        self.assertIn((4, 2), got)            # the NH4 of [M+NH4]+ supplies the N of -NH3
+        self.assertIn((5, 3), got)            # formate supplies C and O of -CH2O2
+        self.assertTrue(m.ion_contains("C6H12O6", dict(multiplier=1, add={"H": 1}, remove={}, change={"H": 2, "O": 1})))
+        self.assertFalse(m.ion_contains("CH4", dict(multiplier=1, add={}, remove={"H": 1}, change={"H": 2, "O": 1})))
+        self.assertTrue(m.ion_contains("C20H18NO4+", dict(multiplier=1, add={}, remove={}, change={"C": 1, "O": 2})))
+
+    def test_mode_adduct_motif_and_star_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            out, stats = m.build_insource(self.reps(), transforms(d), 7)
+        got = {(x["record_id"], x["row"]) for x in out}
+        self.assertEqual({k for k in got if k[1] == 0}, {(0, 0), (2, 0)})  # [M+H]+ only, not [M+NH4]+ or negatives
+        self.assertEqual({k for k in got if k[1] == 4}, {(1, 4)})          # the gly-restricted row skips record 3
+        self.assertEqual(next(x for x in out if x["row"] == 3)["adduct"], "[M-H]-")
+        self.assertEqual(stats["by_row"]["1"]["adduct_unmapped"], 1)
+        self.assertEqual(stats["records"], len(out))
+
+    def test_no_peaks_left(self):
+        with tempfile.TemporaryDirectory() as d:
+            reps = [parent(0, "C8H10N4O2", "[M+H]+", 195.0877, [(190.0, 100)])]
+            out, stats = m.build_insource(reps, transforms(d), 7)
+        self.assertEqual(stats["by_row"]["0"]["no_peaks_left"], 1)
+        self.assertNotIn((0, 0), {(x["record_id"], x["row"]) for x in out})
+
+    def test_deterministic_and_capped_by_seed(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = transforms(d)
+            a, _ = m.build_insource(self.reps(), t, 7)
+            b, _ = m.build_insource(list(reversed(self.reps())), t, 7)
+            self.assertEqual(a, b)
+            c1, s1 = m.build_insource(self.reps(), t, 7, cap=3)
+            c2, _ = m.build_insource(self.reps(), t, 7, cap=3)
+            self.assertEqual((len(c1), s1["capped"], s1["before_cap"]), (3, True, len(a)))
+            self.assertEqual(c1, c2)
+            with tempfile.TemporaryDirectory() as o1, tempfile.TemporaryDirectory() as o2:
+                m.write_insource(o1, "vs20", a, 2)
+                m.write_insource(o2, "vs20", b, 2)
+                for name in ("insource-00.msp", "insource-01.msp", "insource-index.tsv"):
+                    self.assertEqual((Path(o1) / "msp/vs20" / name).read_bytes(), (Path(o2) / "msp/vs20" / name).read_bytes())
+                peaks = [x for x in (Path(o1) / "msp/vs20/insource-00.msp").read_text(encoding="utf-8").splitlines()
+                         if x and x[0].isdigit()]
+                self.assertTrue(all(PAIR.match(x) for x in peaks))
+
+    def test_truth_stays_the_parents(self):
+        """A recast fires for the rule's motif: a TP only when the parent has the motif; otherwise an FP."""
+        truth, by_rule, chim = scenario()
+        rows = [dict(row=0, mode="pos", change_text="-H2O", product_adduct="[M+H-H2O]+"),
+                dict(row=1, mode="neg", change_text="-CO2", product_adduct="[M-H-CO2]-")]
+        pos_m = [u for u in sorted(truth) if "M" in truth[u]["motifs"]][:10]
+        neg_m = [u for u in sorted(truth) if not truth[u]["motifs"]][:3]
+        ents = [((u[0], u[1], 0), True, 1, False, None) for u in pos_m + neg_m]
+        ins = dict(by_rule={0: {"base": {"r1": ents}}}, universe={0: [e[0] for e in ents] + [("vs20", 99999 * 2, 0)]},
+                   notev={0: {"base": {("vs20", 99999 * 2, 0)}}}, rows=rows)
+        truth[("vs20", 99999 * 2)] = dict(truth[neg_m[0]])
+        res = m.measure_core([rule()], truth, by_rule, {}, ["vs20"], replicates=10, chimeric=chim, insource=ins)
+        r0 = next(r for r in res["synthetic"] if r["set"] == "insource" and r["transform"] == 0)
+        self.assertEqual((r0["fires"], r0["tp"], r0["fp"], r0["c_fp"], r0["n_not_evaluated"], r0["n_universe"]),
+                         (13, 10, 3, 3, 1, 14))
+        self.assertEqual((r0["change"], r0["product_adduct"]), ("-H2O", "[M+H-H2O]+"))
+        self.assertFalse(any(r["set"] == "insource" and r["transform"] == 1 for r in res["synthetic"]))  # other mode
+        g = res["gates"]["r1"]
+        self.assertIn("synthetic_insource", g["failed"])
+        self.assertEqual(g["criteria"]["synthetic_insource"]["unit"], "cluster")
+        ins["by_rule"] = {0: {"base": {"r1": [(e[0], False, 1, False, None) for e in ents]}}}
+        g = m.measure_core([rule()], truth, by_rule, {}, ["vs20"], replicates=10, chimeric=chim, insource=ins)["gates"]["r1"]
+        self.assertTrue(g["criteria"]["synthetic_insource"]["ok"])  # no fires: passes, no longer pending
+        self.assertNotIn("synthetic_insource", g["pending"])
+
+    @unittest.skipUnless(RULESET, "WS8_P3_RULESET is not set")
+    def test_shipped_table_loads_against_the_rule_set(self):
+        motif_rows, adducts = m.read_ruleset_tables(RULESET)
+        t = m.load_insource(m.INSOURCE_TABLE, {r["motif_id"] for r in motif_rows}, adducts, m.load_elements(RULESET))
+        self.assertEqual(len(t), len(m.read_rows(m.INSOURCE_TABLE)))
+
+
 def evidence_line(name, i, outcomes, status="evaluated", iclass="QTOF-type"):
     res = None if status != "evaluated" else dict(instrument_class=iclass, outcomes=[
         dict(rule_id=r, version=v, fired=f, n_hypotheses=n, veto_blocked=False, chosen=dict(adduct="[M+H]+") if f else None)
@@ -729,6 +879,23 @@ class GuardTests(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "console"):
                 m.vs21_guard(args, d)
 
+    def test_vs21_freeze_refuses_a_changed_insource_table(self):
+        with tempfile.TemporaryDirectory() as d:
+            rs, console = self.files(d)
+            table = Path(d) / "insource-p3.tsv"
+            table.write_text(INS_HEADER + INS_ROWS, encoding="utf-8")
+            saved = m.INSOURCE_TABLE
+            m.INSOURCE_TABLE = table
+            try:
+                args = SimpleNamespace(vs21=True, freeze=self.freeze(d, rs, console), ruleset_dir=rs, console=console,
+                                       seed=1, bootstrap=10)
+                self.assertTrue(m.vs21_guard(args, d))
+                table.write_text(INS_HEADER + INS_ROWS + "*\t[M-H]-\t-CO2\t[M-H-CO2]-\ts\tn\n", encoding="utf-8")
+                with self.assertRaisesRegex(PermissionError, "insource_table"):
+                    m.vs21_guard(args, d)
+            finally:
+                m.INSOURCE_TABLE = saved
+
     def test_vs21_freeze_covers_dlls_parameters_and_path(self):
         """Regression: a changed DLL beside the console, another seed or bootstrap, or a freeze file outside the
         ws8-p3 root is refused."""
@@ -822,6 +989,7 @@ class ConsoleIntegrationTests(unittest.TestCase):
             self.assertIn("MsfinderConsoleApp.exe", run["console"]["files"])
             self.assertTrue(any(k.endswith(".dll") for k in run["console"]["files"]))
             self.assertEqual(m.console_identity(CONSOLE), run["console"]["identity"])
+            self.assertGreater(run["insource"]["vs20"]["records"], 0)
             self.assertEqual(quiet(m.fire, args, run), None)  # every complete shard validates and is reused
             self.assertEqual({v["state"] for v in run["fire"].values()}, {"reused"})
             quiet(m.measure, args, run)
@@ -834,6 +1002,9 @@ class ConsoleIntegrationTests(unittest.TestCase):
             self.assertEqual(g["status"], "not_estimable")
             self.assertEqual(g["passes"]["base"]["fires"], 1)
             self.assertEqual(run["acceptance_artifact_audit"], "pass")
+            ins = [r for r in m.read_rows(out / "rules_synthetic.csv") if r["set"] == "insource"]
+            self.assertTrue(any(r["transform"] == "all" for r in ins))
+            self.assertTrue(any(f["set"] == "insource" for f in fires))
 
 
 if __name__ == "__main__":
