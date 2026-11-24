@@ -199,6 +199,30 @@ class FilesTest(unittest.TestCase):
                 ms.validate_job(out, 2.0, 1)
 
 
+class LoadWaitTest(unittest.TestCase):
+    def test_wait_loaded(self):
+        class Proc:
+            def __init__(self, code=None):
+                self.code, self.killed = code, False
+
+            def poll(self):
+                return self.code
+
+            def kill(self):
+                self.killed = True
+
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "console.log"
+            log.write_text("Loading library files..\n" + ms.LOADED_MARK + "\n", encoding="utf-8")
+            self.assertTrue(ms.wait_loaded(Proc(), log))
+            log.write_text("Loading library files..\nEI fragment DB is missing.\n", encoding="utf-8")
+            self.assertFalse(ms.wait_loaded(Proc(code=255), log))
+            proc = Proc()
+            with self.assertRaises(RuntimeError):
+                ms.wait_loaded(proc, log, timeout=0, poll=0)
+            self.assertTrue(proc.killed)
+
+
 class GuardTest(unittest.TestCase):
     def test_run_id(self):
         with tempfile.TemporaryDirectory() as d:

@@ -22,6 +22,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import threading
 import time
 
 HERE = Path(__file__).resolve().parent
@@ -61,6 +62,11 @@ METHOD_LINES = ("MassToleranceType=Da", "Ms1Tolerance=0.01", "Ms2Tolerance=0.01"
 RANKING_SCOPE = "Reviewed"
 CLASS_DEPTH = 3  # ChemOnt: Chemical entities (0) > kingdom (1) > superclass (2) > class (3)
 FILE_RE = re.compile(r"rec(\d+)(?:\.local-vs21)?")
+# The console opens its Resources exclusively while it loads them ("... in use by another process"): one process
+# loads at a time, and the next starts once the log shows the processing has begun.
+LOAD_LOCK = threading.Lock()
+LOADED_MARK = "Start processing.."
+LOAD_TIMEOUT_S = 900
 ALL = "all"
 
 
@@ -296,6 +302,19 @@ def validate_job(out_dir, weight, n_records):
                 timing=m.get("timing"))
 
 
+def wait_loaded(proc, log_path, timeout=LOAD_TIMEOUT_S, poll=0.5):
+    """Until the console has loaded its libraries (or exited)."""
+    end = time.monotonic() + timeout
+    while proc.poll() is None:
+        if LOADED_MARK in Path(log_path).read_text(encoding="utf-8", errors="replace"):
+            return True
+        if time.monotonic() > end:
+            proc.kill()
+            raise RuntimeError("Console did not finish loading its libraries")
+        time.sleep(poll)
+    return False
+
+
 def run_job(console, job, slots, cores):
     """One console process per (variant, shard) at BelowNormal on its own cores. A job folder is never removed: a
     folder without job.json is a failed or running job and is refused."""
@@ -313,20 +332,22 @@ def run_job(console, job, slots, cores):
     (d / "method.ini").write_text(method_ini(job["weight"]), encoding="ascii", newline="")
     slot = slots.get()
     try:
-        start = time.perf_counter()
-        with open(d / "console.log", "w", encoding="utf-8") as log:
+        with open(d / "console.log", "w", encoding="utf-8") as log, LOAD_LOCK:
+            start = time.perf_counter()
             proc = subprocess.Popen([str(console), "predict", "-i", str(d / "input"), "-m", str(d / "method.ini"),
                                      "-o", str(d / "out")], stdout=log, stderr=subprocess.STDOUT,
                                     creationflags=p3m.BELOW_NORMAL | p3m.NO_WINDOW if sys.platform == "win32" else 0)
             set_affinity(proc, slot, cores)
-            code = proc.wait()
+            wait_loaded(proc, d / "console.log")
+            load = time.perf_counter() - start
+        code = proc.wait()
         wall = time.perf_counter() - start
     finally:
         slots.put(slot)
     if code != SUCCESS_EXIT:
         raise RuntimeError(f"predict exited {code} in {d.name}")
     info = dict(validate_job(d / "out", job["weight"], len(job["ids"])), variant=job["variant"], shard=job["shard"],
-                n=len(job["ids"]), wall_seconds=round(wall, 3), exit_code=code)
+                n=len(job["ids"]), wall_seconds=round(wall, 3), load_seconds=round(load, 3), exit_code=code)
     p2.write_json(done, info)
     return info
 
@@ -347,6 +368,7 @@ def predict(args, run):
     sel = p3m.read_rows(args.out / f"selection{suffix(args.source)}.tsv")
     ids = [int(r["record_id"]) for r in sel]
     jobs = plan_jobs(args, args.weights, ids)
+    stage_start = time.perf_counter()
     slots = queue.Queue()
     for i in range(args.workers):
         slots.put(i)
@@ -364,12 +386,15 @@ def predict(args, run):
     if len(identities) > 1:
         raise RuntimeError("Jobs disagree on the console build identity")
     walls = [r["wall_seconds"] for r in results.values() if "wall_seconds" in r]
+    loads = [r["load_seconds"] for r in results.values() if "load_seconds" in r]
     n_spectra = sum(r["n"] for r in results.values() if "wall_seconds" in r)
     run["predict"] = dict(variants=sorted({j["variant"] for j in jobs}), shards=len({j["shard"] for j in jobs}),
                           jobs={f"{v}/{s}": r for (v, s), r in sorted(results.items())},
                           build_identity=next(iter(identities))[0] if identities else None,
                           caches_written_by_this_run=bool(first),
                           process_seconds_per_spectrum=round(sum(walls) / n_spectra, 3) if n_spectra else None,
+                          load_seconds_median=statistics.median(loads) if loads else None,
+                          wall_seconds_stage=round(time.perf_counter() - stage_start, 3),
                           bin_caches={b: p2.sha256(res_dir / b) for b in BIN_CACHES if (res_dir / b).is_file()})
     print("predict", run["predict"]["variants"], "jobs", len(results), "s/spectrum",
           run["predict"]["process_seconds_per_spectrum"], flush=True)
