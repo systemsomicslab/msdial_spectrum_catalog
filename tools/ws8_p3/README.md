@@ -472,3 +472,99 @@ figures. `report.md` and `rules_precision.json` list them too.
 Tests use synthetic spectra, public molecules and hand-built counts only: `tests/test_ws8_p3_measure.py`
 (the console integration test runs when `WS8_P3_CONSOLE` and `WS8_P3_RULESET` point to the console and its
 RuleSet folder).
+
+# WS8 P3: MS-FINDER-level measurement, rules off versus on (`p3_msfinder.py`)
+
+`p3_msfinder.py` measures what the author-reviewed rules of rule set 0.2.0
+(`ecf7988dea90992eb7233fc856ce2cb19a8afe4f1f5683628a4b35a459c93569`) do to MS-FINDER's structure ranking. It runs
+the console's `predict` with `DiagnosticRuleEvaluation` off and on (`DiagnosticRuleRankingWeight=<w>`,
+`DiagnosticRuleRankingScope=Reviewed`) and compares the rank of the true structure. It imports `p3_measure.py`,
+`p2_diagnostics.py` and `rule_format.py` and modifies none of them.
+
+The design was pre-registered before this code:
+
+- **Spectra.** A representative of the frozen rule-level run (`p3cs-20261124-5a8fc37a`) is selected when a
+  reviewed rule fired or was veto-blocked for it in the base pass and its truth first block is in MS-FINDER's
+  structure DB (the `Short InChIKey` column of `MsfinderStructureDB-VS15.esd`). A seeded control of up to 200
+  in-DB representatives without a reviewed outcome runs in every variant. The counts report how many in-DB
+  representatives had no reviewed outcome, and how many had no fired rule at all.
+- **VS20 selection run.** Rules off, then on at w in {0.5, 1, 2, 4}. The chosen w has the most top-1 first-block
+  hits on the selected spectra, with ties going to the smaller w. It must beat rules off, or the VS21 run is
+  skipped.
+- **VS21 confirmatory run.** Rules off against the chosen w, once.
+
+Stages are `select`, `predict`, `measure` and `all`:
+
+| Stage | Does |
+|---|---|
+| `select` | reviewed rules from `--ruleset-dir` (pinned 0.2.0), the selection and the counts, `selection.tsv` (record id, set, family, rule, outcome, mode, console instrument class, cluster; no keys), one query MSP per spectrum under `msp/<source>/` |
+| `predict` | per variant (`off`, `w<w>`) and shard, a job folder `predict/<variant>/shard-NN/` holding `input/` (MS-FINDER writes `.fgt` files and structure folders beside its inputs), `method.ini`, `out/` and `job.json`. Each job is one console process at BelowNormal, pinned to `--cores-per-worker` logical processors, with at most `--workers` at once. The console writes MessagePack caches (`*_bin.*`) beside its Resources on first use, so when they are missing the first job runs alone. Every on job's manifest must name the pinned set, the weight and the scope, with no errors or refusals. A folder without `job.json` is refused, never removed. |
+| `measure` | parses the structure rows (rank = written order per query, rows with score <= 0 are not written), joins the truth first block from the frozen `prepared` table, and writes the outputs below |
+
+Metrics are computed per variant, set (`selected`, `control`), family (the reviewed rule's family, or `all`) and
+console instrument class (a blank `INSTRUMENTTYPE` is `unknown`). Every cell has a record-level and a cluster-level
+value; at cluster level each cluster weighs one.
+
+- **Accuracy.** Top-1 and top-5 by first block, `not_found`, `rank_le10` and the median rank among found spectra.
+- **Boost-wrong.** For on variants: a wrong candidate is below the truth in the off run and above it in the on run.
+  This covers the case where the off-run top-1 was correct.
+- **Rank changes.** `rank_changed` and `order_changed`, compared with off.
+- **ChemOnt class-level accuracy.** MS-FINDER's class is the `Ontology` (direct parent) of the top-1 candidate,
+  which the console takes from `InchikeyClassyfireDB-VS5.icd`. The truth class is the same file's direct parent
+  for the truth first block. Both are lifted to the class level (depth 3 below `Chemical entities`) of ChemOnt 2.1
+  (`--chemont-obo`). A spectrum whose truth has no class-level term is left out of the denominator (`class_n`).
+
+VS21 cells blank every value whose denominator (`n`, `class_n`, `n_clusters`, `c_class_n`) is below 5. VS20 cells
+are never suppressed.
+
+Checks recorded in `selection_result.json`:
+
+- the on run's `Base rank` order against the off run (`base_rank_mismatch`, which shows determinism)
+- control spectra whose order changed (expected 0)
+- whether the predict run itself produced a claim-eligible reviewed outcome. Claim eligibility depends on the
+  review's instrument classes, so `unknown` gets no ranking term.
+
+Outputs (local, under the run folder, `.local-vs21` for VS21):
+
+| File | Content |
+|---|---|
+| `selection.tsv` | the selected and control records |
+| `per_spectrum.tsv` | one row per record and variant |
+| `msfinder_cells.csv` | the aggregate cells |
+| `selection_result.json` | top-1 per variant, the chosen w (VS20, `binding` only for a full run with all four weights), the checks |
+| `report.md` | summary |
+
+`run.json` records the code commit and file hashes, the console path and sha256 with every bin `.exe/.dll/.config`
+sha256, the sha256 of the Resources (`.esd`, `.icd`, `.msd`, `.efd`) and the caches, the rule-set version, sha256
+and file hashes, the inputs' sha256, the method INI, the weights, the seed and the counts.
+
+Run directories are `<annotation-root>\ws8-p3\p3ms-<yyyymmdd>-<sha>` and `p3mssmoke-<yyyymmdd>-<sha>`. The same rules
+as `p3_measure.py` apply: a smoke needs `--limit` (the number of selected spectra; the control is `limit // 4`; w=1
+only), `<sha>` is a prefix of a clean, pushed HEAD, and a completed run is immutable.
+
+**VS21.** VS21 needs `--source vs21 --vs21 --selection-run <p3ms- VS20 run>`. The VS20 run must be complete and
+binding, with a non-null chosen w and a `selection_result.json` whose sha256 matches its `run.json`. Its console,
+Resources, method INI and rule-set files must equal the current ones. The weight is taken from that run, and
+nothing else sets it.
+
+```powershell
+$py = '<annotation-py312>\Scripts\python.exe'
+$common = '--console', '<MsdialWorkbench>\src\MSFINDER\MsfinderConsoleAppCore\bin\Release\net472\MsfinderConsoleApp.exe',
+          '--ruleset-dir', '<MsdialWorkbench>\src\Common\CommonStandard\StructureFinder\DiagnosticRules\RuleSet',
+          '--chemont-obo', '<libraries>\chemont\ChemOnt_2_1.obo'
+# smoke (about 20 selected spectra, off and w=1)
+& $py -B tools/ws8_p3/p3_msfinder.py all --source vs20 --limit 20 @common --out <annotation-root>\ws8-p3\p3mssmoke-<yyyymmdd>-<sha>
+# VS20 selection run
+& $py -B tools/ws8_p3/p3_msfinder.py all --source vs20 @common --out <annotation-root>\ws8-p3\p3ms-<yyyymmdd>-<sha> --detach
+# VS21 confirmatory run, only after the author has seen the VS20 result
+& $py -B tools/ws8_p3/p3_msfinder.py all --source vs21 --vs21 --selection-run <annotation-root>\ws8-p3\p3ms-<vs20-run> @common `
+  --out <annotation-root>\ws8-p3\p3ms-<yyyymmdd>-<sha> --detach
+```
+
+**Console resources.** The console's `predict` needs `MsfinderStructureDB-VS15.esd`,
+`InchikeyClassyfireDB-VS5.icd` (opened unconditionally while the structure DB loads) and
+`MINEs-StructureDB-vs1.msd` (predict stops if it is missing, even with MINEs off) in its `Resources` folder. A
+console built from source lacks all three, so they are copied into the untracked bin folder. PubChem is never
+queried (`PubChemNeverUse=True`), and MINEs is not searched.
+
+Tests use synthetic records, library snippets and hand-built candidate lists only: `tests/test_ws8_p3_msfinder.py`.
