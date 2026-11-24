@@ -75,6 +75,12 @@ CRITERIA = dict(counting_unit="cluster", n_min=100, wilson_target=0.95, source_n
                 occupancy_max=0.05, synthetic_precision=0.95, chimeric_levels=list(CHIMERIC_LEVELS),
                 interval="wilson95", lr_interval="log95", vs21_min_cell=5,
                 stress_grid_priors=[0.5, 0.2, 0.1, 0.05], stress_grid_prevalence_fractions=[0.5, 0.25])
+# Tier 2 ("provisional"), registered by the author on 2026-11-24, before any VS21 pass and after the VS20
+# development pass had been seen. Counting unit, primary pass, eligibility and pending logic are tier 1's; prior
+# stress is reported but not gated. Both tiers are frozen for the VS21 pass.
+CRITERIA_PROVISIONAL = dict(CRITERIA, n_min=30, wilson_target=0.90, source_precision=0.90, synthetic_precision=0.90,
+                            prior_stress_gated=False, registered="2026-11-24")
+TIERS = (("strict", CRITERIA), ("provisional", CRITERIA_PROVISIONAL))
 CONSOLE_INI = "MassToleranceType=Da\r\nMs2Tolerance=0.01\r\nIsTmsMeoxDerivative=False\r\n"
 BELOW_NORMAL, NO_WINDOW = 0x4000, 0x08000000
 FORBIDDEN_COLUMN = r"(^|_)(key|first.?block|smiles|name)($|_)"
@@ -966,7 +972,8 @@ def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BO
         eligible = rule["measure"] and rule["source_checked"] and rid not in refused
         if not eligible:
             reason = "refused" if rid in refused else "measure_false" if not rule["measure"] else "source_unchecked"
-            gates[rid] = dict(ids, status="not_measured", reason=reason, origin=rule["origin"])
+            gates[rid] = dict(ids, status="not_measured", status_provisional="not_measured", label="not_measured",
+                              reason=reason, origin=rule["origin"])
             continue
         if (mode, motif) not in cache:
             cache[(mode, motif)] = universe(truth_by_mode, mode, motif, multi, sources)
@@ -1072,8 +1079,12 @@ def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BO
             by_prov[b] = dict(fires=c["fires"], tp=c["tp"], precision=c["tp"] / c["fires"] if c["fires"] else None,
                               c_fires=len(c["fired"]), c_tp=c_tp,
                               c_precision=c_tp / len(c["fired"]) if c["fired"] else None)
+        tiers = {name: decide(gate_row, decoy_row, by_source, occ[rule["primary_mode"]], synth, rule["origin"], ins_all, K)
+                 for name, K in TIERS}
+        prov_tier = {k: tiers["provisional"][k] for k in ("status", "failed", "pending", "criteria")}
         gates[rid] = dict(ids, origin=rule["origin"], primary_precondition_mode=rule["primary_mode"], gate_pass=primary,
-                          **decide(gate_row, decoy_row, by_source, occ[rule["primary_mode"]], synth, rule["origin"], ins_all),
+                          **tiers["strict"], status_provisional=prov_tier["status"], provisional=prov_tier,
+                          label=combined_label(tiers["strict"]["status"], prov_tier["status"]),
                           by_provenance=by_prov,
                           provenance_flag=any(v["c_fires"] >= CRITERIA["source_n_min"] and v["c_precision"] < CRITERIA["source_precision"]
                                               for v in by_prov.values()))
@@ -1085,9 +1096,10 @@ def truth_cluster_positive(cluster, U):
     return cluster in U[("pooled", "all", "all")]["pcl"]
 
 
-def decide(gate_row, decoy_row, by_source, occ, synth, origin, insource=None):
-    """The pre-registered gate on the primary-mode pooled cell, counting clusters."""
-    K = CRITERIA
+def decide(gate_row, decoy_row, by_source, occ, synth, origin, insource=None, K=None):
+    """The pre-registered gate of one tier (K; tier 1 by default) on the primary-mode pooled cell, counting
+    clusters. A criterion with report_only is shown but never decides the status."""
+    K = CRITERIA if K is None else K
     n = gate_row["c_fires"]
 
     def at_least(v, t):  # None: not evaluable (no fires), never a pass
@@ -1104,7 +1116,8 @@ def decide(gate_row, decoy_row, by_source, occ, synth, origin, insource=None):
                                      ok=all(r["c_fires"] < K["source_n_min"] or r["c_precision"] >= K["source_precision"]
                                             for r in by_source.values())),
         "prior_stress": dict(value=gate_row["c_prior_stress"], threshold=K["prior_target"],
-                             ok=at_least(gate_row["c_prior_stress"], K["prior_target"])),
+                             ok=at_least(gate_row["c_prior_stress"], K["prior_target"]),
+                             report_only=not K.get("prior_stress_gated", True)),
         "decoy_fdr": dict(value=decoy_row["c_decoy_fdr"], unit="cluster", record_level=decoy_row["decoy_fdr"],
                           threshold=K["decoy_fdr_max"],
                           ok=None if decoy_row["c_decoy_fdr"] is None else decoy_fdr_within(
@@ -1121,28 +1134,53 @@ def decide(gate_row, decoy_row, by_source, occ, synth, origin, insource=None):
             ok=None if not insource or insource["n_universe"] == 0 else
             insource["c_precision"] is None or insource["c_precision"] >= K["synthetic_precision"]),
     }
-    if origin == "tuned_vs20":
-        crit["heldout"] = dict(ok=None, pending="tuned_vs20: must also pass on VS21 alone")
-    elif origin == "tuned_pooled":
+    vs21 = by_source.get("vs21")
+    if origin == "tuned_pooled":
         crit["heldout"] = dict(ok=None, pending="tuned_pooled: can pass only on an external set")
+    elif vs21 is None:
+        crit["heldout"] = dict(ok=None, pending="tuned_vs20: must also pass on VS21 alone" if origin == "tuned_vs20"
+                               else "as_published: the gate is on VS20 and VS21 pooled")
+    elif origin == "tuned_vs20":
+        # This tier's Wilson bound (and prior stress where the tier gates it) on VS21 alone.
+        ok = at_least(vs21["c_wilson_lo"], K["wilson_target"])
+        if K.get("prior_stress_gated", True) and ok is not False:
+            st = at_least(vs21["c_prior_stress"], K["prior_target"])
+            ok = False if st is False else None if (ok is None or st is None) else True
+        crit["heldout"] = dict(value=dict(c_fires=vs21["c_fires"], c_wilson_lo=vs21["c_wilson_lo"],
+                                          c_prior_stress=vs21["c_prior_stress"]), ok=ok)
+        if ok is None:
+            crit["heldout"]["pending"] = "tuned_vs20: no fires on VS21 alone"
     else:
-        crit["heldout"] = dict(ok=None, pending="as_published: the gate is on VS20 and VS21 pooled")
+        crit["heldout"] = dict(ok=True, note="as_published: gated on VS20 and VS21 pooled")
     if crit["synthetic_chimeric"]["ok"] is None:
         crit["synthetic_chimeric"]["pending"] = "chimeric set not measured"
     if crit["synthetic_insource"]["ok"] is None:
         crit["synthetic_insource"]["pending"] = "no in-source recast records in this ion mode" if insource else \
             "in-source recast set not measured"
+    gated = {k: c for k, c in crit.items() if not c.get("report_only")}
     if not crit["n_clusters"]["ok"]:
         status = "not_estimable"
-    elif any(c["ok"] is False for c in crit.values()):
+    elif any(c["ok"] is False for c in gated.values()):
         status = "fail"
-    elif any(c["ok"] is None for c in crit.values()):
+    elif any(c["ok"] is None for c in gated.values()):
         status = "incomplete"
     else:
         status = "pass"
     return dict(status=status, criteria=crit, non_conditional=occ["non_conditional"],
-                failed=[k for k, c in crit.items() if c["ok"] is False],
-                pending=[k for k, c in crit.items() if c["ok"] is None])
+                failed=[k for k, c in gated.items() if c["ok"] is False],
+                pending=[k for k, c in gated.items() if c["ok"] is None])
+
+
+def combined_label(strict, provisional):
+    """pass_strict; pass_provisional_only; incomplete_provisional when tier 1 did not reach incomplete but tier 2
+    did (every tier-2 criterion this run measures is met, others pending); otherwise tier 1's status."""
+    if strict == "pass":
+        return "pass_strict"
+    if provisional == "pass":
+        return "pass_provisional_only"
+    if provisional == "incomplete" and strict in ("fail", "not_estimable"):
+        return "incomplete_provisional"
+    return strict
 
 
 # ------------------------------------------------------------------------------------------- aggregates out
@@ -1157,7 +1195,9 @@ PRECISION_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "pr
                    [f"stress_cond_prev_x{f}" for f in CRITERIA["stress_grid_prevalence_fractions"]] + \
                    ["boot_lo", "boot_hi", "c_boot_lo", "c_boot_hi", "boot_undefined",
                     "decoy_fires_plus_5", "decoy_fires_plus_9", "decoy_fires_minus_7", "decoy_fdr",
-                    "c_decoy_fires_plus_5", "c_decoy_fires_plus_9", "c_decoy_fires_minus_7", "c_decoy_fdr"]
+                    "c_decoy_fires_plus_5", "c_decoy_fires_plus_9", "c_decoy_fires_minus_7", "c_decoy_fdr",
+                    "gate_row", "label", "status_strict", "failed_strict", "pending_strict", "status_provisional",
+                    "failed_provisional", "pending_provisional"]
 COMPETITOR_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "competitor_motif_id",
                      "n_universe_competitor", "n_cond", "fires", "fpr", "fpr_wilson_hi", "c_cond", "c_fires", "c_fpr"]
 SYNTHETIC_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "set", "level", "transform", "change",
@@ -1252,7 +1292,17 @@ def write_aggregates(out, result, run_id, rules, local_vs21, extra=None):
     sfx = ".local-vs21" if local_vs21 else ""
     tr = suppress if local_vs21 else (lambda r: r)
     rows = {k: [tr(r) for r in result[k]] for k in ("precision", "competitors", "synthetic", "occupancy")}
-    write_rows(out / f"rules_precision{sfx}.csv", rows["precision"], PRECISION_FIELDS)
+    # Both tiers' statuses side by side on each rule's gate row (primary pass, pooled, all strata).
+    csv_rows = []
+    for r in rows["precision"]:
+        g = result["gates"][r["rule_id"]]
+        if (r["pass_id"], r["source"], r["instrument"], r["energy"]) == (g.get("gate_pass"), "pooled", "all", "all"):
+            r = dict(r, gate_row=True, label=g["label"], status_strict=g["status"], failed_strict=";".join(g["failed"]),
+                     pending_strict=";".join(g["pending"]), status_provisional=g["provisional"]["status"],
+                     failed_provisional=";".join(g["provisional"]["failed"]),
+                     pending_provisional=";".join(g["provisional"]["pending"]))
+        csv_rows.append(r)
+    write_rows(out / f"rules_precision{sfx}.csv", csv_rows, PRECISION_FIELDS)
     write_rows(out / f"rules_competitors{sfx}.csv", rows["competitors"], COMPETITOR_FIELDS)
     write_rows(out / f"rules_synthetic{sfx}.csv", rows["synthetic"], SYNTHETIC_FIELDS)
     write_rows(out / f"rules_occupancy{sfx}.csv", rows["occupancy"], OCCUPANCY_FIELDS)
@@ -1270,21 +1320,40 @@ def write_aggregates(out, result, run_id, rules, local_vs21, extra=None):
             entry["competitors"] = [r for r in rows["competitors"] if r["rule_id"] == rule["rule_id"]]
             if local_vs21:
                 entry["criteria"] = {k: {kk: vv for kk, vv in v.items() if kk != "value"} for k, v in entry["criteria"].items()}
+                entry["provisional"] = dict(entry["provisional"], criteria={
+                    k: {kk: vv for kk, vv in v.items() if kk != "value"} for k, v in entry["provisional"]["criteria"].items()})
                 entry["by_provenance"] = {b: suppress(v) for b, v in entry["by_provenance"].items()}
         by_rule.append(entry)
-    doc = dict(label="ws8-p3-class-rules", run_id=run_id, criteria=CRITERIA, ruleset_sha256=EXPECTED_RULESET_SHA256,
-               ruleset_version=EXPECTED_RULESET_VERSION, rules=by_rule,
+    gates = result["gates"].values()
+    doc = dict(label="ws8-p3-class-rules", run_id=run_id, criteria=CRITERIA, criteria_provisional=CRITERIA_PROVISIONAL,
+               ruleset_sha256=EXPECTED_RULESET_SHA256, ruleset_version=EXPECTED_RULESET_VERSION, rules=by_rule,
                as_applied=dict(status="not_done", reason="needs the passing rules and their joint application"),
-               status_counts=dict(sorted(Counter(g["status"] for g in result["gates"].values()).items())),
+               status_counts=dict(sorted(Counter(g["status"] for g in gates).items())),
+               status_counts_provisional=dict(sorted(Counter(g["status_provisional"] for g in gates).items())),
+               label_counts=dict(sorted(Counter(g["label"] for g in gates).items())),
                not_done=NOT_DONE, **(extra or {}))
     p2.write_json(out / f"rules_precision{sfx}.json", doc)
-    proposal = dict(label="ws8-p3-review-proposal", run_id=run_id,
-                    passed=[dict(rule_id=g["rule_id"], version=g["version"], ion_mode=g["ion_mode"])
-                            for g in by_rule if g["status"] == "pass"],
-                    incomplete_measured_criteria_met=[dict(rule_id=g["rule_id"], version=g["version"], ion_mode=g["ion_mode"],
-                                                           pending=g["pending"]) for g in by_rule if g["status"] == "incomplete"],
-                    note="Only `passed` met every pre-registered criterion. `incomplete` rules met every criterion this "
-                         "run measures and are NOT eligible for author_reviewed until the pending criteria are measured.")
+    def numbers(crit):
+        return {k: {kk: v.get(kk) for kk in ("value", "threshold", "ok", "report_only") if kk in v} for k, v in crit.items()}
+
+    def listed(g, tier):
+        t = g if tier == "strict" else g["provisional"]
+        return dict(rule_id=g["rule_id"], version=g["version"], ion_mode=g["ion_mode"], tier=tier,
+                    criteria=numbers(t["criteria"]))
+
+    proposal = dict(
+        label="ws8-p3-review-proposal", run_id=run_id,
+        criteria=dict(strict=CRITERIA, provisional=CRITERIA_PROVISIONAL),
+        passed_strict=[listed(g, "strict") for g in by_rule if g["label"] == "pass_strict"],
+        passed_provisional_only=[listed(g, "provisional") for g in by_rule if g["label"] == "pass_provisional_only"],
+        incomplete_strict=[dict(rule_id=g["rule_id"], version=g["version"], ion_mode=g["ion_mode"], pending=g["pending"])
+                           for g in by_rule if g["status"] == "incomplete"],
+        incomplete_provisional=[dict(rule_id=g["rule_id"], version=g["version"], ion_mode=g["ion_mode"],
+                                     pending=g["provisional"]["pending"]) for g in by_rule if g["label"] == "incomplete_provisional"],
+        note="`passed_strict` met every tier-1 (strict) criterion, with tier-1 numbers. `passed_provisional_only` met every "
+             "tier-2 (provisional, registered 2026-11-24) criterion but not tier 1, with tier-2 numbers. The author "
+             "chooses which tier to accept. `incomplete_*` rules met every criterion of their tier that this run measures "
+             "and are NOT eligible for author_reviewed until the pending criteria are measured.")
     p2.write_json(out / f"review_proposal-{run_id}{sfx}.json", proposal)
     return doc
 
@@ -1330,15 +1399,24 @@ def write_report(out, doc, run, local_vs21):
              f"Run `{doc['run_id']}`. Rule set {EXPECTED_RULESET_VERSION} (`{EXPECTED_RULESET_SHA256}`). "
              "Library-only measurement; counts use clusters (truth Hill formula, curated precursor type, truth motif "
              "set within a source) unless a column says records.", "",
-             "Status: `pass` met every pre-registered criterion; `fail` failed at least one measured criterion; "
-             "`not_estimable` has fewer than 100 fired clusters; `incomplete` met every criterion this run measures "
-             "while others are pending (the in-source recast set and the VS21 pass are not part of this phase); "
-             "`not_measured` is outside measure:true and source_checked:true (or refused by the console).", "",
-             "Status counts: " + json.dumps(doc["status_counts"], sort_keys=True), "",
+             "Each rule is gated twice. Tier 1 (strict) is the PR 908 table: >= 100 fired clusters, cluster Wilson "
+             "lower >= 0.95, per-source precision >= 0.95, prior stress >= 0.90, decoy FDR <= 0.05, occupancy <= 5 %, "
+             "synthetic cluster precision >= 0.95. Tier 2 (provisional, registered 2026-11-24 before any VS21 pass and "
+             "after the VS20 development pass had been seen): >= 30 fired clusters, Wilson lower >= 0.90, per-source "
+             ">= 0.90, prior stress report-only, the same decoy FDR and occupancy, synthetic >= 0.90.", "",
+             "Status per tier: `pass` met every criterion of the tier; `fail` failed at least one measured criterion; "
+             "`not_estimable` has fewer fired clusters than the tier's minimum; `incomplete` met every criterion this "
+             "run measures while others are pending (the VS21 pass is not part of this phase); `not_measured` is "
+             "outside measure:true and source_checked:true (or refused by the console). Label: `pass_strict`, "
+             "`pass_provisional_only`, `incomplete_provisional` (tier 2 incomplete while tier 1 failed or was not "
+             "estimable), otherwise the strict status.", "",
+             "Status counts, strict: " + json.dumps(doc["status_counts"], sort_keys=True) + "; provisional: "
+             + json.dumps(doc["status_counts_provisional"], sort_keys=True) + "; labels: "
+             + json.dumps(doc["label_counts"], sort_keys=True), "",
              "Decoy FDR and chimeric precision are cluster-level, as the gate reads them; the record-level values are "
              "in rules_precision.csv and rules_synthetic.csv (report only).", "",
-             "| Rule | v | Mode | Primary pass | Fired clusters | Cluster precision | Cluster Wilson lower | Prior stress | Decoy FDR | Occupancy axis / records | Chimeric precision 10/30/50 % | In-source precision | Status | Failed | Pending |",
-             "|---|---:|---|---|---:|---:|---:|---:|---:|---|---|---:|---|---|---|"]
+             "| Rule | v | Mode | Primary pass | Fired clusters | Cluster precision | Cluster Wilson lower | Prior stress | Decoy FDR | Occupancy axis / records | Chimeric precision 10/30/50 % | In-source precision | Strict | Strict failed | Strict pending | Provisional | Provisional failed | Provisional pending | Label |",
+             "|---|---:|---|---|---:|---:|---:|---:|---:|---|---|---:|---|---|---|---|---|---|---|"]
     for g in doc["rules"]:
         if g["status"] == "not_measured":
             continue
@@ -1350,7 +1428,9 @@ def write_report(out, doc, run, local_vs21):
         lines.append("| " + " | ".join([g["rule_id"], str(g["version"]), g["ion_mode"], g["gate_pass"], fmt(row["c_fires"]),
                                         fmt(row["c_precision"]), fmt(row["c_wilson_lo"]), fmt(row["c_prior_stress"]),
                                         fmt(decoy), fmt(occ.get("axis_occupancy")) + " / " + fmt(occ.get("record_occupancy")),
-                                        chim, ins, g["status"], ",".join(g["failed"]) or "-", ",".join(g["pending"]) or "-"]) + " |")
+                                        chim, ins, g["status"], ",".join(g["failed"]) or "-", ",".join(g["pending"]) or "-",
+                                        g["provisional"]["status"], ",".join(g["provisional"]["failed"]) or "-",
+                                        ",".join(g["provisional"]["pending"]) or "-", g["label"]]) + " |")
     not_measured = Counter(g["reason"] for g in doc["rules"] if g["status"] == "not_measured")
     lines += ["", "Not measured: " + json.dumps(dict(sorted(not_measured.items())), sort_keys=True), ""]
     prov = sc(run.get("p3_exclusions", {}))
@@ -1533,7 +1613,7 @@ def measure(args, run):
 
 # ------------------------------------------------------------------------------------------- VS21 and runs
 FREEZE_KEYS = ("ruleset_sha256_expected", "ruleset_files", "console_sha256", "console_files", "code", "parameters",
-               "insource_table")
+               "insource_table", "criteria")
 
 
 def freeze_hashes(ruleset_dir, console, seed, bootstrap):
@@ -1542,7 +1622,8 @@ def freeze_hashes(ruleset_dir, console, seed, bootstrap):
                 console_files=console_files(console),
                 code={p.relative_to(ROOT).as_posix(): p2.sha256(p) for p in CODE_FILES},
                 parameters=dict(seed=seed, bootstrap=bootstrap, console_ini=CONSOLE_INI),
-                insource_table=p2.sha256(INSOURCE_TABLE))
+                insource_table=p2.sha256(INSOURCE_TABLE),
+                criteria=json.loads(json.dumps(dict(strict=CRITERIA, provisional=CRITERIA_PROVISIONAL))))
 
 
 def vs21_guard(args, out_root=OUT_ROOT):
@@ -1692,6 +1773,7 @@ def main(argv=None):
                code_sha256={p.relative_to(ROOT).as_posix(): p2.sha256(p) for p in CODE_FILES},
                parameters=dict(sources=args.sources, workers=args.workers, limit=args.limit, seed=args.seed,
                                bootstrap=args.bootstrap, priority=priority_name, criteria=CRITERIA,
+                               criteria_provisional=CRITERIA_PROVISIONAL,
                                threads={v: os.environ[v] for v in p2.THREAD_VARS}, passes=list(PASSES),
                                primary_pass=PRIMARY_PASS, chimeric=dict(levels=list(CHIMERIC_LEVELS), window_da=CHIMERIC_WINDOW_DA,
                                                                         partner="same mode, other first block, seeded"),

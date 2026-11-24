@@ -638,6 +638,86 @@ class MeasureTests(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+def no_fire_insource(truth):
+    """An in-source set with recast records in the positive mode and no fires, so the criterion is measured."""
+    uids = [(u[0], u[1], 0) for u in sorted(truth)[:20]]
+    return dict(by_rule={0: {"base": {"r1": []}}}, universe={0: uids}, notev={},
+                rows=[dict(row=0, mode="pos", change_text="-H2O", product_adduct="[M+H-H2O]+")])
+
+
+class TierTests(unittest.TestCase):
+    """Tier 1 (strict) and tier 2 (provisional, registered 2026-11-24). With VS21 in the sources the held-out
+    criterion of an as_published rule is met (the gate is then on VS20 and VS21 pooled), so `pass` is reachable."""
+
+    def gate(self, sc, sources=("vs20", "vs21"), rules=None):
+        truth, by_rule, chim = sc
+        res = m.measure_core(rules or [rule()], truth, by_rule, {}, list(sources), replicates=10, chimeric=chim,
+                             insource=no_fire_insource(truth))
+        return res, res["gates"]["r1"]
+
+    def test_rule_passing_tier_1(self):
+        res, g = self.gate(scenario())
+        self.assertEqual((g["status"], g["status_provisional"], g["label"]), ("pass", "pass", "pass_strict"))
+        self.assertEqual((g["failed"], g["pending"], g["provisional"]["failed"]), ([], [], []))
+        with tempfile.TemporaryDirectory() as d:
+            m.write_aggregates(d, res, "p3cs-20261124-abcdef1", [rule()], False)
+            prop = json.loads((Path(d) / "review_proposal-p3cs-20261124-abcdef1.json").read_text(encoding="utf-8"))
+            self.assertEqual([x["rule_id"] for x in prop["passed_strict"]], ["r1"])
+            self.assertEqual(prop["passed_strict"][0]["criteria"]["n_clusters"]["threshold"], 100)
+            self.assertEqual(prop["passed_provisional_only"], [])
+            row = next(r for r in m.read_rows(Path(d) / "rules_precision.csv") if r["gate_row"] == "True")
+            self.assertEqual((row["status_strict"], row["status_provisional"], row["label"]), ("pass", "pass", "pass_strict"))
+
+    def test_rule_passing_tier_2_only(self):
+        res, g = self.gate(scenario(tp_clusters=40, members=1))  # n = 40 clusters, 0 FP
+        self.assertEqual((g["status"], g["status_provisional"], g["label"]),
+                         ("not_estimable", "pass", "pass_provisional_only"))
+        self.assertGreaterEqual(g["provisional"]["criteria"]["cluster_wilson_lo"]["value"], 0.90)
+        with tempfile.TemporaryDirectory() as d:
+            m.write_aggregates(d, res, "p3cs-20261124-abcdef1", [rule()], False)
+            prop = json.loads((Path(d) / "review_proposal-p3cs-20261124-abcdef1.json").read_text(encoding="utf-8"))
+            self.assertEqual(prop["passed_strict"], [])
+            listed = prop["passed_provisional_only"][0]
+            self.assertEqual((listed["rule_id"], listed["tier"]), ("r1", "provisional"))
+            self.assertEqual(listed["criteria"]["n_clusters"]["threshold"], 30)
+            self.assertEqual(listed["criteria"]["cluster_wilson_lo"]["threshold"], 0.90)
+
+    def test_rule_failing_both_tiers(self):
+        res, g = self.gate(scenario(tp_clusters=160, fp_clusters=20))
+        self.assertEqual((g["status"], g["status_provisional"], g["label"]), ("fail", "fail", "fail"))
+        self.assertIn("cluster_wilson_lo", g["provisional"]["failed"])
+
+    def test_prior_stress_is_report_only_in_tier_2(self):
+        # Few negatives: prior stress falls below 0.90, which fails tier 1 but not tier 2.
+        res, g = self.gate(scenario(tp_clusters=160, neg_clusters=5))
+        self.assertIn("prior_stress", g["failed"])
+        p = g["provisional"]["criteria"]["prior_stress"]
+        self.assertTrue(p["report_only"])
+        self.assertFalse(p["ok"])
+        self.assertNotIn("prior_stress", g["provisional"]["failed"])
+        self.assertEqual((g["status_provisional"], g["label"]), ("pass", "pass_provisional_only"))
+
+    def test_incomplete_provisional_in_a_vs20_only_run(self):
+        res, g = self.gate(scenario(tp_clusters=40, members=1), sources=("vs20",))
+        self.assertEqual((g["status"], g["status_provisional"], g["label"]),
+                         ("not_estimable", "incomplete", "incomplete_provisional"))
+        self.assertEqual(g["provisional"]["pending"], ["heldout"])
+
+    def test_tuned_rules(self):
+        res, g = self.gate(scenario(), rules=[rule(origin="tuned_vs20")])
+        self.assertEqual(g["label"], "incomplete")  # no VS21 fires: VS21-alone criterion pending in both tiers
+        self.assertIn("heldout", g["provisional"]["pending"])
+        res, g = self.gate(scenario(), rules=[rule(origin="tuned_pooled")])
+        self.assertEqual((g["status"], g["status_provisional"]), ("incomplete", "incomplete"))
+
+    def test_combined_label(self):
+        self.assertEqual(m.combined_label("pass", "pass"), "pass_strict")
+        self.assertEqual(m.combined_label("fail", "pass"), "pass_provisional_only")
+        self.assertEqual(m.combined_label("not_estimable", "incomplete"), "incomplete_provisional")
+        self.assertEqual(m.combined_label("incomplete", "incomplete"), "incomplete")
+        self.assertEqual(m.combined_label("fail", "fail"), "fail")
+
+
 class StatisticsTests(unittest.TestCase):
     def test_bootstrap_deterministic_and_degenerate(self):
         t = Counter({(True, 1): 90, (False, 1): 10})
@@ -696,9 +776,11 @@ class OutputTests(unittest.TestCase):
             self.assertEqual(doc["status_counts"], {"incomplete": 1, "not_measured": 1})
             report = (Path(a) / "report.md").read_text(encoding="utf-8")
             self.assertIn("provenance_unavailable", report)
-            self.assertIn("in-source", report)
+            self.assertIn("In-source recasts", report)
+            self.assertIn("Tier 2 (provisional, registered 2026-11-24", report)
             prop = json.loads((Path(a) / "review_proposal-p3cs-20261123-abcdef1.json").read_text(encoding="utf-8"))
-            self.assertEqual(prop["passed"], [])
+            self.assertEqual((prop["passed_strict"], prop["passed_provisional_only"]), ([], []))
+            self.assertIn("author chooses which tier", prop["note"])
 
     def test_audit_catches_forbidden_columns_and_keys(self):
         with tempfile.TemporaryDirectory() as d:
@@ -895,6 +977,23 @@ class GuardTests(unittest.TestCase):
                     m.vs21_guard(args, d)
             finally:
                 m.INSOURCE_TABLE = saved
+
+    def test_vs21_freeze_refuses_changed_criteria_of_either_tier(self):
+        with tempfile.TemporaryDirectory() as d:
+            rs, console = self.files(d)
+            args = SimpleNamespace(vs21=True, freeze=self.freeze(d, rs, console), ruleset_dir=rs, console=console,
+                                   seed=1, bootstrap=10)
+            self.assertTrue(m.vs21_guard(args, d))
+            for name, field, value in (("CRITERIA", "wilson_target", 0.94), ("CRITERIA_PROVISIONAL", "n_min", 25),
+                                       ("CRITERIA_PROVISIONAL", "prior_stress_gated", True)):
+                saved = getattr(m, name)
+                setattr(m, name, dict(saved, **{field: value}))
+                try:
+                    with self.assertRaisesRegex(PermissionError, "criteria", msg=name + "." + field):
+                        m.vs21_guard(args, d)
+                finally:
+                    setattr(m, name, saved)
+            self.assertTrue(m.vs21_guard(args, d))
 
     def test_vs21_freeze_covers_dlls_parameters_and_path(self):
         """Regression: a changed DLL beside the console, another seed or bootstrap, or a freeze file outside the

@@ -333,17 +333,43 @@ $py = '<annotation-py312>\Scripts\python.exe'   # the RDKit environment P2 uses
 | `rules_synthetic.csv` | per rule and synthetic set (`set`): each chimeric level, and each in-source transformation row (`transform`, `change`, `product_adduct`) plus their pool (`transform` = `all`, gated): records not evaluated by the console, fires, TP/FP, precision and Wilson in records (report only) and clusters (gated) |
 | `rules_occupancy.csv` | per rule and precondition mode: both occupancy definitions and `non_conditional` |
 | `rules_precision.json` | label `ws8-p3-class-rules`, criteria, per rule: parameters, status, every criterion with its value, the pooled row of every pass, synthetic, occupancy, competitors, provenance breakdown |
-| `review_proposal-<run-id>.json` | rules with status `pass` (none can pass in this phase) and, separately, `incomplete` rules |
+| `review_proposal-<run-id>.json` | `passed_strict` (tier-1 numbers) and `passed_provisional_only` (tier-2 numbers) as separate lists, both empty in a VS20-only run, and the `incomplete_strict` and `incomplete_provisional` rules; the author chooses which tier to accept |
 | `report.md`, `run.json` | summary; code commit, pin path, inputs and sha256, rule-set files (raw and canonical sha256), console path and sha256, parameters, exclusions, P2 parity, file hashes |
 
 Aggregates carry ids only (`rule_id`, `motif_id`); `measure` scans them as P2 does (`audit_aggregates`).
 
+## Criteria
+
+Each rule is gated twice, on the same primary-mode pooled cell, counting clusters. Tier 1 is the table registered
+in MsdialWorkbench PR #908 (`CRITERIA`). Tier 2 (`CRITERIA_PROVISIONAL`) was registered by the author on
+2026-11-24, before any VS21 pass, after the VS20 development pass had been seen. Counting unit, primary pass,
+eligibility and the pending logic are the same in both tiers.
+
+| Criterion | Tier 1 (strict) | Tier 2 (provisional) |
+|---|---|---|
+| Fired clusters (pooled) | >= 100 | >= 30 |
+| Cluster Wilson lower bound | >= 0.95 | >= 0.90 |
+| Per-source point precision, sources with >= 30 clusters | >= 0.95 | >= 0.90 |
+| Prior stress at half the library-wide prevalence | >= 0.90 | report-only, not gated |
+| Cluster decoy FDR (+5, +9, -7 Da), decided exactly | <= 0.05 | <= 0.05 |
+| Occupancy (axis and records) | <= 5 % | <= 5 % |
+| Synthetic chimeric and in-source cluster precision | >= 0.95 | >= 0.90 |
+| `tuned_vs20` rules | the tier's Wilson bound and prior stress on VS21 alone | the tier's Wilson bound on VS21 alone |
+| `tuned_pooled` rules | never pass (external set) | never pass (external set) |
+| `as_published` rules | gated on VS20 and VS21 pooled | gated on VS20 and VS21 pooled |
+
+Both tiers are written to `run.json` and the freeze file; the VS21 pass refuses a change in either.
+
 ## Status
 
-`not_measured` (outside `measure: true` and `source_checked: true`, or refused by the console); `not_estimable`
-(fewer than 100 fired clusters in the primary pass); `fail` (a measured criterion failed); `incomplete` (every
-criterion this run can measure is met, others pending); `pass` (every pre-registered criterion met). In this
-phase the VS21 pass (held-out criterion) is pending for every rule, so no rule can reach `pass`.
+Per tier: `not_measured` (outside `measure: true` and `source_checked: true`, or refused by the console);
+`not_estimable` (fewer fired clusters than the tier's minimum in the primary pass); `fail` (a gated criterion
+failed); `incomplete` (every gated criterion this run can measure is met, others pending); `pass` (every gated
+criterion met). The combined label is `pass_strict` when tier 1 passes, `pass_provisional_only` when only tier 2
+passes, `incomplete_provisional` when tier 2 is `incomplete` while tier 1 failed or was not estimable, and
+otherwise the tier-1 status. `rules_precision.json`, the gate row of `rules_precision.csv` and `report.md` give
+both statuses with their failed and pending lists. The held-out criterion is met only with VS21 in the run, so a
+VS20-only run has no `pass` in either tier.
 
 ## Decisions where the specification was silent
 
