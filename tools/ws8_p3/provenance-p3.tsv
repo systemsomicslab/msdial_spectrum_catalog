@@ -1,0 +1,7 @@
+order	field	pattern	outcome	note
+1	comment	(?i)\bin[ -]?silico\b	in_silico	declared in-silico source tag; provisional until the author checks the VS20 COMMENT tokens
+2	comment	(?i)\bmassbank|\bMSBNK-	massbank	provisional
+3	comment	(?i)\bGNPS\b|\bCCMSLIB	gnps	provisional
+4	comment	(?i)\bMoNA\b	mona	provisional
+5	comment	(?i)\bReSpect\b	respect	provisional
+6	comment	(?i)\bRIKEN\b|\bPlaSMA\b	riken	provisional

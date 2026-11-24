@@ -1,0 +1,21 @@
+parent_motif	parent_adduct	change	product_adduct	source	note
+*	[M+H]+	-H2O	[M+H-H2O]+	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	generic dehydration; applied only when the parent formula holds H2O
+*	[M+H]+	-NH3	[M+H-NH3]+	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	generic deamination; applied only when the parent formula holds NH3
+*	[M+H]+	-CH2O2	[M+H-HCOOH]+	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	carboxylic acid loss in positive mode; applied only when the parent formula holds CH2O2
+*	[M-H]-	-H2O	[M-H-H2O]-	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	generic dehydration
+*	[M-H]-	-CO2	[M-H-CO2]-	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	decarboxylation, including malonyl esters
+*	[M+NH4]+	-NH3	[M+H]+	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	ammonium adduct seen as the protonated ion
+*	[M+HCOO]-	-CH2O2	[M-H]-	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	formate adduct seen as the deprotonated ion
+*	[M+CH3COO]-	-C2H4O2	[M-H]-	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	acetate adduct seen as the deprotonated ion
+o_glycoside	[M+H]+	-C6H10O5	[M+H-Hex]+	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	in-source loss of a hexose
+o_glycoside	[M+H]+	-C6H10O4	[M+H-dHex]+	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	in-source loss of a deoxyhexose
+o_glycoside	[M+H]+	-C5H8O4	[M+H-Pen]+	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	in-source loss of a pentose
+o_glycoside	[M+H]+	-C6H8O6	[M+H-HexA]+	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	in-source loss of a hexuronic acid
+o_glycoside	[M-H]-	-C6H10O5	[M-H-Hex]-	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	in-source loss of a hexose
+o_glycoside	[M-H]-	-C6H10O4	[M-H-dHex]-	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	in-source loss of a deoxyhexose
+o_glycoside	[M-H]-	-C5H8O4	[M-H-Pen]-	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	in-source loss of a pentose
+o_glycoside	[M-H]-	-C6H8O6	[M-H-HexA]-	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	in-source loss of a hexuronic acid
+sulfate_ester	[M-H]-	-SO3	[M-H-SO3]-	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	in-source desulfation
+organophosphate_monoester	[M-H]-	-HPO3	[M-H-HPO3]-	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	in-source loss of metaphosphoric acid
+nucleoside_polyphosphate	[M-H]-	-H3PO4	[M-H-H3PO4]-	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	in-source loss of phosphoric acid, e.g. ATP to ADP-like ions
+galloyl_ester	[M-H]-	-C7H4O4	[M-H-galloyl]-	Xu et al. 2015 Anal. Chem. 87:2273 (doi:10.1021/ac504118y)	in-source degalloylation
