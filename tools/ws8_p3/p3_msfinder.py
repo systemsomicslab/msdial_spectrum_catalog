@@ -402,16 +402,18 @@ def predict(args, run):
 
 # ------------------------------------------------------------------------------------------- measure
 def parse_structure_result(path):
-    """record_id -> candidates in the written order: (first block, ontology, rule term, base rank)."""
+    """record_id -> candidates in the written order: first block, ontology, the ranking score (the rule-adjusted
+    "Ranking score" when present, else "Total score"), the unadjusted total score and the rule term."""
     out = defaultdict(list)
     with open(path, encoding="utf-8", errors="replace", newline="") as f:
-        for row in csv.DictReader(f, delimiter="\t"):
+        for row in csv.DictReader(f, delimiter="	"):
             m = FILE_RE.fullmatch(row["File name"])
             if not m:
                 raise RuntimeError("Unexpected query file name in the structure result")
+            total = float(row["Total score"])
             out[int(m.group(1))].append(dict(block=(row.get("InChIKey") or "").split("-")[0], ontology=row.get("Ontology") or "",
-                                             term=float(row.get("Diagnostic rule term") or 0),
-                                             base_rank=int(row["Base rank"]) if row.get("Base rank") else None))
+                                             score=float(row["Ranking score"]) if row.get("Ranking score") else total,
+                                             total=total, term=float(row.get("Diagnostic rule term") or 0)))
     return dict(out)
 
 
@@ -426,39 +428,54 @@ def parse_diagnostic_result(path):
     return dict(out)
 
 
+def best_by_block(cands, field="score"):
+    """First block -> its best score (stereoisomers and duplicates share a first block)."""
+    best = {}
+    for c in cands:
+        if c["block"] not in best or c[field] > best[c["block"]]:
+            best[c["block"]] = c[field]
+    return best
+
+
+def canonical(cands):
+    """Candidates by descending score, exact ties by first block: the written order of tied candidates varies between
+    runs of the same input (the console merges its per-formula results in no fixed order)."""
+    return sorted(cands, key=lambda c: (-c["score"], c["block"]))
+
+
 def rank_of(cands, truth):
-    for i, c in enumerate(cands, 1):
-        if c["block"] == truth:
-            return i
-    return None
+    """Tie-pessimistic rank of the truth's first block: 1 + the other first blocks scoring at least as high; None when
+    the truth is not a candidate."""
+    best = best_by_block(cands)
+    if truth not in best:
+        return None
+    return 1 + sum(1 for b, v in best.items() if b != truth and v >= best[truth])
 
 
 def boost_wrong(off, on, truth):
-    """The rules raised a wrong candidate above the true structure (or above the off-run top-1 that was correct):
-    some wrong candidate is below the truth in the off run and above it in the on run."""
-    r_off, r_on = rank_of(off, truth), rank_of(on, truth)
-    if r_off is None or r_on is None:
+    """The rules raised a wrong candidate to or above the true structure (or the off-run top-1 that was correct):
+    some wrong first block scores below the truth with rules off and at least as high with rules on."""
+    a, b = best_by_block(off), best_by_block(on)
+    if truth not in a or truth not in b:
         return False
-    below = {c["block"] for c in off[r_off:]} - {truth}
-    above = {c["block"] for c in on[:r_on - 1]} - {truth}
-    return bool(below & above)
+    return any(blk != truth and a.get(blk, float("-inf")) < a[truth] and v >= b[truth] for blk, v in b.items())
 
 
 def spectrum_row(rec, truth, truth_class, cands, off_cands, parents, name_to_id, onto_names):
     rank = rank_of(cands, truth)
-    top = cands[0] if cands else None
+    order = canonical(cands)
+    top = order[0] if order else None
     top_id = (name_to_id.get(top["ontology"]) or onto_names.get(top["ontology"])) if top else None
     top_class = class_level(top_id, parents)
     row = dict(rec, rank=rank, found=rank is not None, top1=rank == 1, top5=rank is not None and rank <= 5,
-               n_candidates=len(cands), class_defined=truth_class is not None,
+               n_candidates=len(best_by_block(cands)), class_defined=truth_class is not None,
                class_correct=truth_class is not None and top_class == truth_class)
     if off_cands is not None:
         row["boost_wrong"] = boost_wrong(off_cands, cands, truth)
-        row["order_changed"] = [c["block"] for c in cands] != [c["block"] for c in off_cands]
+        row["order_changed"] = [c["block"] for c in order] != [c["block"] for c in canonical(off_cands)]
         row["rank_changed"] = rank != rank_of(off_cands, truth)
-        # The on run's Base rank must reproduce the off run's order (deterministic search).
-        base = sorted(cands, key=lambda c: (c["base_rank"] is None, c["base_rank"] or 0))
-        row["base_rank_mismatch"] = [c["block"] for c in base] != [c["block"] for c in off_cands]
+        # Determinism: the on run's unadjusted scores must equal the off run's, block by block.
+        row["base_score_mismatch"] = best_by_block(cands, "total") != best_by_block(off_cands, "total")
     return row
 
 
@@ -602,7 +619,7 @@ def measure(args, run):
                 checks[f"{v}:instrument_class_mismatch"] += row["predict_instrument_class"] not in ("", rec["instrument_class"])
                 checks[f"{v}:{rec['set']}:predict_reviewed_outcome"] += row["predict_reviewed_outcome"]
                 checks[f"{v}:{rec['set']}:predict_claim_eligible"] += row["predict_claim_eligible"]
-                checks[f"{v}:base_rank_mismatch"] += row["base_rank_mismatch"]
+                checks[f"{v}:base_score_mismatch"] += row["base_score_mismatch"]
                 if rec["set"] == "control":
                     checks[f"{v}:control_order_changed"] += row["order_changed"]
             checks[f"{v}:no_candidates"] += row["n_candidates"] == 0
@@ -612,7 +629,7 @@ def measure(args, run):
     p3m.write_rows(args.out / f"msfinder_cells{sfx}.csv", cells, CELL_FIELDS)
     spectrum_fields = ["record_id", "set", "family", "rule_id", "instrument_class", "cluster_id", "variant", "rank", "found",
                        "top1", "top5", "n_candidates", "class_defined", "class_correct", "boost_wrong", "rank_changed",
-                       "order_changed", "base_rank_mismatch", "predict_reviewed_outcome", "predict_claim_eligible",
+                       "order_changed", "base_score_mismatch", "predict_reviewed_outcome", "predict_claim_eligible",
                        "predict_instrument_class"]
     p3m.write_rows(args.out / f"per_spectrum{sfx}.tsv",
                    [dict(r, variant=v) for v, rows in rows_by_variant.items() for r in rows], spectrum_fields)

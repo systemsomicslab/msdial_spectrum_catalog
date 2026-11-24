@@ -499,16 +499,16 @@ Stages are `select`, `predict`, `measure` and `all`:
 |---|---|
 | `select` | reviewed rules from `--ruleset-dir` (pinned 0.2.0), the selection and the counts, `selection.tsv` (record id, set, family, rule, outcome, mode, console instrument class, cluster; no keys), one query MSP per spectrum under `msp/<source>/` |
 | `predict` | per variant (`off`, `w<w>`) and shard, a job folder `predict/<variant>/shard-NN/` holding `input/` (MS-FINDER writes `.fgt` files and structure folders beside its inputs), `method.ini`, `out/` and `job.json`. Each job is one console process at BelowNormal, pinned to `--cores-per-worker` logical processors, with at most `--workers` at once. The console writes MessagePack caches (`*_bin.*`) beside its Resources on first use, so when they are missing the first job runs alone. The console also opens its Resources exclusively while it loads them, so only one process loads at a time. The next process starts once the log shows `Start processing..`. Every on job's manifest must name the pinned set, the weight and the scope, with no errors or refusals. A folder without `job.json` is refused, never removed. |
-| `measure` | parses the structure rows (rank = written order per query, rows with score <= 0 are not written), joins the truth first block from the frozen `prepared` table, and writes the outputs below |
+| `measure` | parses the structure rows (rows with score <= 0 are not written) and joins the truth first block from the frozen `prepared` table. Candidates are compared by first block at their best score: `Ranking score` with rules on, `Total score` with rules off. The truth's rank is tie-pessimistic, 1 plus the other first blocks scoring at least as high, because the console writes exactly tied candidates in an order that varies between runs (the smoke showed it). Then it writes the outputs below |
 
 Metrics are computed per variant, set (`selected`, `control`), family (the reviewed rule's family, or `all`) and
 console instrument class (a blank `INSTRUMENTTYPE` is `unknown`). Every cell has a record-level and a cluster-level
 value; at cluster level each cluster weighs one.
 
 - **Accuracy.** Top-1 and top-5 by first block, `not_found`, `rank_le10` and the median rank among found spectra.
-- **Boost-wrong.** For on variants: a wrong candidate is below the truth in the off run and above it in the on run.
+- **Boost-wrong.** For on variants: a wrong first block scores below the truth in the off run and at least as high in the on run.
   This covers the case where the off-run top-1 was correct.
-- **Rank changes.** `rank_changed` and `order_changed`, compared with off.
+- **Rank changes.** `rank_changed`, and `order_changed` (score order with ties broken by first block), compared with off.
 - **ChemOnt class-level accuracy.** MS-FINDER's class is the `Ontology` (direct parent) of the top-1 candidate,
   which the console takes from `InchikeyClassyfireDB-VS5.icd`. The truth class is the same file's direct parent
   for the truth first block. Both are lifted to the class level (depth 3 below `Chemical entities`) of ChemOnt 2.1
@@ -519,7 +519,7 @@ are never suppressed.
 
 Checks recorded in `selection_result.json`:
 
-- the on run's `Base rank` order against the off run (`base_rank_mismatch`, which shows determinism)
+- the on run's unadjusted `Total score` per first block against the off run's (`base_score_mismatch`, which shows determinism)
 - control spectra whose order changed (expected 0)
 - whether the predict run itself produced a claim-eligible reviewed outcome. Claim eligibility depends on the
   review's instrument classes, so `unknown` gets no ranking term.

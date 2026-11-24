@@ -15,8 +15,8 @@ REVIEWED = {"saponin.a.neg": dict(family="saponin", motif_id="m1", version=1),
             "glycoside.b.pos": dict(family="glycoside", motif_id="m2", version=1)}
 
 
-def cand(block, term=0.0, base=None, onto=""):
-    return dict(block=block, ontology=onto, term=term, base_rank=base)
+def cand(block, score, total=None, onto=""):
+    return dict(block=block, ontology=onto, score=score, total=score if total is None else total, term=0.0)
 
 
 class SelectionTest(unittest.TestCase):
@@ -84,28 +84,39 @@ class LibraryTest(unittest.TestCase):
 
 
 class MetricTest(unittest.TestCase):
-    def test_rank_and_boost_wrong(self):
-        off = [cand("T"), cand("W1"), cand("W2")]
+    def test_rank_is_tie_pessimistic_and_order_free(self):
+        off = [cand("T", 5), cand("W1", 4), cand("W2", 3), cand("T", 2)]
         self.assertEqual(ms.rank_of(off, "T"), 1)
         self.assertIsNone(ms.rank_of(off, "Z"))
-        self.assertTrue(ms.boost_wrong(off, [cand("W1", 1), cand("T"), cand("W2")], "T"))
-        self.assertFalse(ms.boost_wrong([cand("W1"), cand("T")], [cand("T", 1), cand("W1")], "T"))
-        self.assertFalse(ms.boost_wrong([cand("W1"), cand("T")], [cand("W1"), cand("T")], "T"))  # already above
-        self.assertFalse(ms.boost_wrong([cand("W1")], [cand("W1")], "T"))  # truth absent
+        self.assertEqual(ms.rank_of([cand("W1", 5), cand("T", 5)], "T"), 2)
+        self.assertEqual(ms.rank_of([cand("T", 5), cand("W1", 5)], "T"), 2)
+        self.assertEqual([c["block"] for c in ms.canonical([cand("B", 1), cand("A", 1), cand("C", 2)])], ["C", "A", "B"])
+
+    def test_boost_wrong(self):
+        off = [cand("T", 5), cand("W1", 4), cand("W2", 3)]
+        self.assertTrue(ms.boost_wrong(off, [cand("W1", 6, 4), cand("T", 5), cand("W2", 3)], "T"))
+        self.assertTrue(ms.boost_wrong(off, [cand("W1", 5, 4), cand("T", 5), cand("W2", 3)], "T"))  # tie counts
+        self.assertFalse(ms.boost_wrong([cand("W1", 6), cand("T", 5)], [cand("T", 7, 5), cand("W1", 6)], "T"))
+        self.assertFalse(ms.boost_wrong([cand("W1", 6), cand("T", 5)], [cand("W1", 7, 6), cand("T", 5)], "T"))  # was above
+        self.assertFalse(ms.boost_wrong([cand("W1", 6)], [cand("W1", 7)], "T"))  # truth absent
 
     def test_spectrum_row_flags(self):
         parents = {"C4": "C3", "C3": "C2", "C2": "C1", "C1": "C0"}
         rec = dict(record_id=1, set="selected", family="f", instrument_class="unknown", cluster_id="c1")
-        off = [cand("W", base=None, onto="Leaf"), cand("T")]
-        on = [cand("T", 1.0, base=2), cand("W", base=1, onto="Leaf")]
+        off = [cand("W", 6, onto="Leaf"), cand("T", 5)]
+        on = [cand("T", 6.5, 5), cand("W", 6, onto="Leaf")]
         row = ms.spectrum_row(rec, "T", "C3", on, off, parents, {"Leaf": "C4"}, {})
         self.assertEqual((row["rank"], row["top1"], row["top5"], row["boost_wrong"]), (1, True, True, False))
         self.assertTrue(row["rank_changed"] and row["order_changed"])
-        self.assertFalse(row["base_rank_mismatch"])
+        self.assertFalse(row["base_score_mismatch"])
         self.assertFalse(row["class_correct"])  # the top-1 has no ontology
         off_row = ms.spectrum_row(rec, "T", "C3", off, None, parents, {"Leaf": "C4"}, {})
         self.assertTrue(off_row["class_correct"])
         self.assertNotIn("boost_wrong", off_row)
+        tied = ms.spectrum_row(rec, "T", "C3", [cand("T", 5), cand("W", 6, onto="Leaf")], [cand("W", 6), cand("T", 5)],
+                               parents, {}, {})
+        self.assertFalse(tied["order_changed"])  # the written order does not matter
+        self.assertTrue(ms.spectrum_row(rec, "T", None, [cand("T", 5, 4)], [cand("T", 5)], parents, {}, {})["base_score_mismatch"])
 
     def test_cell_record_and_cluster_level(self):
         rows = [dict(rank=1, top1=True, top5=True, found=True, class_defined=True, class_correct=True, cluster_id="a",
@@ -154,7 +165,7 @@ class FilesTest(unittest.TestCase):
             p.write_text("\n".join([head] + body) + "\n", encoding="ascii")
             r = ms.parse_structure_result(p)
             self.assertEqual([c["block"] for c in r[5]], ["AAAA", "BBBB"])
-            self.assertEqual((r[5][0]["term"], r[5][0]["base_rank"]), (1.0, 2))
+            self.assertEqual((r[5][0]["term"], r[5][0]["score"], r[5][0]["total"]), (1.0, 9.0, 9.0))
             self.assertIn(7, r)
 
     def test_method_ini(self):
