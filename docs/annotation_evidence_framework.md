@@ -190,16 +190,22 @@ than `999` also rests on a precursor m/z within the search tolerance, which can 
 - Codes with x = 0–2 come from MS-DIAL's rule-based lipid annotation, which evaluates diagnostic
   product ions and neutral losses, so they are diagnostic-fragment evidence rather than library
   similarity.
-- `450` is never promoted by RT or CCS and never takes a lipid level. Peptide matches keep `430`
-  (`Evidence source` `InSilico`), and GC-MS matches to predicted EI spectra keep `440` or `340`.
-- `450` requires the library to be declared as predicted: a predicted-spectrum MSP loaded as such, or
-  spectra from MS-DIAL's EAD, OAD and EIEIO lipid generators in a run whose target is not lipidomics. A
-  predicted library loaded as an ordinary MSP is coded `430`, with `Evidence source`
-  `ReferenceSpectrum`, so neither the code nor the column shows that its spectra were predicted.
-- The RT or RI verdict and the CCS verdict are reached only when the run uses retention or CCS,
-  respectively, for scoring. The RT or RI verdict requires agreement within the user's tolerance,
-  capped at 2 min (150 Kovats or 50,000 Fiehn retention-index units), and gives no verdict when the
-  reference has no retention value. The CCS verdict uses the user's tolerance as it is.
+- `450` is never promoted by RT or CCS and never takes a lipid level. Peptide matches are never coded
+  `450`, although their `Evidence source` is `InSilico`, and GC-MS matches to predicted EI spectra
+  keep `440` or `340`.
+- `450` requires a run whose target is not lipidomics and a library declared as predicted: a
+  predicted-spectrum MSP loaded as such, or spectra from MS-DIAL's EAD, OAD and EIEIO lipid
+  generators. In a lipidomics run every MS/MS match, from any library, is recorded `RuleBased` and
+  coded by its lipid level. A predicted library loaded as an ordinary MSP is coded like an acquired
+  one (`430`, or `330` with an RT verdict), with `Evidence source` `ReferenceSpectrum`, so neither the
+  code nor the column shows that its spectra were predicted.
+- In LC-MS spectral-library (MSP) searches and searches of MS-DIAL's lipid generators, the RT verdict
+  and the CCS verdict are reached only when the run uses retention time or CCS, respectively, for
+  scoring; text-library, ion-mobility spectral-library and GC-MS searches reach them whenever the
+  values agree. The RT or RI verdict requires agreement within the user's tolerance, capped at 2 min
+  (150 Kovats or 50,000 Fiehn retention-index units), and gives no verdict when the reference has no
+  retention value; peptide (FASTA) searches apply neither the cap nor this guard. The CCS verdict
+  uses the user's tolerance as it is.
 - `530` (and likewise `520`, `510`, `500`) covers three different findings: no MS/MS spectrum, an
   MS/MS comparison below threshold, and an MS/MS comparison that explained nothing. The
   `Evidence source` column (`PrecursorOnly`, `WeakSpectrumMatch`, `UnmatchedSpectrum`) tells them

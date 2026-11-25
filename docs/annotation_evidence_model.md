@@ -234,7 +234,7 @@ published as an applied threshold.
   is a ground-truth set of isomer pairs known to be separable by RT, CCS or an authentic standard, so
   the similarity threshold remains a convention with no error rate attached.
 - MS-DIAL now reports matches to in-silico predicted spectra: from MS-DIAL 5.5.261105 a match to a
-  library declared as predicted is coded `450`, with `Evidence source` `InSilico`, and
+  library declared as predicted is coded `450` outside lipidomics runs, with `Evidence source` `InSilico`, and
   `reference_library.library_kind` already distinguishes such spectra so one can never be reported as
   spectral-library evidence. What remains open is the declaration itself: a predicted library loaded
   into MS-DIAL as an ordinary MSP still exports as `ReferenceSpectrum`, and code `430`.
