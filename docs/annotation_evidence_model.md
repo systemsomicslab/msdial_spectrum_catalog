@@ -11,6 +11,10 @@ set. The published use cases assign the same bracket `[SL,FM]` to `L1`, `L2` or 
 curator judgement, so an automatic level assigner would disagree with the proposal's own examples. The
 level is always an explicit input.
 
+A short public summary of the framework, intended for citation, is in
+[annotation_evidence_framework.md](annotation_evidence_framework.md). This page describes how the
+catalog stores it.
+
 ## Vocabulary versions
 
 The proposal exists in more than one generation and they disagree. The vocabulary is therefore data, not
@@ -219,15 +223,20 @@ published as an applied threshold.
 
 ## Known gaps
 
-- Candidate lists cannot yet be recovered from MS-DIAL's text exports. `StandardAnnotationProcess` keeps
-  `NUMBER_OF_ANNOTATION_RESULTS = 3` hits per annotator and persists them into `.pai`/`.arf`, but every
-  text exporter reads only `MatchResults.Representative`, and mzTab-M hardcodes `rank = "1"` and
-  `SME_ID_REF_ambiguity_code = "null"`. Interoperable "A or B" reporting needs a Console-side
-  per-candidate exporter.
+- Candidate lists can be recovered only from newer exports. Since MS-DIAL 5.5.261018 the LC-MS Console
+  can write every threshold-passing result, up to `NUMBER_OF_ANNOTATION_RESULTS = 3` per annotator, to
+  the optional `AlignResult-*.mdcandidate.tsv` (`Annotation candidates: True`, off by default), which
+  the ingester reads into `msdial_annotation_candidate`; mzTab-M from the same release writes one SME
+  row per candidate with its `rank`, and `SME_ID_REF_ambiguity_code = 1` when a feature has more than
+  one. Exports made before that release, and the `.mdalign` and `.mdpeak` tables of any release, still
+  carry only `MatchResults.Representative`.
 - Ambiguity classes are computed and persisted; see `docs/ambiguity_classes.md`. What is still missing
   is a ground-truth set of isomer pairs known to be separable by RT, CCS or an authentic standard, so
   the similarity threshold remains a convention with no error rate attached.
-- In-silico predicted spectra have no producer yet, although `reference_library.library_kind` already
-  distinguishes them so one can never be reported as spectral-library evidence.
+- MS-DIAL now reports matches to in-silico predicted spectra: from MS-DIAL 5.5.261105 a match to a
+  library declared as predicted is coded `450` outside lipidomics runs, with `Evidence source` `InSilico`, and
+  `reference_library.library_kind` already distinguishes such spectra so one can never be reported as
+  spectral-library evidence. What remains open is the declaration itself: a predicted library loaded
+  into MS-DIAL as an ordinary MSP still exports as `ReferenceSpectrum`, and code `430`.
 - Concept identifiers are stored as free text with no vocabulary table to constrain them; `vocab_version`
   is the only provenance.
