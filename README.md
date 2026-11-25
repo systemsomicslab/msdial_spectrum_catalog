@@ -103,6 +103,8 @@ USI is never generated from an array index alone.
 
 An annotation record separates the claim, the evidence inventory that supports it, and the study-level
 criteria each evidence tag was judged against. See `docs/annotation_evidence_model.md` for the full model.
+A short, citable summary of the framework and of MS-DIAL's annotation code is in
+`docs/annotation-evidence-framework.md`.
 
 - annotation level `L1` to `L5`, always an explicit input and never derived from the evidence tags
 - Level 3 claim `SP` structure, `SC` substructure complete, `SI` substructure incomplete, `CP` class

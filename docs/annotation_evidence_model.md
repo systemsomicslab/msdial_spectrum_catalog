@@ -11,6 +11,10 @@ set. The published use cases assign the same bracket `[SL,FM]` to `L1`, `L2` or 
 curator judgement, so an automatic level assigner would disagree with the proposal's own examples. The
 level is always an explicit input.
 
+A short public summary of the framework, intended for citation, is in
+[annotation-evidence-framework.md](annotation-evidence-framework.md). This page describes how the
+catalog stores it.
+
 ## Vocabulary versions
 
 The proposal exists in more than one generation and they disagree. The vocabulary is therefore data, not
