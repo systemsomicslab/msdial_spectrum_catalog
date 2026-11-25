@@ -18,9 +18,9 @@ so that each can be read, searched and re-evaluated on its own:
 3. **Study-level criteria** (recommended, optional): the thresholds each kind of evidence was judged
    against, which we recommend stating once per study.
 
-<!-- AUTHOR DECISION: credit wording -->
-The vocabulary grew out of a project-level proposal for Shin-MassBank annotation metadata. Its
-machine-readable form is the vocabulary version `smb-v2-consensus` in this repository
+This page is maintained by systemsomicslab. The vocabulary grew out of a project-level proposal for
+Shin-MassBank annotation metadata, and its claim tags and evidence tags were agreed in discussions
+within the Shin-MassBank project. Its machine-readable form is the vocabulary version `smb-v2-consensus` in this repository
 ([registry file](../src/msdial_spectrum_catalog/vocabulary/registry/smb-v2-consensus.json)), and
 [annotation_evidence_model.md](annotation_evidence_model.md) describes how the catalog stores it.
 
@@ -225,8 +225,11 @@ than `999` also rests on a precursor m/z within the search tolerance, which can 
   writes and that is off by default. It is not shown in the graphical interface and is not written to
   MassBank or MSP exports.
 - Earlier releases differ: `450` first appears in MS-DIAL 5.5.261105, and releases before 5.5.261018
-  could give `3x0` or `520` for a reference with no retention time. MS-DIAL 4 capped the retention
-  verdict at 0.5 min.
+  could give `3x0` or `520` (`340` for GC-MS) for a reference with no retention time; 5.5.261018 was a
+  console pre-release, so the first full release with the retention guard and the 2 min cap is
+  5.5.261105. MS-DIAL 4 capped the retention verdict at 0.5 min. The
+  [MS-DIAL annotation code page](https://systemsomicslab.github.io/compms/msdial/annotationcode.html)
+  shows the code tables.
 
 ## Support in MS-DIAL
 
@@ -259,8 +262,6 @@ against the source at commit `92cbf0d`; the one item that exists only in source 
   study-level criteria) and for MS-DIAL's annotation code, cite this page by its URL at the tag below,
   with the version number:
 
-<!-- AUTHOR DECISION: credit wording -->
-<!-- The tag annotation-framework-v0.1 will be created on the merge commit of this page; the link below resolves only after that. -->
 > systemsomicslab. Annotation evidence framework: claim, evidence inventory and study-level criteria.
 > Working proposal, version 0.1 (25 November 2026).
 > https://github.com/systemsomicslab/msdial_spectrum_catalog/blob/annotation-framework-v0.1/docs/annotation_evidence_framework.md
