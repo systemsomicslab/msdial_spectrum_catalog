@@ -196,7 +196,7 @@
           "collision_energy",
           "adduct"
         ],
-        "notes": "score_convention is mandatory for stored scores because MS-DIAL reports squared cosines while the section 5 criteria are written as dot products."
+        "notes": "score_convention is mandatory for stored scores because MS-DIAL squares its cosines internally for thresholding, while its exports and the section 5 criteria are plain cosines."
       },
       {
         "token": "DF",
