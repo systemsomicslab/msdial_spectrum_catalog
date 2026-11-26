@@ -35,8 +35,10 @@ OUT_ROOT = p2.OUT_ROOT.parent / "ws8-p3"
 P2_RUN = p2.OUT_ROOT / "p2-20261113-c1d5dc3" / "run.json"
 RUN_NAME = r"p3cs(smoke)?-(\d{8})-([a-f0-9]{7,40})"
 FREEZE_NAME = r"freeze-\d{8}-[a-f0-9]{7,40}\.json"
-EXPECTED_RULESET_SHA256 = "af4a7ebf2732b30b9610c7e410ba34f50f176b3fc0155d5a4f9a28fb413ab2eb"
-EXPECTED_RULESET_VERSION = "0.1.0"
+# Rule set 0.2.0 (Stop B, 2026-11-24), measured as published on C26N (§22.8). The frozen VS20+VS21 pass of 2026-11-24
+# (freeze-20261124-5a8fc37) ran 0.1.0, af4a7ebf2732b30b9610c7e410ba34f50f176b3fc0155d5a4f9a28fb413ab2eb.
+EXPECTED_RULESET_SHA256 = "ecf7988dea90992eb7233fc856ce2cb19a8afe4f1f5683628a4b35a459c93569"
+EXPECTED_RULESET_VERSION = "0.2.0"
 # VS21 is identified by name and sha256 only (AGENTS.md); its files are opened only behind vs21_guard.
 VS21 = [("pos", "MSMS-Private-pos-VS21.msp", "0fa0a96bdf1ebbd86349883cb96bb1ff9e327eb6ba7650ee3434056aacb4804f"),
         ("neg", "MSMS-Private-neg-VS21.msp", "7e2581ab31461b5a9102158a6eaf73d0a1702b8564dd75a9281c9b86dc4d132f")]
@@ -660,7 +662,7 @@ def validate_shard(outdir, msp, n_records, local_vs21):
     m = json.loads(manifests[0].read_text(encoding="utf-8"))
     rs = m["rule_set"]
     if rs["sha256"] != EXPECTED_RULESET_SHA256 or not rs["pinned"] or rs["version"] != EXPECTED_RULESET_VERSION:
-        raise RuntimeError("Console rule set is not the pinned 0.1.0 set")
+        raise RuntimeError(f"Console rule set is not the pinned {EXPECTED_RULESET_VERSION} set")
     if bool(m["local_vs21"]) != local_vs21:
         raise RuntimeError("Console local_vs21 marking disagrees with the source")
     if len(m["inputs"]) != 1 or m["inputs"][0]["sha256"] != p2.sha256(msp) or             (n_records is not None and m["inputs"][0]["records"] != n_records):
@@ -1501,7 +1503,7 @@ def load_rules(ruleset_dir):
     if not res.ok:
         raise RuntimeError("Rule set does not load: " + str(res.errors[:3]))
     if res.ruleset_sha256 != EXPECTED_RULESET_SHA256 or res.rule_set_version != EXPECTED_RULESET_VERSION:
-        raise RuntimeError("Rule set is not the pinned 0.1.0 set")
+        raise RuntimeError(f"Rule set is not the pinned {EXPECTED_RULESET_VERSION} set")
     raw = ruleset_file_hashes(ruleset_dir)
     rules = []
     for rid, info in sorted(res.rules.items()):
@@ -1706,7 +1708,7 @@ def main(argv=None):
     parser.add_argument("--sources", default="vs20")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--limit", type=float, help="deterministic per-file fraction (0,1]; 0.01 for the smoke")
-    parser.add_argument("--ruleset-dir", type=Path, help="the RuleSet folder of the console's source (0.1.0)")
+    parser.add_argument("--ruleset-dir", type=Path, help="the RuleSet folder of the console's source (" + EXPECTED_RULESET_VERSION + ")")
     parser.add_argument("--console", type=Path, help="MsfinderConsoleApp.exe")
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--bootstrap", type=int, default=BOOTSTRAP)
