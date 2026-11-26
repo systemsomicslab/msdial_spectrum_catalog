@@ -44,6 +44,22 @@ VS21 = [("pos", "MSMS-Private-pos-VS21.msp", "0fa0a96bdf1ebbd86349883cb96bb1ff9e
         ("neg", "MSMS-Private-neg-VS21.msp", "7e2581ab31461b5a9102158a6eaf73d0a1702b8564dd75a9281c9b86dc4d132f")]
 # Held-out sources: only their small cells are suppressed; the development set (vs20) and pooled cells never are.
 HELD_OUT = ("vs21", "c26")
+SOURCE_LISTS = (["vs20"], ["vs20", "vs21"], ["vs20", "vs21", "c26"])
+# The held-out tags each source's outputs carry. C26 records are filtered against the VS21 keys of the same run, so
+# every C26-derived file is tagged with both; an output reading several sources carries every tag they carry.
+LOCAL_TAGS = {"vs20": (), "vs21": ("vs21",), "c26": ("vs21", "c26")}
+# Records of a source whose structure key is among the accepted keys of these earlier sources are excluded.
+OVERLAP_SOURCES = {"vs21": ("vs20",), "c26": ("vs20", "vs21")}
+# CASMI26 train.parquet (C26N, handback section 22): CC BY-NC 4.0 with a no-redistribution rule. Identified by name and
+# sha256; no row, key, SMILES or spectrum may reach a file that is not named *.local-c26.*.
+C26_SHA256 = "9423f90ec08b941a9646b535bf0606183e86ff0c5a297978f5a70693d41bcd98"
+C26_TRAIN = OUT_ROOT.parent / "external" / "casmi26" / "enveda-CASMI26-molecule-id-mass-spectra" / "train.parquet"
+C26_PPM_MAX = 10
+C26_EXCLUDED_LIBS = ("enveda-180",)
+C26_COLUMNS = ["ingest_lib", "normalized_smiles", "inchikey14", "ionization_mode", "instrument_type", "adduct",
+               "precursor_mz", "precursor_error_ppm", "ms2_mzs", "ms2_normalized_intensities", "collision_energy_ev",
+               "collision_energy_orig"]
+MERGED_CE = "merged"  # energy stratum of spectra merged from more than one collision energy
 PROVENANCE_TABLE = HERE / "provenance-p3.tsv"
 INSOURCE_TABLE = HERE / "insource-p3.tsv"
 INSOURCE_MARGIN_DA = 0.01
@@ -119,12 +135,25 @@ def read_rows(path):
         return list(csv.DictReader(f, delimiter="\t" if str(path).endswith(".tsv") else ","))
 
 
-def suffix(source):
-    return ".local-vs21" if source == "vs21" else ""
+def suffix(*sources):
+    """The one naming rule: `.local-vs21`, `.local-c26` or `.local-vs21.local-c26` for an output derived from these
+    sources (one source for its own files, every source of the run for pooled outputs); empty for VS20 alone."""
+    tags = {t for s in sources for t in LOCAL_TAGS[s]}
+    return "".join(".local-" + t for t in HELD_OUT if t in tags)
 
 
 def any_vs21(sources):
     return "vs21" in sources
+
+
+def local_vs21(source):
+    """The console marks its output local-vs21 when "vs21" is in the input path, as it is in this source's names."""
+    return ".local-vs21" in suffix(source)
+
+
+def row_path(out, stem, source):
+    """P2's row-file naming, with every held-out tag of the source."""
+    return Path(out) / (stem + suffix(source) + ".parquet")
 
 
 def git(*args):
@@ -186,6 +215,63 @@ def iter_msp_p3(path, table):
                     in_peaks = True
         if meta:
             yield meta, peaks, decimals, provenance_of(extra, table)
+
+
+def msp_reader(path, mode, table):
+    return iter_msp_p3(path, table)
+
+
+def text(value):
+    """A parquet text value on one line ('' for null), so it cannot break an MSP record."""
+    return "" if value is None else " ".join(str(value).split())
+
+
+def decimals_of(x):
+    """Decimal places of a float's shortest repr, as the MSP reader counts them in the peak text."""
+    mantissa = repr(float(x)).lower().split("e")[0]
+    return len(mantissa.split(".")[1]) if "." in mantissa else 0
+
+
+def iter_c26(path, mode, table=None, batch_size=4096):
+    """CASMI26 train.parquet rows of one ion mode as the (meta, peaks, decimals, provenance) of iter_msp_p3, so
+    prepare_source applies P2's checks unchanged. Read in batches of a column subset. Rows whose ionization_mode is
+    neither positive nor negative come with the positive input, where P2's mode check counts them once.
+
+    The provenance carries the parquet row ordinal, the ingest_lib bucket (report only), in_silico False, the C26
+    exclusion that applies before P2's checks (excluded ingest_lib, missing structure, precursor ppm missing or above
+    C26_PPM_MAX) and whether the spectrum was merged from several collision energies (kept, its own stratum)."""
+    import pyarrow.parquet as pq
+    ordinal = 0
+    for batch in pq.ParquetFile(path).iter_batches(batch_size=batch_size, columns=C26_COLUMNS):
+        modes = [p2.ion_mode(text(v), None) for v in batch.column("ionization_mode").to_pylist()]
+        keep = [i for i, x in enumerate(modes) if x == mode or (mode == "pos" and x is None)]
+        for i, r in zip(keep, batch.take(keep).to_pylist() if keep else []):
+            yield c26_record(r, ordinal + i)
+        ordinal += batch.num_rows
+
+
+def c26_record(r, ordinal):
+    peaks, decimals = [], []
+    for mz, intensity in zip(r["ms2_mzs"] or [], r["ms2_normalized_intensities"] or []):
+        if mz is not None and intensity is not None and math.isfinite(mz) and math.isfinite(intensity) \
+                and mz > 0 and intensity > 0:
+            peaks.append((float(mz), float(intensity)))
+            decimals.append(decimals_of(mz))
+    meta = dict(precursormz="" if r["precursor_mz"] is None else repr(float(r["precursor_mz"])),
+                precursortype=text(r["adduct"]), ionmode=text(r["ionization_mode"]) or "missing",
+                instrumenttype=text(r["instrument_type"]), collisionenergy=text(r["collision_energy_orig"]),
+                smiles=text(r["normalized_smiles"]))
+    ppm = r["precursor_error_ppm"]
+    exclude = ("excluded_ingest_lib" if r["ingest_lib"] in C26_EXCLUDED_LIBS else
+               "missing_structure" if not meta["smiles"] or not text(r["inchikey14"]) else
+               "precursor_error_ppm_missing" if ppm is None or not math.isfinite(ppm) else
+               "precursor_error_ppm_above_limit" if abs(ppm) > C26_PPM_MAX else None)
+    bucket = re.sub(r"[^A-Za-z0-9_.+-]", "_", text(r["ingest_lib"])) or "unknown"
+    return meta, peaks, decimals, dict(bucket=bucket, in_silico=False, ordinal=ordinal, exclude=exclude,
+                                       merged_ce=len(r["collision_energy_ev"] or []) > 1)
+
+
+READERS = {"c26": iter_c26}
 
 
 # ------------------------------------------------------------------------------------------- rule-set tables
@@ -260,15 +346,19 @@ def _schemas():
     return raw, prepared
 
 
-def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, table, shards, public_keys=None):
-    """One library source. inputs: [(mode, path, expected sha256 or None)].
+def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, table, shards, overlap_keys=None,
+                   reader=msp_reader):
+    """One library source. inputs: [(mode, path, expected sha256 or None)]; reader(path, mode, table) yields
+    iter_msp_p3's (meta, peaks, decimals, provenance). overlap_keys: {earlier source: its accepted structure keys};
+    a record whose key is among them is excluded as `<source>:<earlier>_overlap_records`.
 
     The P2 counters (same names, same order of checks) go to `counts`; P3's own exclusions go to `extra`.
-    Returns (counts, extra, stats, public keys, input hashes)."""
+    Returns (counts, extra, stats, this source's accepted structure keys, input hashes); stats["instrument_types"]
+    counts the instrument text of the kept records (local only; prepare never writes it to run.json)."""
     raw_schema, prepared_schema = _schemas()
     out = Path(out)
-    counts, extra, hashes = Counter(), Counter(), []
-    raw_path = p2.row_path(out, "p3raw", source)
+    counts, extra, hashes, itypes = Counter(), Counter(), [], Counter()
+    raw_path = row_path(out, "p3raw", source)
     sink = p2.ParquetRows(raw_path, raw_schema)
     raw_smiles = set()
     for mode, path, expected in inputs:
@@ -276,9 +366,13 @@ def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, tab
         if expected and digest != expected:
             raise RuntimeError("Input checksum mismatch")
         hashes.append(dict(name=Path(path).name, sha256=digest))
-        for ordinal, (meta, peaks, decimals, prov) in enumerate(iter_msp_p3(path, table)):
+        for i, (meta, peaks, decimals, prov) in enumerate(reader(path, mode, table)):
+            ordinal = prov.get("ordinal", i)
             prefix = source + ":" + mode + ":"
             counts[prefix + "input"] += 1
+            if prov.get("exclude"):  # source-specific exclusions (C26), before P2's checks
+                extra[source + ":" + prov["exclude"]] += 1
+                continue
             raw_smiles.add(meta.get("smiles", ""))
             if limit and ordinal % max(1, round(1 / limit)) != 0:
                 counts[prefix + "smoke_unsampled"] += 1
@@ -305,7 +399,7 @@ def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, tab
                 continue
             sink.add(dict(record_id=ordinal * 2 + (mode == "neg"), raw_smiles=meta.get("smiles", ""), mode=mode,
                           adduct=adduct, precursor=precursor, instrument=p2.instrument_bin(meta.get("instrumenttype", "")),
-                          energy=p2.energy_bin(meta.get("collisionenergy", "")),
+                          energy=MERGED_CE if prov.get("merged_ce") else p2.energy_bin(meta.get("collisionenergy", "")),
                           instrument_type=meta.get("instrumenttype", ""), collision_energy=meta.get("collisionenergy", ""),
                           bucket=prov["bucket"], in_silico=prov["in_silico"],
                           mz=[p[0] for p in peaks], intensity=[p[1] for p in peaks]))
@@ -314,8 +408,7 @@ def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, tab
     for result in chem.values():
         if "rejected" in result:
             counts[source + ":unique_smiles:" + result["rejected"]] += 1
-    if source == "vs20":
-        public_keys = {r["key"] for r in chem.values() if "key" in r}
+    keys = {r["key"] for r in chem.values() if "key" in r}
     reps, ns = {}, Counter()
 
     def unit_of(row, c):
@@ -327,8 +420,9 @@ def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, tab
         if "rejected" in c:
             counts[source + ":structure_rejected_records"] += 1
             continue
-        if source == "vs21" and c["key"] in public_keys:
-            counts[source + ":vs20_overlap_records"] += 1
+        earlier = next((s for s, k in (overlap_keys or {}).items() if c["key"] in k), None)
+        if earlier:
+            counts[source + ":" + earlier + "_overlap_records"] += 1
             continue
         unit, mapped = unit_of(row, c)
         if adduct_charge(row["adduct"], mapped) >= 2:
@@ -340,6 +434,9 @@ def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, tab
         if not mapped:
             extra[source + ":adduct_unmapped_records"] += 1
         extra[source + ":bucket:" + row["bucket"]] += 1
+        if row["energy"] == MERGED_CE:
+            extra[source + ":merged_collision_energy_records"] += 1
+        itypes[row["instrument_type"]] += 1
         ns[unit] += 1
         candidate = (len(row["mz"]), -row["record_id"])
         if unit not in reps or candidate > reps[unit]:
@@ -373,13 +470,13 @@ def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, tab
             index.append(dict(file_name=name, record_index=i, record_id=r["record_id"]))
         write_msp(msp_dir / name, rows[lo:hi])
     write_rows(msp_dir / f"representatives-index{suffix(source)}.tsv", index, ["file_name", "record_index", "record_id"])
-    sink = p2.ParquetRows(p2.row_path(out, "prepared", source), prepared_schema)
+    sink = p2.ParquetRows(row_path(out, "prepared", source), prepared_schema)
     for r in rows:
         sink.add(r)
     sink.close()
     stats = dict(representatives=len(rows), compounds=len({r["key"] for r in rows}), clusters=len(cluster_ids),
-                 spectra=sum(ns.values()), shards=len(blocks))
-    return counts, extra, stats, public_keys, hashes
+                 spectra=sum(ns.values()), shards=len(blocks), instrument_types=itypes)
+    return counts, extra, stats, keys, hashes
 
 
 def shard_blocks(n, shards):
@@ -416,10 +513,22 @@ def p2_parity(counts, p2_exclusions, source):
     return dict(result="match", keys=len(theirs))
 
 
-def library_inputs(source):
+def library_inputs(source, args=None):
     if source == "vs20":
         return [(mode, p2.LIB_ROOT / rel, sha) for mode, (rel, sha) in zip(("pos", "neg"), p2.PUBLIC)]
+    if source == "c26":  # one file, read once per ion mode
+        path = Path(getattr(args, "c26_train", None) or C26_TRAIN)
+        return [("pos", path, C26_SHA256), ("neg", path, C26_SHA256)]
     return [(mode, next(p2.LIB_ROOT.rglob(name)), sha) for mode, name, sha in VS21]
+
+
+INSTRUMENT_FIELDS = ["instrument_type", "records", "instrument_class"]
+
+
+def write_instrument_types(out, source, counter):
+    """The distinct instrument text of a source's kept records with P2's instrument class (local, for review)."""
+    rows = [dict(instrument_type=k, records=v, instrument_class=p2.instrument_bin(k)) for k, v in sorted(counter.items())]
+    write_rows(Path(out) / f"instrument_types{suffix(source)}.tsv", rows, INSTRUMENT_FIELDS)
 
 
 def prepare(args, run, inputs=None, p2_run=P2_RUN):
@@ -429,19 +538,24 @@ def prepare(args, run, inputs=None, p2_run=P2_RUN):
     run["inputs"] += [dict(name="RuleSet/" + rel, sha256=h) for rel, h in ruleset_file_hashes(args.ruleset_dir).items()
                       if rel in ("tables/motifs.json", "tables/adducts.json")]
     run["prepared"], run["exclusions"], run["p3_exclusions"], run["p2_parity"] = {}, {}, {}, {}
-    public_keys = None
+    keys = {}
     for source in args.sources:
-        if source == "vs21":
+        if source in HELD_OUT:
             vs21_guard(args)
-        src_inputs = (inputs or {}).get(source) or library_inputs(source)
-        counts, extra, stats, public_keys, hashes = prepare_source(
-            source, src_inputs, args.out, args.limit, args.workers, motif_rows, aliases, table, args.workers, public_keys)
+        src_inputs = (inputs or {}).get(source) or library_inputs(source, args)
+        counts, extra, stats, keys[source], hashes = prepare_source(
+            source, src_inputs, args.out, args.limit, args.workers, motif_rows, aliases, table, args.workers,
+            {s: keys[s] for s in OVERLAP_SOURCES.get(source, ())}, READERS.get(source, msp_reader))
+        itypes = stats.pop("instrument_types")
+        if source == "c26":  # instrument text stays out of run.json; the inventory reads this file
+            write_instrument_types(args.out, source, itypes)
         run["inputs"] += hashes
         run["exclusions"].update(dict(sorted(counts.items())))
         run["p3_exclusions"].update(dict(sorted(extra.items())))
         run["prepared"][source] = stats
-        if args.limit or p2_run is None:
-            run["p2_parity"][source] = dict(result="not_checked", reason="smoke sample" if args.limit else "no P2 run")
+        if args.limit or p2_run is None or source == "c26":
+            run["p2_parity"][source] = dict(result="not_checked", reason="smoke sample" if args.limit else
+                                            "no P2 run for c26" if source == "c26" else "no P2 run")
         else:
             p2_doc = json.loads(Path(p2_run).read_text(encoding="utf-8"))
             run["inputs"].append(dict(name="P2 run.json", sha256=p2.sha256(p2_run)))
@@ -724,9 +838,9 @@ def fire(args, run):
         [dict(name=INSOURCE_TABLE.name, sha256=p2.sha256(INSOURCE_TABLE))]
     jobs = []
     for source in args.sources:
-        if source == "vs21":
+        if source in HELD_OUT:
             vs21_guard(args)
-        reps = list(p2.parquet_rows(p2.row_path(args.out, "prepared", source)))
+        reps = list(p2.parquet_rows(row_path(args.out, "prepared", source)))
         rows, stats = build_chimeric(reps, args.seed, source=source)
         write_chimeric(args.out, source, rows, args.workers)
         run["chimeric"][source] = stats
@@ -737,11 +851,11 @@ def fire(args, run):
             jobs += [(source, kind, *j) for j in shard_jobs(args.out, source, kind)]
     results = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futures = {ex.submit(run_console, console, msp, ini, outdir, n, source == "vs21"): (source, kind, msp, outdir, n)
+        futures = {ex.submit(run_console, console, msp, ini, outdir, n, local_vs21(source)): (source, kind, msp, outdir, n)
                    for source, kind, msp, outdir, n in jobs}
         for fut, (source, kind, msp, outdir, n) in futures.items():
             state = fut.result()
-            results[f"{source}/{kind}/{outdir.name}"] = dict(state=state, **validate_shard(outdir, msp, n, source == "vs21"))
+            results[f"{source}/{kind}/{outdir.name}"] = dict(state=state, **validate_shard(outdir, msp, n, local_vs21(source)))
     run["fire"] = results
     frozen = None
     if any_vs21(args.sources):
@@ -758,7 +872,9 @@ def read_evidence(shard_dir, msp_name, index_ids, passes=PASSES):
     out = {}
     for p in passes:
         files = sorted(shard_dir.glob(f"Diagrules evidence-{p}-*.jsonl"))
-        files = [f for f in files if re.fullmatch(rf"Diagrules evidence-{re.escape(p)}-\d+(\.local-vs21)?\.jsonl", f.name)]
+        # The console tags only VS21 (C26 inputs carry "vs21" in their names too); C26 shard folders carry .local-c26.
+        files = [f for f in files
+                 if re.fullmatch(rf"Diagrules evidence-{re.escape(p)}-\d+(\.local-vs21)?(\.local-c26)?\.jsonl", f.name)]
         if len(files) != 1:
             raise RuntimeError(f"Expected one evidence file for pass {p} in {shard_dir.name}")
         recs = []
@@ -1076,7 +1192,7 @@ def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BO
             synthetic_rows.append(ins_all)
         by_source = {s: cells[(primary, s, "all", "all")] for s in sources} if multi else {sources[0]: gate_row}
         by_prov = {}
-        prov_c = conditional(entries, truth, motif, multi, cell_fn=lambda rec: [rec["bucket"]])
+        prov_c = conditional(entries, truth, motif, multi, cell_fn=lambda rec: [provenance_key(rec)])
         for b in sorted(prov_c):
             c = prov_c[b]
             c_tp = sum(1 for k in c["fired"] if truth_cluster_positive(k, U))
@@ -1094,6 +1210,11 @@ def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BO
                                               for v in by_prov.values()))
     return dict(precision=precision_rows, competitors=competitor_rows, synthetic=synthetic_rows,
                 occupancy=occupancy_rows, gates=gates)
+
+
+def provenance_key(rec):
+    """VS20 and VS21 share provenance-p3.tsv's buckets; C26 buckets are its ingest_lib values, kept apart."""
+    return rec["bucket"] if rec["source"] in ("vs20", "vs21") else rec["source"] + ":" + rec["bucket"]
 
 
 def truth_cluster_positive(cluster, U):
@@ -1155,7 +1276,7 @@ def decide(gate_row, decoy_row, by_source, occ, synth, origin, insource=None, K=
         if ok is None:
             crit["heldout"]["pending"] = "tuned_vs20: no fires on VS21 alone"
     else:
-        crit["heldout"] = dict(ok=True, note="as_published: gated on VS20 and VS21 pooled")
+        crit["heldout"] = dict(ok=True, note="as_published: gated on " + " + ".join(s.upper() for s in by_source) + " pooled")
     if crit["synthetic_chimeric"]["ok"] is None:
         crit["synthetic_chimeric"]["pending"] = "chimeric set not measured"
     if crit["synthetic_insource"]["ok"] is None:
@@ -1297,9 +1418,9 @@ def suppress_criteria(crit, n_min=CRITERIA["vs21_min_cell"]):
     return out
 
 
-def write_aggregates(out, result, run_id, rules, local_vs21, extra=None):
+def write_aggregates(out, result, run_id, rules, sfx, extra=None):
+    """sfx: suffix() of every source of the run."""
     out = Path(out)
-    sfx = ".local-vs21" if local_vs21 else ""
     rows = {k: [suppress(r) for r in result[k]] for k in ("precision", "competitors", "synthetic", "occupancy")}
     # Both tiers' statuses side by side on each rule's gate row (primary pass, pooled, all strata).
     csv_rows = []
@@ -1396,13 +1517,13 @@ def skip_counts(fire_results):
     return {k: dict(sorted(v.items())) for k, v in out.items()}
 
 
-def write_report(out, doc, run, local_vs21):
-    sfx = ".local-vs21" if local_vs21 else ""
+def write_report(out, doc, run, sfx):
     sc = suppress_counts
+    sources = doc.get("sources") or list(run.get("prepared", {})) or ["vs20"]
 
     def fmt(v):
         return "NA" if v is None else f"{v:.4g}" if isinstance(v, float) else str(v)
-    lines = [f"# WS8 P3 rule-level measurement ({'VS20 + VS21' if local_vs21 else 'VS20 development pass'})", "",
+    lines = [f"# WS8 P3 rule-level measurement ({' + '.join(s.upper() for s in sources) if sfx else 'VS20 development pass'})", "",
              f"Run `{doc['run_id']}`. Rule set {EXPECTED_RULESET_VERSION} (`{EXPECTED_RULESET_SHA256}`). "
              "Library-only measurement; counts use clusters (truth Hill formula, curated precursor type, truth motif "
              "set within a source) unless a column says records.", "",
@@ -1490,7 +1611,8 @@ def write_report(out, doc, run, local_vs21):
               "whose precondition holds. Either above 5 % makes the rule `non_conditional`.",
               "- Prior stress: P2's statistics() on the cluster universe table (library-wide prevalence of the mode, halved, "
               "LR+ lower bound). The conditional stress grid is report-only.",
-              "- Per-source precision uses library sources (VS20, VS21); provenance buckets are reported only.",
+              "- Per-source precision uses the library sources (VS20, VS21, C26); provenance buckets (C26: ingest_lib) "
+              "are reported only. C26 spectra merged from several collision energies form the energy stratum `merged`.",
               f"- In-source recasts approximate the product's own MS/MS, which the library does not hold: the parent spectrum "
               f"cut at the product precursor m/z + {INSOURCE_MARGIN_DA} Da with a precursor peak added. Truth stays the parent's.",
               "", "## Not done in this phase", ""] + [f"- {x}" for x in NOT_DONE]
@@ -1526,7 +1648,7 @@ def load_rules(ruleset_dir):
 def load_truth(out, source):
     import pyarrow.parquet as pq
     cols = ["record_id", "source", "mode", "motifs", "cluster_id", "instrument", "energy", "bucket"]
-    t = pq.read_table(p2.row_path(Path(out), "prepared", source), columns=cols).to_pylist()
+    t = pq.read_table(row_path(out, "prepared", source), columns=cols).to_pylist()
     return {(source, r["record_id"]): dict(mode=r["mode"], motifs=frozenset(r["motifs"]), cluster=r["cluster_id"],
                                            instrument=r["instrument"], energy=r["energy"], bucket=r["bucket"], source=source)
             for r in t}
@@ -1571,7 +1693,7 @@ def measure(args, run):
     motif_rows, adducts = read_ruleset_tables(args.ruleset_dir)
     transforms = load_insource(INSOURCE_TABLE, {r["motif_id"] for r in motif_rows}, adducts, load_elements(args.ruleset_dir))
     for source in args.sources:
-        if source == "vs21":
+        if source in HELD_OUT:
             vs21_guard(args)
         truth.update(load_truth(args.out, source))
         ev, _ = load_set(args.out, source, "representatives")
@@ -1599,28 +1721,35 @@ def measure(args, run):
     result = measure_core(rules, truth, by_rule, notev, args.sources, args.seed, args.bootstrap,
                           dict(by_rule=chim_by_level, universe=chim_universe, notev=chim_notev), refused,
                           dict(by_rule=ins_by_row, universe=ins_universe, notev=ins_notev, rows=transforms))
-    local = any_vs21(args.sources)
+    sfx = suffix(*args.sources)
     schema = pa.schema([("set", pa.string()), ("level", pa.float64()), ("transform", pa.int64()), ("source", pa.string()),
                         ("record_id", pa.int64()),
                         ("pass_id", pa.string()), ("rule_id", pa.string()), ("n_hypotheses", pa.int64()),
                         ("fired", pa.bool_()), ("veto_blocked", pa.bool_()), ("adduct", pa.string()), ("motif_match", pa.bool_())])
-    sink = p2.ParquetRows(args.out / ("fires" + (".local-vs21" if local else "") + ".parquet"), schema)
+    sink = p2.ParquetRows(args.out / ("fires" + sfx + ".parquet"), schema)
     write_fires(sink, by_rule, truth, rules, "representatives")
     for level in CHIMERIC_LEVELS:
         write_fires(sink, chim_by_level[level], truth, rules, "chimeric", level)
     for t in transforms:
         write_fires(sink, ins_by_row[t["row"]], truth, rules, "insource", transform=t["row"])
     sink.close()
-    doc = write_aggregates(args.out, result, args.out.name, rules, local,
+    doc = write_aggregates(args.out, result, args.out.name, rules, sfx,
                            extra=dict(refused_rule_ids=refused, sources=args.sources))
-    write_report(args.out, doc, run, local)
+    write_report(args.out, doc, run, sfx)
     run["acceptance_artifact_audit"] = audit_aggregates(args.out)
     run["status_counts"] = doc["status_counts"]
 
 
 # ------------------------------------------------------------------------------------------- VS21 and runs
 FREEZE_KEYS = ("ruleset_sha256_expected", "ruleset_files", "console_sha256", "console_files", "code", "parameters",
-               "insource_table", "criteria")
+               "insource_table", "criteria", "c26")
+
+
+def c26_parameters():
+    """C26 pins of the freeze. Instrument strings are classified by P2's instrument_bin (covered by the code hashes);
+    no separate mapping table is used."""
+    return dict(train_sha256=C26_SHA256, ppm_max=C26_PPM_MAX, excluded_ingest_libs=list(C26_EXCLUDED_LIBS),
+                instrument_map="p2_diagnostics.instrument_bin")
 
 
 def freeze_hashes(ruleset_dir, console, seed, bootstrap):
@@ -1630,13 +1759,14 @@ def freeze_hashes(ruleset_dir, console, seed, bootstrap):
                 code={p.relative_to(ROOT).as_posix(): p2.sha256(p) for p in CODE_FILES},
                 parameters=dict(seed=seed, bootstrap=bootstrap, console_ini=CONSOLE_INI),
                 insource_table=p2.sha256(INSOURCE_TABLE),
-                criteria=json.loads(json.dumps(dict(strict=CRITERIA, provisional=CRITERIA_PROVISIONAL))))
+                criteria=json.loads(json.dumps(dict(strict=CRITERIA, provisional=CRITERIA_PROVISIONAL))),
+                c26=c26_parameters())
 
 
 def vs21_guard(args, out_root=OUT_ROOT):
-    """The VS21 path runs only with --vs21 and a freeze file (named and placed as `freeze` writes it) whose hashes
+    """The held-out sources (VS21, C26) run only with --vs21 and a freeze file (named and placed as `freeze` writes it) whose hashes
     match the rule set, the console's bin folder, the measurement code and the parameters (seed, bootstrap, console
-    INI) now. It never opens a VS21 file."""
+    INI) and the C26 pins now. It never opens a VS21 or C26 file."""
     if not getattr(args, "vs21", False):
         raise PermissionError("VS21 needs the explicit --vs21 flag")
     freeze = getattr(args, "freeze", None)
@@ -1705,22 +1835,23 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("stage", choices=("prepare", "fire", "measure", "all", "freeze"))
     parser.add_argument("--out", type=Path, help="run directory p3cs[smoke]-<yyyymmdd>-<sha> under " + OUT_ROOT.as_posix())
-    parser.add_argument("--sources", default="vs20")
+    parser.add_argument("--sources", default="vs20", help="vs20, vs20,vs21 or vs20,vs21,c26")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--limit", type=float, help="deterministic per-file fraction (0,1]; 0.01 for the smoke")
     parser.add_argument("--ruleset-dir", type=Path, help="the RuleSet folder of the console's source (" + EXPECTED_RULESET_VERSION + ")")
     parser.add_argument("--console", type=Path, help="MsfinderConsoleApp.exe")
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--bootstrap", type=int, default=BOOTSTRAP)
-    parser.add_argument("--vs21", action="store_true", help="allow the VS21 source (needs a matching --freeze)")
-    parser.add_argument("--freeze", type=Path, help="freeze file to write (stage freeze) or to check (VS21)")
+    parser.add_argument("--vs21", action="store_true", help="allow the held-out sources (needs a matching --freeze)")
+    parser.add_argument("--freeze", type=Path, help="freeze file to write (stage freeze) or to check (VS21, C26)")
+    parser.add_argument("--c26-train", type=Path, default=C26_TRAIN, help="CASMI26 train.parquet (source c26)")
     parser.add_argument("--detach", action="store_true", help="launch outside the caller's Windows job (WMI), log to run.log")
     parser.add_argument("--detached-child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     args.sources = args.sources.split(",")
-    if args.sources not in (["vs20"], ["vs20", "vs21"]) or not 1 <= args.workers <= 8:
-        # VS21 needs VS20 in the same run: its records are deduplicated against the VS20 first blocks.
-        parser.error("Use --sources vs20 or vs20,vs21 and 1..8 workers")
+    if args.sources not in SOURCE_LISTS or not 1 <= args.workers <= 8:
+        # VS21 needs VS20 in the same run, and C26 both: their records are deduplicated against the earlier keys.
+        parser.error("Use --sources vs20, vs20,vs21 or vs20,vs21,c26 and 1..8 workers")
     if args.limit is not None and not 0 < args.limit <= 1:
         parser.error("--limit must be a fraction in (0,1]")
     if args.stage in ("prepare", "fire", "measure", "all", "freeze") and not args.ruleset_dir:
@@ -1787,7 +1918,8 @@ def main(argv=None):
                                console_ini=CONSOLE_INI, record_unit="one representative per first block, ion mode and "
                                "curated precursor type (alias-mapped when the adduct table maps it)",
                                cluster="(truth Hill formula, curated precursor type, truth motif set) within a source",
-                               expected_ruleset_sha256=EXPECTED_RULESET_SHA256),
+                               expected_ruleset_sha256=EXPECTED_RULESET_SHA256,
+                               **(dict(c26=c26_parameters()) if "c26" in args.sources else {})),
                process=dict(detached_child=args.detached_child, launch_method="WMI" if args.detached_child else "foreground", **context),
                status="running", not_done=NOT_DONE)
     run.setdefault("timings_seconds", {})
