@@ -791,52 +791,93 @@ class OutputTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 m.audit_aggregates(d)
 
-    def test_vs21_outputs_named_local_and_suppressed(self):
+    def held_out_outputs(self, d):
+        """Three sources: VS21 holds 3 fired clusters (6 fired records), C26 12 fired clusters with 2 FP clusters, VS20
+        the rest, with one fired VS20 record in its own (Orbitrap) instrument stratum."""
+        truth, by_rule, chim = scenario(fp_clusters=2)
+        for rec in truth.values():
+            c = rec["cluster"]
+            if c in ("tp0", "tp1", "tp2") or c.startswith("n") and int(c[1:]) % 3 == 1:
+                rec["source"] = "vs21"
+            elif c in ("fp0", "fp1") or c.startswith("tp") and 3 <= int(c[2:]) < 13 or c.startswith("n") and int(c[1:]) % 3 == 2:
+                rec["source"] = "c26"
+        truth[next(u for u in sorted(truth) if truth[u]["cluster"] == "tp20")]["instrument"] = "Orbitrap/FT"
+        rules = [rule(), rule("r2", measure=False)]
+        res = m.measure_core(rules, truth, by_rule, {}, ["vs20", "vs21", "c26"], replicates=20, chimeric=chim)
+        doc = m.write_aggregates(d, res, "p3cs-20261123-abcdef1", rules, True)
+        return res, doc
+
+    def test_held_out_outputs_named_local_and_suppressed_by_denominator(self):
         with tempfile.TemporaryDirectory() as d:
-            self.outputs(d, local=True)
+            self.held_out_outputs(d)
             names = sorted(p.name for p in Path(d).iterdir())
             self.assertTrue(all(".local-vs21." in n for n in names), names)
             rows = m.read_rows(Path(d) / "rules_precision.local-vs21.csv")
-            gate = next(r for r in rows if (r["pass_id"], r["instrument"], r["energy"]) == ("base", "all", "all"))
-            # 2 fired FP clusters: c_fp is small, and c_fires and c_tp go with it, or c_fires - c_tp gives it back.
-            self.assertEqual((gate["c_fp"], gate["c_fires"], gate["c_tp"], gate["c_precision"], gate["c_wilson_lo"]),
+            cell = {(r["source"], r["instrument"]): r for r in rows if (r["pass_id"], r["energy"]) == ("base", "all")}
+            vs21, c26 = cell[("vs21", "all")], cell[("c26", "all")]
+            # VS21: 3 fired clusters, a denominator below 5, so the cluster set goes; 6 fired records stay.
+            self.assertEqual((vs21["c_fires"], vs21["c_tp"], vs21["c_fp"], vs21["c_precision"], vs21["c_wilson_lo"]),
                              ("", "", "", "", ""))
-            self.assertEqual((gate["fp"], gate["fires"], gate["tp"], gate["precision"]), ("", "", "", ""))
-            self.assertEqual(gate["lr_plus"], "")
-            self.assertNotEqual(gate["n_universe"], "")
+            self.assertEqual((vs21["fires"], vs21["tp"], vs21["fp"], vs21["precision"]), ("6", "6", "0", "1.0"))
+            self.assertEqual(vs21["lr_plus"], "")
+            self.assertNotEqual(vs21["n_universe"], "")
+            # C26: 12 fired clusters; the 2 FP clusters are a numerator, not a denominator, and stay.
+            self.assertEqual((c26["c_fires"], c26["c_fp"]), ("12", "2"))
+            self.assertNotEqual(c26["c_precision"], "")
+            # Development and pooled cells are never blanked, however small.
+            for key in (("vs20", "all"), ("pooled", "all"), ("vs20", "Orbitrap/FT"), ("pooled", "Orbitrap/FT")):
+                self.assertNotIn("", (cell[key]["fires"], cell[key]["c_fires"], cell[key]["c_precision"]), key)
+            self.assertEqual(cell[("vs20", "Orbitrap/FT")]["fires"], "1")
             doc = json.loads((Path(d) / "rules_precision.local-vs21.json").read_text(encoding="utf-8"))
-            self.assertNotIn("value", doc["rules"][0]["criteria"]["cluster_wilson_lo"])
+            crit = doc["rules"][0]["criteria"]
+            self.assertIsNotNone(crit["cluster_wilson_lo"]["value"])
+            ps = crit["per_source_precision"]["value"]
+            self.assertEqual(ps["vs21"], dict(c_fires=None, c_precision=None))
+            self.assertEqual(ps["c26"]["c_fires"], 12)
+            self.assertGreater(ps["vs20"]["c_fires"], 100)
 
     def test_suppress(self):
-        row = dict(rule_id="r", version=1, fires=3, tp=3, fp=0, precision=1.0, n_positive=40, n_universe=900,
-                   coverage=0.5, lr_plus=4.0)
+        row = dict(rule_id="r", version=1, source="vs21", fires=3, tp=3, fp=0, precision=1.0, n_positive=40,
+                   n_universe=900, coverage=0.5, lr_plus=4.0)
         s = m.suppress(row)
         self.assertEqual((s["fires"], s["tp"], s["fp"], s["precision"], s["coverage"], s["lr_plus"]),
                          (None, None, None, None, 0.5, None))
         self.assertEqual((s["version"], s["n_universe"], s["n_positive"]), (1, 900, 40))
+        for source in ("vs20", "pooled", None):
+            self.assertEqual(m.suppress(dict(row, source=source)), dict(row, source=source), source)
+        self.assertIsNone(m.suppress(dict(row, source="c26"))["precision"])
+        self.assertIsNone(m.suppress({k: v for k, v in row.items() if k != "source"}, held_out=True)["fires"])
 
-    def test_suppress_complementary_sets(self):
-        """Regression: no blanked count can be recovered by subtracting the others of its set."""
-        row = dict(rule_id="r", version=1, fires=200, tp=197, fp=3, precision=0.985, c_fires=162, c_tp=160, c_fp=2,
-                   c_precision=0.99, c_wilson_lo=0.96, c_coverage=0.8, n_universe=900, n_positive=4, coverage=0.5,
+    def test_suppress_by_denominator_only(self):
+        """Regression: a held-out cell is blanked only where its own denominator is below 5; a small numerator
+        (fp = 3 of 200 fires) or a small count in another set does not blank the row."""
+        row = dict(rule_id="r", version=1, source="vs21", fires=200, tp=197, fp=3, precision=0.985, c_fires=162, c_tp=160,
+                   c_fp=2, c_precision=0.99, c_wilson_lo=0.96, c_coverage=0.8, n_universe=900, n_positive=4,
+                   coverage=0.5, recall_universe=0.2, lr_plus=9.0,
                    decoy_fires_plus_5=2, decoy_fires_plus_9=0, decoy_fires_minus_7=0, decoy_fdr=0.003,
                    c_decoy_fires_plus_5=0, c_decoy_fires_plus_9=0, c_decoy_fires_minus_7=0, c_decoy_fdr=0.0)
         s = m.suppress(row)
-        for k in ("fires", "tp", "fp", "precision", "c_fires", "c_tp", "c_fp", "c_precision", "c_wilson_lo",
-                  "c_coverage", "n_universe", "n_positive", "coverage", "decoy_fires_plus_5", "decoy_fires_plus_9",
-                  "decoy_fires_minus_7", "decoy_fdr", "c_decoy_fdr"):
+        for k in ("n_positive", "coverage", "recall_universe", "lr_plus"):
             self.assertIsNone(s[k], k)
-        self.assertEqual(s["c_decoy_fires_plus_5"], 0)
-        occ = m.suppress(dict(rule_id="r", n_positive=3, n_negative=897, n_negative_cond=40, record_occupancy=0.04,
-                              c_positive=60, c_negative=700, c_negative_cond=20, c_record_occupancy=0.03))
-        self.assertEqual((occ["n_positive"], occ["n_negative"], occ["record_occupancy"]), (None, None, None))
-        self.assertEqual((occ["c_negative"], occ["c_record_occupancy"]), (700, 0.03))
+        for k in ("fires", "tp", "fp", "precision", "c_fires", "c_tp", "c_fp", "c_precision", "c_wilson_lo",
+                  "c_coverage", "n_universe", "decoy_fires_plus_5", "decoy_fdr", "c_decoy_fdr"):
+            self.assertEqual(s[k], row[k], k)
+        # A small conditional population blanks the fired records it bounds, and their rates.
+        s = m.suppress(dict(source="c26", n_cond=4, n_cond_positive=4, fires=4, tp=4, fp=0, precision=1.0, recall_cond=1.0))
+        self.assertEqual(set(s.values()) - {"c26"}, {None})
+        occ = m.suppress(dict(rule_id="r", source="vs21", n_positive=3, n_negative=897, n_negative_cond=40,
+                              record_occupancy=0.04, c_positive=60, c_negative=4, c_negative_cond=1, c_record_occupancy=0.25))
+        self.assertEqual((occ["n_positive"], occ["n_negative"], occ["record_occupancy"]), (None, 897, 0.04))
+        self.assertEqual((occ["c_negative"], occ["c_negative_cond"], occ["c_record_occupancy"]), (None, None, None))
 
     def test_suppress_report_counts(self):
-        d = {"vs21:pos:input": 1000, "vs21:pos:nominal_mass": 3, "vs21:pos:no_peaks": 20, "vs21:x": 0}
+        d = {"vs21:pos:input": 1000, "vs21:pos:nominal_mass": 3, "vs21:pos:no_peaks": 20, "vs21:x": 0,
+             "vs20:pos:nominal_mass": 2, "c26:bucket:x": 4, "c26/representatives/base": 1}
         s = m.suppress_counts(d)
-        self.assertEqual(s, {"vs21:pos:input": 1000, "vs21:pos:nominal_mass": None, "vs21:pos:no_peaks": None, "vs21:x": 0})
-        self.assertEqual(m.suppress_counts({"a": 2, "b": 3, "c": 50}), {"a": None, "b": None, "c": 50})
+        self.assertEqual(s, {"vs21:pos:input": 1000, "vs21:pos:nominal_mass": None, "vs21:pos:no_peaks": 20, "vs21:x": 0,
+                             "vs20:pos:nominal_mass": 2, "c26:bucket:x": None, "c26/representatives/base": None})
+        self.assertEqual(m.suppress_counts({"a": 2, "b": 3, "c": 50}), {"a": 2, "b": 3, "c": 50})
+        self.assertEqual(m.suppress_counts({"a": 2, "b": 3, "c": 50}, held_out=True), {"a": None, "b": None, "c": 50})
 
     def test_vs21_report_suppresses_run_counts(self):
         with tempfile.TemporaryDirectory() as d:
@@ -851,7 +892,7 @@ class OutputTests(unittest.TestCase):
             text = (Path(d) / "report.local-vs21.md").read_text(encoding="utf-8")
             self.assertIn('"vs21:pos:nominal_mass": null', text)
             self.assertIn('"riken": null', text)
-            self.assertIn('"other -> unknown": null', text)
+            self.assertIn('"other -> unknown": 1', text)  # pooled over sources: never blanked
             self.assertIn('"no_partner": null', text)
             self.assertIn('"skipped": null', text)
             self.assertIn("in-silico detector counts suppressed", text)

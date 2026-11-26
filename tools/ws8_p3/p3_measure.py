@@ -40,6 +40,8 @@ EXPECTED_RULESET_VERSION = "0.1.0"
 # VS21 is identified by name and sha256 only (AGENTS.md); its files are opened only behind vs21_guard.
 VS21 = [("pos", "MSMS-Private-pos-VS21.msp", "0fa0a96bdf1ebbd86349883cb96bb1ff9e327eb6ba7650ee3434056aacb4804f"),
         ("neg", "MSMS-Private-neg-VS21.msp", "7e2581ab31461b5a9102158a6eaf73d0a1702b8564dd75a9281c9b86dc4d132f")]
+# Held-out sources: only their small cells are suppressed; the development set (vs20) and pooled cells never are.
+HELD_OUT = ("vs21", "c26")
 PROVENANCE_TABLE = HERE / "provenance-p3.tsv"
 INSOURCE_TABLE = HERE / "insource-p3.tsv"
 INSOURCE_MARGIN_DA = 0.01
@@ -1207,7 +1209,7 @@ SYNTHETIC_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "se
 OCCUPANCY_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "precondition_mode", "axis_occupancy", "axis_lo_da",
                     "axis_hi_da", "n_hypotheses", "n_positive", "n_negative", "n_negative_cond", "record_occupancy",
                     "c_positive", "c_negative", "c_negative_cond", "c_record_occupancy", "non_conditional"]
-# Rates and the count that is their denominator, for VS21 small-cell suppression.
+# Rates and the count that is their denominator, for held-out small-cell suppression.
 RATE_DENOMINATOR = {"precision": "fires", "wilson_lo": "fires", "wilson_hi": "fires", "boot_lo": "fires",
                     "boot_hi": "fires", "decoy_fdr": "fires", "recall_cond": "n_cond_positive",
                     "recall_universe": "n_positive", "coverage": "n_positive", "c_precision": "c_fires",
@@ -1220,23 +1222,17 @@ ID_FIELDS = {"rule_id", "version", "ion_mode", "motif_id", "pass_id", "precondit
              "non_conditional"}
 
 
-C_RATES = "every c_* value that is not a count"
 DECOYS = ("plus_5", "plus_9", "minus_7")
-# Complementary sets (counts, rates): one small count blanks the whole set, so no member can be recovered by
-# subtraction from the others (for example c_fp = c_fires - c_tp). A count shared by two sets links them.
-SUPPRESSION_GROUPS = [
-    (("fires", "tp", "fp"), ("precision", "wilson_lo", "wilson_hi", "boot_lo", "boot_hi", "recall_cond",
-                             "recall_universe", "fpr", "fpr_wilson_hi")),
-    (("c_fires", "c_tp", "c_fp"), C_RATES),
-    (("n_universe", "n_positive"), ("coverage", "recall_universe")),
-    (("n_cond", "n_cond_positive"), ("recall_cond", "fpr", "fpr_wilson_hi")),
-    (("c_universe", "c_positive"), C_RATES),
-    (("c_cond", "c_cond_positive"), C_RATES),
-    (tuple("decoy_fires_" + d for d in DECOYS), ("decoy_fdr",)),
-    (tuple("c_decoy_fires_" + d for d in DECOYS), ("c_decoy_fdr",)),
-    (("n_positive", "n_negative", "n_negative_cond"), ("record_occupancy",)),
-    (("c_positive", "c_negative", "c_negative_cond"), C_RATES),
-]
+# Each denominator count and the counts it bounds. A held-out denominator of 1..4 blanks itself, these counts (and,
+# through them, their own sets) and every rate over it.
+DENOMINATOR_MEMBERS = {
+    "fires": ("tp", "fp") + tuple("decoy_fires_" + d for d in DECOYS),
+    "c_fires": ("c_tp", "c_fp") + tuple("c_decoy_fires_" + d for d in DECOYS),
+    "n_cond": ("n_cond_positive", "fires"), "c_cond": ("c_cond_positive", "c_fires"),
+    "n_universe": ("n_positive",), "c_universe": ("c_positive",),
+    "n_positive": (), "c_positive": (), "n_cond_positive": (), "c_cond_positive": (),
+    "n_negative": ("n_negative_cond",), "c_negative": ("c_negative_cond",),
+}
 WHOLE_TABLE = ("lr_", "c_lr_", "prior_stress", "c_prior_stress", "stress_", "c_cond_lr", "c_prevalence", "c_cond_prevalence")
 
 
@@ -1244,54 +1240,65 @@ def is_count(k, v):
     return k not in ID_FIELDS and isinstance(v, int) and not isinstance(v, bool)
 
 
-def suppress(row, n_min=CRITERIA["vs21_min_cell"]):
-    """VS21 small cells: a count in 1..n_min-1 is blanked with every count and rate of its complementary sets
-    (closed over shared counts), every rate whose denominator is below n_min is blanked, and likelihood ratios and
-    stress values (whole-table functions) are blanked when any count of the row is."""
+def held_out_key(label):
+    """A count label of a held-out source: `vs21:...`, `c26:...`, `vs21/...` or `c26/...`."""
+    return re.split(r"[:/]", label, maxsplit=1)[0] in HELD_OUT
+
+
+def suppress(row, n_min=CRITERIA["vs21_min_cell"], held_out=None):
+    """Held-out small cells (§22.5 of the P3 handback): only a row of a held-out source (`source` vs21 or c26, or
+    held_out=True) is touched, and only where its own denominator is below n_min: a denominator of 1..n_min-1 is
+    blanked with the counts it bounds, every rate whose denominator is below n_min is blanked, and the likelihood
+    ratios and stress values of the row are blanked when any of its counts is. Development (vs20) and pooled rows
+    are never blanked."""
+    if not (row.get("source") in HELD_OUT if held_out is None else held_out):
+        return dict(row)
     out = dict(row)
-    blank = {k for k, v in row.items() if is_count(k, v) and 0 < v < n_min}
-    changed = True
-    while changed:
-        changed = False
-        for counts, rates in SUPPRESSION_GROUPS:
-            present = [k for k in counts if k in row]
-            if present and blank & set(present):
-                members = set(present) | ({k for k in row if k.startswith("c_") and not is_count(k, row[k])}
-                                          if rates is C_RATES else {k for k in rates if k in row})
-                if not members <= blank:
-                    blank |= members
-                    changed = True
+    todo = [d for d in DENOMINATOR_MEMBERS if is_count(d, row.get(d)) and 0 < row[d] < n_min]
+    blank = set()
+    while todo:
+        d = todo.pop()
+        if d not in blank:
+            blank.add(d)
+            todo += [k for k in DENOMINATOR_MEMBERS.get(d, ()) if k in row]
     for k in blank:
         out[k] = None
     for k, d in RATE_DENOMINATOR.items():
-        if k in out and isinstance(row.get(d), int) and row[d] < n_min:
+        if k in out and (d in blank or (is_count(d, row.get(d)) and row[d] < n_min)):
             out[k] = None
-    if any(is_count(k, row[k]) for k in blank):
+    if blank:
         for k in out:
             if k.startswith(WHOLE_TABLE):
                 out[k] = None
     return out
 
 
-def suppress_counts(d, n_min=CRITERIA["vs21_min_cell"]):
-    """A flat {label: count} for a VS21 report: counts in 1..n_min-1 are blanked; when exactly one is, the next
-    smallest positive count is blanked too, so a total elsewhere cannot give the blanked one back."""
-    out = dict(d)
-    small = [k for k, v in d.items() if is_count(k, v) and 0 < v < n_min]
-    for k in small:
-        out[k] = None
-    if len(small) == 1:
-        rest = sorted((v, k) for k, v in d.items() if is_count(k, v) and v > 0 and k not in small)
-        if rest:
-            out[rest[0][1]] = None
+def suppress_counts(d, n_min=CRITERIA["vs21_min_cell"], held_out=None):
+    """A flat {label: count} of a report: a held-out count (a label of a held-out source, or every count with
+    held_out=True) of 1..n_min-1 is blanked. Development and pooled counts are never blanked."""
+    return {k: None if is_count(k, v) and 0 < v < n_min and (held_out_key(k) if held_out is None else held_out)
+            else v for k, v in d.items()}
+
+
+def suppress_criteria(crit, n_min=CRITERIA["vs21_min_cell"]):
+    """Criterion values of rules_precision.json: the per-source values of a held-out source with 1..n_min-1 fired
+    clusters, and the VS21-alone held-out values below n_min, are blanked; pooled values are kept."""
+    out = {}
+    for k, c in crit.items():
+        c, v = dict(c), c.get("value")
+        if k == "per_source_precision":
+            c["value"] = {s: dict(c_fires=None, c_precision=None) if s in HELD_OUT and 0 < r["c_fires"] < n_min else r
+                          for s, r in v.items()}
+        elif k == "heldout" and isinstance(v, dict) and 0 < v["c_fires"] < n_min:
+            c["value"] = {kk: None for kk in v}
+        out[k] = c
     return out
 
 
 def write_aggregates(out, result, run_id, rules, local_vs21, extra=None):
     out = Path(out)
     sfx = ".local-vs21" if local_vs21 else ""
-    tr = suppress if local_vs21 else (lambda r: r)
-    rows = {k: [tr(r) for r in result[k]] for k in ("precision", "competitors", "synthetic", "occupancy")}
+    rows = {k: [suppress(r) for r in result[k]] for k in ("precision", "competitors", "synthetic", "occupancy")}
     # Both tiers' statuses side by side on each rule's gate row (primary pass, pooled, all strata).
     csv_rows = []
     for r in rows["precision"]:
@@ -1318,11 +1325,9 @@ def write_aggregates(out, result, run_id, rules, local_vs21, extra=None):
             entry["synthetic"] = [r for r in rows["synthetic"] if r["rule_id"] == rule["rule_id"]]
             entry["occupancy"] = [r for r in rows["occupancy"] if r["rule_id"] == rule["rule_id"]]
             entry["competitors"] = [r for r in rows["competitors"] if r["rule_id"] == rule["rule_id"]]
-            if local_vs21:
-                entry["criteria"] = {k: {kk: vv for kk, vv in v.items() if kk != "value"} for k, v in entry["criteria"].items()}
-                entry["provisional"] = dict(entry["provisional"], criteria={
-                    k: {kk: vv for kk, vv in v.items() if kk != "value"} for k, v in entry["provisional"]["criteria"].items()})
-                entry["by_provenance"] = {b: suppress(v) for b, v in entry["by_provenance"].items()}
+            entry["criteria"] = suppress_criteria(entry["criteria"])
+            entry["provisional"] = dict(entry["provisional"], criteria=suppress_criteria(entry["provisional"]["criteria"]))
+            entry["by_provenance"] = {b: suppress(v, held_out=held_out_key(b)) for b, v in entry["by_provenance"].items()}
         by_rule.append(entry)
     gates = result["gates"].values()
     doc = dict(label="ws8-p3-class-rules", run_id=run_id, criteria=CRITERIA, criteria_provisional=CRITERIA_PROVISIONAL,
@@ -1391,7 +1396,7 @@ def skip_counts(fire_results):
 
 def write_report(out, doc, run, local_vs21):
     sfx = ".local-vs21" if local_vs21 else ""
-    sc = suppress_counts if local_vs21 else (lambda d: dict(d))
+    sc = suppress_counts
 
     def fmt(v):
         return "NA" if v is None else f"{v:.4g}" if isinstance(v, float) else str(v)
@@ -1449,7 +1454,7 @@ def write_report(out, doc, run, local_vs21):
         insil = raw_prov.get(source + ":in_silico_records", 0)
         shown = prov.get(source + ":in_silico_records", 0)
         if shown is None or any(v is None for v in buckets.values()):
-            lines.append(f"- {source}: in-silico detector counts suppressed (VS21 cells below 5).")
+            lines.append(f"- {source}: in-silico detector counts suppressed (held-out counts below 5).")
         else:
             lines.append(f"- {source}: the declared in-silico detector removed {insil} records "
                          f"({insil / (insil + total):.4%} of the eligible records)." if insil + total else f"- {source}: no eligible records.")
@@ -1461,15 +1466,15 @@ def write_report(out, doc, run, local_vs21):
               "P2 parity: " + json.dumps(run.get("p2_parity", {}), sort_keys=True), "",
               "P3 exclusions and adduct mapping (records; adduct_unmapped records stay in the universe):", "",
               "```json", json.dumps(prov, indent=2, sort_keys=True), "```", "",
-              "Synthetic chimeric set: " + json.dumps({k: sc(v) for k, v in run.get("chimeric", {}).items()}, sort_keys=True), "",
+              "Synthetic chimeric set: " + json.dumps({k: sc(v, held_out=k in HELD_OUT) for k, v in run.get("chimeric", {}).items()}, sort_keys=True), "",
               "In-source and adduct recast set (records per transformation row of insource-p3.tsv; `atoms_missing` rows "
               "failed the atom check, `adduct_unmapped` records carry a product type the console's alias table lacks):", "",
-              "```json", json.dumps({k: dict(v, by_row={r: sc(c) for r, c in v.get("by_row", {}).items()})
+              "```json", json.dumps({k: dict(v, by_row={r: sc(c, held_out=k in HELD_OUT) for r, c in v.get("by_row", {}).items()})
                                      for k, v in run.get("insource", {}).items()}, indent=1, sort_keys=True), "```", "",
               "Instrument class, P2 bin -> console class, base pass (record counts): "
-              + json.dumps(sc(run.get("instrument_classes", {})), sort_keys=True), "",
+              + json.dumps(run.get("instrument_classes", {}), sort_keys=True), "",
               "Console skips and errors per source, set and pass (records, summed over shards; `fire` stops on any error):", "",
-              "```json", json.dumps({k: sc(v) for k, v in skip_counts(run.get("fire", {})).items()}, indent=1, sort_keys=True),
+              "```json", json.dumps({k: sc(v, held_out=held_out_key(k)) for k, v in skip_counts(run.get("fire", {})).items()}, indent=1, sort_keys=True),
               "```", "",
               "## Definitions", "",
               "- Universe: every representative of the ion mode; conditional population: representatives where the rule "
