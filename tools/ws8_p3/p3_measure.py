@@ -1,8 +1,9 @@
-"""WS8 P3 rule-level measurement of the MS-FINDER diagnostic-ion rules (VS20 development pass).
+"""WS8 P3 rule-level measurement of the MS-FINDER diagnostic-ion rules (VS20 development set; VS21, C26 held out).
 
-Stages: prepare (record units, truth, clusters, allowlisted MSP), fire (the C# console's diagrules on the
-representatives and on the synthetic chimeric set), measure (join, counts, intervals, gate, aggregates), all,
-and freeze (the hashes the VS21 pass must match). Optional chemistry (RDKit, pyarrow) stays outside src/.
+Stages: prepare (record units, truth, clusters, allowlisted MSP), inventory (truth-only counters and power count,
+no console), fire (the C# console's diagrules on the representatives and on the synthetic chimeric set), measure
+(join, counts, intervals, gate, aggregates), all (prepare, fire, measure), and freeze (the hashes the held-out
+VS21 and C26 passes must match). Optional chemistry (RDKit, pyarrow) stays outside src/.
 """
 import argparse
 from fractions import Fraction
@@ -1740,6 +1741,70 @@ def measure(args, run):
     run["status_counts"] = doc["status_counts"]
 
 
+# ------------------------------------------------------------------------------------------- inventory stage
+POWER_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "source", "n_universe", "n_positive", "c_universe",
+                "c_positive"]
+
+
+def power_counts(rules, truth, sources):
+    """Truth only: per measured rule (measure and source_checked), in its ion mode, per source and pooled, the
+    representatives and clusters of the universe and those whose truth motif set holds the rule's motif (measure's
+    universe(), so n_positive and c_positive are the denominators measure reports). No evidence, no precision."""
+    truth_by_mode = defaultdict(list)
+    for uid in sorted(truth):
+        truth_by_mode[truth[uid]["mode"]].append((uid, truth[uid]))
+    rows, cache = [], {}
+    for rule in sorted(rules, key=lambda r: r["rule_id"]):
+        if not (rule["measure"] and rule["source_checked"]):
+            continue
+        key = (rule["ion_mode"], rule["motif_id"])
+        if key not in cache:
+            cache[key] = universe(truth_by_mode, *key, True, sources)
+        for s in ("pooled",) + tuple(sources):
+            u = cache[key][(s, "all", "all")]
+            rows.append(dict(rule_id=rule["rule_id"], version=rule["version"], ion_mode=rule["ion_mode"],
+                             motif_id=rule["motif_id"], source=s, n_universe=u["n"], n_positive=u["pos"],
+                             c_universe=len(u["cl"]), c_positive=len(u["pcl"])))
+    return rows
+
+
+def inventory(args, run):
+    """Truth-only inventory after prepare (handback 22.5): prepare counters and stats per source, the C26
+    instrument strings with P2's instrument class, and the power count. It never runs the console, reads no
+    evidence and computes no precision."""
+    rules, _, _ = load_rules(args.ruleset_dir)
+    truth = {}
+    for source in args.sources:
+        if source in HELD_OUT:
+            vs21_guard(args)
+        truth.update(load_truth(args.out, source))
+
+    def of(name, source):
+        return {k: v for k, v in sorted(run.get(name, {}).items()) if k.startswith(source + ":")}
+
+    prepared = {s: dict(stats=run.get("prepared", {}).get(s), exclusions=of("exclusions", s),
+                        p3_exclusions=of("p3_exclusions", s), p2_parity=run.get("p2_parity", {}).get(s))
+                for s in args.sources}
+    itypes = {}
+    for s in args.sources:
+        path = Path(args.out) / f"instrument_types{suffix(s)}.tsv"
+        if path.is_file():
+            itypes[s] = [dict(r, records=int(r["records"])) for r in read_rows(path)]
+    power = power_counts(rules, truth, args.sources)
+    sfx = suffix(*args.sources)
+    p2.write_json(Path(args.out) / f"inventory{sfx}.json", dict(
+        label="ws8-p3-inventory", run_id=Path(args.out).name, sources=args.sources,
+        ruleset_sha256=EXPECTED_RULESET_SHA256, ruleset_version=EXPECTED_RULESET_VERSION, prepare=prepared,
+        instrument_types=itypes, power=power,
+        note="Truth only: no console run, no evidence, no precision. Power: representatives (n_) and clusters (c_) of "
+             "the rule's ion mode (universe) and those whose truth motif set holds the rule's motif (positive), for "
+             "every rule with measure: true and source_checked: true. Instrument classes are P2's instrument_bin."))
+    write_rows(Path(args.out) / f"inventory{sfx}.tsv", power, POWER_FIELDS)
+    run["inventory"] = dict(rules=len({r["rule_id"] for r in power}), files=[f"inventory{sfx}.json", f"inventory{sfx}.tsv"],
+                            audit=audit_aggregates(args.out))
+    print("inventory", run["inventory"], flush=True)
+
+
 # ------------------------------------------------------------------------------------------- VS21 and runs
 FREEZE_KEYS = ("ruleset_sha256_expected", "ruleset_files", "console_sha256", "console_files", "code", "parameters",
                "insource_table", "criteria", "c26")
@@ -1833,7 +1898,7 @@ def detach(argv, out):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("stage", choices=("prepare", "fire", "measure", "all", "freeze"))
+    parser.add_argument("stage", choices=("prepare", "inventory", "fire", "measure", "all", "freeze"))
     parser.add_argument("--out", type=Path, help="run directory p3cs[smoke]-<yyyymmdd>-<sha> under " + OUT_ROOT.as_posix())
     parser.add_argument("--sources", default="vs20", help="vs20, vs20,vs21 or vs20,vs21,c26")
     parser.add_argument("--workers", type=int, default=8)
@@ -1854,7 +1919,7 @@ def main(argv=None):
         parser.error("Use --sources vs20, vs20,vs21 or vs20,vs21,c26 and 1..8 workers")
     if args.limit is not None and not 0 < args.limit <= 1:
         parser.error("--limit must be a fraction in (0,1]")
-    if args.stage in ("prepare", "fire", "measure", "all", "freeze") and not args.ruleset_dir:
+    if args.stage in ("prepare", "inventory", "fire", "measure", "all", "freeze") and not args.ruleset_dir:
         parser.error("--ruleset-dir is required for " + args.stage)
     if args.stage in ("fire", "all", "freeze") and not args.console:
         parser.error("--console is required for " + args.stage)

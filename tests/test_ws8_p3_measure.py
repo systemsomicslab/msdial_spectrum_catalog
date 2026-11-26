@@ -1084,6 +1084,79 @@ class OutputTests(unittest.TestCase):
             self.assertIn("vs20/representatives/mz_only_curated", (Path(d) / "report.md").read_text(encoding="utf-8"))
 
 
+def prepared_row(rid, source, cluster, motifs, mode="pos"):
+    return dict(record_id=rid, source=source, key=f"K{rid}", formula="C1", motifs=sorted(motifs), cluster_id=cluster,
+                mode=mode, adduct="[M+H]+", adduct_mapped=True, precursor=200.0, instrument="QTOF-type", energy="eV:<20",
+                instrument_type="", collision_energy="", bucket="x", spectrum_count=1, msp_file="a.msp", msp_index=0,
+                mz=[100.0], intensity=[1.0])
+
+
+class InventoryTests(unittest.TestCase):
+    def test_power_counts_by_truth_only(self):
+        truth, _, _ = scenario(tp_clusters=10, members=2, neg_clusters=20)
+        for uid in sorted(truth)[:6]:  # tp0..tp2, 6 motif records in 3 clusters
+            truth[uid]["source"] = "c26"
+        rules = [rule(), rule("r2", measure=False), rule("r3", source_checked=False), rule("r4", ion_mode="neg")]
+        rows = m.power_counts(rules, truth, ["vs20", "vs21", "c26"])
+        self.assertEqual({r["rule_id"] for r in rows}, {"r1", "r4"})
+        by = {(r["rule_id"], r["source"]): r for r in rows}
+        self.assertEqual({k: by[("r1", "c26")][k] for k in ("n_universe", "n_positive", "c_universe", "c_positive")},
+                         dict(n_universe=6, n_positive=6, c_universe=3, c_positive=3))
+        self.assertEqual((by[("r1", "pooled")]["n_positive"], by[("r1", "pooled")]["c_positive"]), (20 + 30, 10 + 30))
+        self.assertEqual((by[("r1", "vs21")]["n_universe"], by[("r4", "pooled")]["n_universe"]), (0, 0))  # no neg records
+        self.assertEqual(list(rows[0]), m.POWER_FIELDS)
+
+    @unittest.skipUnless(HAS_ARROW, "pyarrow is required")
+    def test_inventory_stage_needs_no_console_or_evidence(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "p3cs-20261127-abcdef1"
+            out.mkdir()
+            schema = m._schemas()[1]
+            data = {"vs20": [prepared_row(0, "vs20", "a", {"M"}), prepared_row(2, "vs20", "b", set())],
+                    "vs21": [prepared_row(1, "vs21", "c", {"M"})],
+                    "c26": [prepared_row(4, "c26", "d", {"M"}), prepared_row(6, "c26", "d", {"M"}),
+                            prepared_row(3, "c26", "e", set(), mode="neg")]}
+            for source, rows in data.items():
+                sink = p2.ParquetRows(m.row_path(out, "prepared", source), schema)
+                for r in rows:
+                    sink.add(r)
+                sink.close()
+            m.write_instrument_types(out, "c26", Counter({"LC-ESI-QTOF": 2, "Orbitrap Exploris": 1, "": 4}))
+            run = dict(prepared={s: dict(representatives=len(r)) for s, r in data.items()},
+                       exclusions={"vs20:pos:input": 9, "c26:pos:input": 7, "c26:vs21_overlap_records": 1},
+                       p3_exclusions={"c26:excluded_ingest_lib": 5}, p2_parity={"c26": dict(result="not_checked")})
+            args = SimpleNamespace(sources=["vs20", "vs21", "c26"], out=out, ruleset_dir=Path(d), console=None)
+            saved = m.load_rules, m.vs21_guard
+            m.load_rules = lambda d: ([rule(), rule("r2", measure=False)], None, {})
+            m.vs21_guard = lambda a: True
+            try:
+                quiet(m.inventory, args, run)
+            finally:
+                m.load_rules, m.vs21_guard = saved
+            names = sorted(p.name for p in out.iterdir() if p.name.startswith("inventory"))
+            self.assertEqual(names, ["inventory.local-vs21.local-c26.json", "inventory.local-vs21.local-c26.tsv"])
+            self.assertFalse((out / "fire").exists())
+            doc = json.loads((out / names[0]).read_text(encoding="utf-8"))
+            self.assertEqual(doc["prepare"]["c26"]["exclusions"], {"c26:pos:input": 7, "c26:vs21_overlap_records": 1})
+            self.assertEqual(doc["prepare"]["c26"]["p3_exclusions"], {"c26:excluded_ingest_lib": 5})
+            self.assertEqual(doc["prepare"]["vs20"]["stats"], dict(representatives=2))
+            self.assertEqual([(r["instrument_type"], r["records"], r["instrument_class"]) for r in doc["instrument_types"]["c26"]],
+                             [("", 4, "other"), ("LC-ESI-QTOF", 2, "QTOF-type"), ("Orbitrap Exploris", 1, "Orbitrap/FT")])
+            power = {r["source"]: r for r in m.read_rows(out / names[1])}
+            self.assertEqual([(power[s]["n_positive"], power[s]["c_positive"]) for s in ("pooled", "vs20", "vs21", "c26")],
+                             [("4", "3"), ("1", "1"), ("1", "1"), ("2", "1")])
+            self.assertEqual(power["c26"]["n_universe"], "2")  # the negative record is not in a positive-mode universe
+            self.assertFalse(any("precision" in k or "fires" in k for r in doc["power"] for k in r))
+            self.assertEqual((run["inventory"]["rules"], run["inventory"]["audit"]), (1, "pass"))
+
+    def test_cli_accepts_the_inventory_stage(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit):  # needs --ruleset-dir, like every other stage
+                quiet(m.main, ["inventory", "--out", str(Path(d) / "p3cs-20261127-abcdef1")])
+            with self.assertRaises(SystemExit):
+                quiet(m.main, ["inventry", "--ruleset-dir", d])
+
+
 def shard_dir(d, name="r-00", build="b1", engine="e1", errors=0, records=1, msp=None, local=False):
     out = Path(d) / name
     out.mkdir(parents=True, exist_ok=True)
