@@ -194,6 +194,160 @@ class PrepareTests(unittest.TestCase):
             self.assertEqual(counts["vs20:pos:input"], 14)
 
 
+HAS_ARROW = importlib.util.find_spec("pyarrow") is not None
+C26_SCHEMA = [("ingest_lib", "s"), ("normalized_smiles", "s"), ("inchikey", "s"), ("inchikey14", "s"),
+              ("molecular_formula", "s"), ("ionization_mode", "s"), ("instrument_type", "s"), ("adduct", "s"),
+              ("adduct_orig", "s"), ("precursor_mz", "f"), ("precursor_error_ppm", "f"), ("ms2_mzs", "l"),
+              ("ms2_normalized_intensities", "l"), ("num_peaks", "i"), ("base_peak_intensity", "f"),
+              ("collision_energy_ev", "l"), ("collision_energy_orig", "s"), ("collision_energy_orig_units", "s")]
+
+
+def c26_row(smiles=CAFFEINE, mode="positive", adduct="[M+H]+", mz=195.0877, ppm=1.5, lib="gnps", ik14="AAAAAAAAAAAAAA",
+            peaks=((138.0662, 1.0), (110.0713, 0.4)), ce=(20.0,), inst="LC-ESI-QTOF"):
+    """A synthetic CASMI26-shaped row (public molecules, made-up keys)."""
+    return dict(ingest_lib=lib, normalized_smiles=smiles, inchikey=None, inchikey14=ik14, molecular_formula=None,
+                ionization_mode=mode, instrument_type=inst, adduct=adduct, adduct_orig=adduct, precursor_mz=mz,
+                precursor_error_ppm=ppm, ms2_mzs=[a for a, _ in peaks], ms2_normalized_intensities=[b for _, b in peaks],
+                num_peaks=len(peaks), base_peak_intensity=1.0, collision_energy_ev=None if ce is None else list(ce),
+                collision_energy_orig=None if ce is None else ",".join(f"{x:g}" for x in ce) + " eV",
+                collision_energy_orig_units="eV")
+
+
+def write_c26(path, rows):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    types = dict(s=pa.string(), f=pa.float64(), i=pa.int64(), l=pa.list_(pa.float64()))
+    schema = pa.schema([(name, types[t]) for name, t in C26_SCHEMA])
+    pq.write_table(pa.Table.from_pydict({n: [r[n] for r in rows] for n, _ in C26_SCHEMA}, schema=schema), path,
+                   row_group_size=3)
+    return path
+
+
+C26_ROWS = [c26_row(ce=(10.0, 20.0, 40.0)),                                                    # 0 kept, merged CE
+            c26_row(QUERCETIN, "negative", "[M-H]-", 301.0354, peaks=((151.0031, 1.0), (178.998, 0.2))),  # 1 neg
+            c26_row(lib="enveda-180"),                                                         # 2 excluded library
+            c26_row(smiles=None),                                                              # 3 no structure
+            c26_row(ik14=None),                                                                # 4 no first block
+            c26_row(ppm=None),                                                                 # 5 ppm missing
+            c26_row(ppm=12.0),                                                                 # 6 ppm above 10
+            c26_row(ppm=-9.9, inst=None),                                                      # 7 kept, no instrument
+            c26_row(mode=None),                                                                # 8 mode missing
+            c26_row(peaks=((138.0, 1.0), (110.0, 0.4)))]                                       # 9 nominal mass
+
+
+class NamingTests(unittest.TestCase):
+    def test_one_suffix_rule(self):
+        self.assertEqual([m.suffix(*x) for x in (("vs20",), ("vs21",), ("c26",), ("vs20", "vs21"), ("vs20", "vs21", "c26"))],
+                         ["", ".local-vs21", ".local-vs21.local-c26", ".local-vs21", ".local-vs21.local-c26"])
+        self.assertEqual(m.row_path(Path("o"), "prepared", "c26"), Path("o") / "prepared.local-vs21.local-c26.parquet")
+        self.assertEqual(m.row_path(Path("o"), "prepared", "vs21"), p2.row_path(Path("o"), "prepared", "vs21"))
+        self.assertEqual(m.row_path(Path("o"), "prepared", "vs20"), p2.row_path(Path("o"), "prepared", "vs20"))
+        self.assertEqual([m.local_vs21(x) for x in ("vs20", "vs21", "c26")], [False, True, True])
+
+    def test_c26_inputs(self):
+        self.assertEqual(m.library_inputs("c26", SimpleNamespace(c26_train=Path("x.parquet"))),
+                         [("pos", Path("x.parquet"), m.C26_SHA256), ("neg", Path("x.parquet"), m.C26_SHA256)])
+        self.assertEqual(m.C26_TRAIN.parent.parent.parent, m.OUT_ROOT.parent / "external")
+        self.assertEqual(m.library_inputs("c26")[0][1], m.C26_TRAIN)
+
+
+@unittest.skipUnless(HAS_ARROW, "pyarrow is required")
+class C26ReaderTests(unittest.TestCase):
+    def test_rows_become_msp_tuples_of_one_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = write_c26(Path(d) / "train.parquet", C26_ROWS)
+            pos = list(m.iter_c26(path, "pos", batch_size=4))
+            neg = list(m.iter_c26(path, "neg", batch_size=4))
+        self.assertEqual([x[3]["ordinal"] for x in pos], [0, 2, 3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual([x[3]["ordinal"] for x in neg], [1])
+        meta, peaks, decimals, prov = pos[0]
+        self.assertEqual(meta, dict(precursormz="195.0877", precursortype="[M+H]+", ionmode="positive",
+                                    instrumenttype="LC-ESI-QTOF", collisionenergy="10,20,40 eV", smiles=CAFFEINE))
+        self.assertEqual((peaks, decimals), ([(138.0662, 1.0), (110.0713, 0.4)], [4, 4]))
+        self.assertEqual({k: prov[k] for k in ("bucket", "in_silico", "exclude", "merged_ce")},
+                         dict(bucket="gnps", in_silico=False, exclude=None, merged_ce=True))
+        self.assertEqual([x[3]["exclude"] for x in pos],
+                         [None, "excluded_ingest_lib", "missing_structure", "missing_structure",
+                          "precursor_error_ppm_missing", "precursor_error_ppm_above_limit", None, None, None])
+        self.assertEqual(pos[6][0]["instrumenttype"], "")
+        self.assertEqual(pos[7][0]["ionmode"], "missing")
+        self.assertIsNone(p2.ion_mode(pos[7][0]["ionmode"], "pos"))  # P2's mode check counts it
+        self.assertTrue(p2.nominal_mass(pos[8][1], pos[8][2]))
+        self.assertFalse(p2.nominal_mass(pos[0][1], pos[0][2]))
+        self.assertEqual(neg[0][0]["ionmode"], "negative")
+        self.assertFalse(neg[0][3]["merged_ce"])
+
+    def test_decimals_from_shortest_repr(self):
+        self.assertEqual([m.decimals_of(x) for x in (138.0, 138.0662, 1e-05, 2.5e20)], [1, 4, 0, 1])
+
+
+@unittest.skipUnless(HAS_CHEM, "RDKit and pyarrow are required")
+class C26PrepareTests(unittest.TestCase):
+    def ruleset(self, d):
+        t = Path(d) / "RuleSet" / "tables"
+        t.mkdir(parents=True)
+        (t / "motifs.json").write_text(json.dumps(dict(motifs=MOTIFS)), encoding="utf-8")
+        (t / "adducts.json").write_text(json.dumps(dict(adducts=ADDUCTS)), encoding="utf-8")
+        return t.parent
+
+    def test_prepare_three_sources(self):
+        rows = [c26_row(CAFFEINE),                                                             # 0 VS20 overlap
+                c26_row(THEOBROMINE, mz=181.0720),                                             # 1 VS21 overlap
+                c26_row(THEOPHYLLINE, mz=181.0720, ce=(10.0, 30.0)),                           # 2 kept, merged CE
+                c26_row(THEOPHYLLINE, mz=181.0720, ppm=-9.9, inst=None, lib="mona"),           # 3 kept, same unit
+                c26_row(QUERCETIN, "negative", "[M-H]-", 301.0354, peaks=((151.0031, 1.0), (178.998, 0.2))),  # 4 neg
+                c26_row(PROTOPINE, mz=354.1336, peaks=((206.0812, 1.0), (149.0597, 0.6))),   # 5 kept
+                c26_row(PROTOPINE, lib="enveda-180"), c26_row(smiles=None), c26_row(ppm=None), c26_row(ppm=11.0),
+                c26_row(mode=None), c26_row(peaks=((138.0, 1.0), (110.0, 0.4)))]
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "vs20.msp").write_text(msp_record(CAFFEINE), encoding="utf-8")
+            (Path(d) / "vs21.msp").write_text(msp_record(THEOBROMINE, mz="181.0720"), encoding="utf-8")
+            (Path(d) / "empty.msp").write_text("", encoding="utf-8")
+            c26 = write_c26(Path(d) / "train.parquet", rows)
+            out = Path(d) / "run"
+            out.mkdir()
+            inputs = {"vs20": [("pos", Path(d) / "vs20.msp", None), ("neg", Path(d) / "empty.msp", None)],
+                      "vs21": [("pos", Path(d) / "vs21.msp", None), ("neg", Path(d) / "empty.msp", None)],
+                      "c26": [("pos", c26, None), ("neg", c26, None)]}
+            args = SimpleNamespace(sources=["vs20", "vs21", "c26"], out=out, limit=None, workers=1,
+                                   ruleset_dir=self.ruleset(d), c26_train=None)
+            guarded, saved = [], m.vs21_guard
+            m.vs21_guard = lambda a: guarded.append(a) or True
+            try:
+                run = {}
+                quiet(m.prepare, args, run, inputs=inputs, p2_run=None)
+            finally:
+                m.vs21_guard = saved
+            self.assertEqual(len(guarded), 2)  # vs21 and c26 are held out
+            ex, p3x = run["exclusions"], run["p3_exclusions"]
+            self.assertEqual((ex["c26:vs20_overlap_records"], ex["c26:vs21_overlap_records"]), (1, 1))
+            self.assertEqual(ex.get("vs21:vs20_overlap_records", 0), 0)
+            self.assertEqual((ex["c26:pos:input"], ex["c26:neg:input"]), (11, 1))
+            self.assertEqual((ex["c26:pos:mode_mismatch"], ex["c26:pos:nominal_mass"]), (1, 1))
+            for k, v in (("excluded_ingest_lib", 1), ("missing_structure", 1), ("precursor_error_ppm_missing", 1),
+                         ("precursor_error_ppm_above_limit", 1), ("merged_collision_energy_records", 1),
+                         ("bucket:gnps", 3), ("bucket:mona", 1)):
+                self.assertEqual(p3x["c26:" + k], v, k)
+            self.assertEqual(run["p2_parity"]["c26"], dict(result="not_checked", reason="no P2 run for c26"))
+            self.assertEqual(run["prepared"]["c26"]["representatives"], 3)
+            self.assertNotIn("instrument_types", run["prepared"]["c26"])
+            dump = json.dumps(run)
+            for secret in (CAFFEINE, THEOPHYLLINE, "AAAAAAAAAAAAAA", "QTOF"):
+                self.assertNotIn(secret, dump)
+            reps = list(p2.parquet_rows(out / "prepared.local-vs21.local-c26.parquet"))
+            self.assertEqual(sorted(r["record_id"] for r in reps), [2 * 2, 2 * 4 + 1, 2 * 5])
+            theo = next(r for r in reps if r["record_id"] == 4)
+            self.assertEqual((theo["energy"], theo["spectrum_count"], theo["source"]), ("merged", 2, "c26"))
+            self.assertTrue((out / "prepared.local-vs21.parquet").is_file())
+            self.assertTrue((out / "prepared.parquet").is_file())
+            names = sorted(p.name for p in (out / "msp" / "c26").iterdir())
+            self.assertTrue(names and all(".local-vs21.local-c26." in n for n in names), names)
+            itypes = m.read_rows(out / "instrument_types.local-vs21.local-c26.tsv")
+            self.assertEqual([(r["instrument_type"], r["records"], r["instrument_class"]) for r in itypes],
+                             [("", "1", "other"), ("LC-ESI-QTOF", "3", "QTOF-type")])
+            self.assertFalse(list(out.glob("p3raw*")))
+
+
 def rep(rid, key, mode, mz, peaks, adduct="[M+H]+"):
     return dict(record_id=rid, key=key, mode=mode, precursor=mz, adduct=adduct, instrument_type="", collision_energy="",
                 mz=[p[0] for p in peaks], intensity=[p[1] for p in peaks])
@@ -660,7 +814,7 @@ class TierTests(unittest.TestCase):
         self.assertEqual((g["status"], g["status_provisional"], g["label"]), ("pass", "pass", "pass_strict"))
         self.assertEqual((g["failed"], g["pending"], g["provisional"]["failed"]), ([], [], []))
         with tempfile.TemporaryDirectory() as d:
-            m.write_aggregates(d, res, "p3cs-20261124-abcdef1", [rule()], False)
+            m.write_aggregates(d, res, "p3cs-20261124-abcdef1", [rule()], "")
             prop = json.loads((Path(d) / "review_proposal-p3cs-20261124-abcdef1.json").read_text(encoding="utf-8"))
             self.assertEqual([x["rule_id"] for x in prop["passed_strict"]], ["r1"])
             self.assertEqual(prop["passed_strict"][0]["criteria"]["n_clusters"]["threshold"], 100)
@@ -674,7 +828,7 @@ class TierTests(unittest.TestCase):
                          ("not_estimable", "pass", "pass_provisional_only"))
         self.assertGreaterEqual(g["provisional"]["criteria"]["cluster_wilson_lo"]["value"], 0.90)
         with tempfile.TemporaryDirectory() as d:
-            m.write_aggregates(d, res, "p3cs-20261124-abcdef1", [rule()], False)
+            m.write_aggregates(d, res, "p3cs-20261124-abcdef1", [rule()], "")
             prop = json.loads((Path(d) / "review_proposal-p3cs-20261124-abcdef1.json").read_text(encoding="utf-8"))
             self.assertEqual(prop["passed_strict"], [])
             listed = prop["passed_provisional_only"][0]
@@ -709,6 +863,94 @@ class TierTests(unittest.TestCase):
         self.assertIn("heldout", g["provisional"]["pending"])
         res, g = self.gate(scenario(), rules=[rule(origin="tuned_pooled")])
         self.assertEqual((g["status"], g["status_provisional"]), ("incomplete", "incomplete"))
+
+    def test_c26_is_a_third_source_of_the_per_source_criterion(self):
+        truth, by_rule, chim = scenario(tp_clusters=160, fp_clusters=6, members=1)
+        for rec in truth.values():
+            c = rec["cluster"]
+            if c.startswith("fp") or c.startswith("tp") and int(c[2:]) < 30:
+                rec.update(source="c26", bucket="gnps")
+            elif c.startswith("tp") and int(c[2:]) < 40:
+                rec["source"] = "vs21"
+        res, g = self.gate((truth, by_rule, chim), sources=("vs20", "vs21", "c26"))
+        ps = g["criteria"]["per_source_precision"]["value"]
+        self.assertEqual(set(ps), {"vs20", "vs21", "c26"})
+        self.assertEqual((ps["c26"]["c_fires"], ps["c26"]["c_precision"]), (36, 30 / 36))
+        self.assertIn("per_source_precision", g["failed"])
+        self.assertIn("per_source_precision", g["provisional"]["failed"])
+        self.assertIn("C26", g["criteria"]["heldout"]["note"])
+        self.assertIn("c26:gnps", g["by_provenance"])
+        self.assertEqual({r["source"] for r in res["precision"]}, {"pooled", "vs20", "vs21", "c26"})
+
+
+def c26_split(sc, n_c26):
+    """The first n_c26 TP clusters move to C26; everything else stays VS20."""
+    truth, by_rule, chim = sc
+    for rec in truth.values():
+        c = rec["cluster"]
+        if c.startswith("tp") and int(c[2:]) < n_c26:
+            rec.update(source="c26", bucket="gnps")
+    return truth, by_rule, chim
+
+
+class ExploratoryTierTests(unittest.TestCase):
+    """Tier 3 (exploratory, registered 2026-11-27): judged on C26 alone, VS20 and VS21 only guard."""
+    gate = TierTests.gate
+
+    def gate3(self, sc, origin="as_published"):
+        return self.gate(sc, sources=("vs20", "vs21", "c26"), rules=[rule(origin=origin)])
+
+    def test_not_applicable_without_c26(self):
+        res, g = self.gate(scenario())
+        self.assertEqual((g["status_exploratory"], g["label"]), ("not_applicable", "pass_strict"))
+
+    def test_rule_passing_tier_3_only(self):
+        # 40 TP + 6 FP clusters pooled (precision 0.87) fails tier 2; C26 holds 25 TP clusters and no FP.
+        for origin in ("as_published", "tuned_pooled"):
+            res, g = self.gate3(c26_split(scenario(tp_clusters=40, fp_clusters=6, members=1), 25), origin)
+            self.assertEqual((g["status"], g["status_provisional"]), ("not_estimable", "fail"), origin)
+            self.assertEqual((g["status_exploratory"], g["exploratory"]["failed"]), ("pass", []), origin)
+            self.assertEqual(g["exploratory"]["criteria"]["n_clusters"]["value"], 25)
+            self.assertIn("C26 alone", g["exploratory"]["criteria"]["heldout"]["note"])
+            self.assertEqual(g["label"], "pass_exploratory_only", origin)
+        with tempfile.TemporaryDirectory() as d:
+            m.write_aggregates(d, res, "p3cs-20261127-abcdef1", [rule()], "")
+            prop = json.loads((Path(d) / "review_proposal-p3cs-20261127-abcdef1.json").read_text(encoding="utf-8"))
+            listed = prop["passed_exploratory_only"][0]
+            self.assertEqual((listed["tier"], listed["criteria"]["n_clusters"]["threshold"]), ("exploratory", 20))
+            row = next(r for r in m.read_rows(Path(d) / "rules_precision.csv") if r["gate_row"] == "True")
+            self.assertEqual((row["status_exploratory"], row["label"]), ("pass", "pass_exploratory_only"))
+
+    def test_tier_3_needs_20_c26_clusters(self):
+        res, g = self.gate3(c26_split(scenario(tp_clusters=40, fp_clusters=6, members=1), 15))
+        self.assertEqual((g["status_exploratory"], g["label"]), ("not_estimable", "not_estimable"))
+
+    def test_tier_3_guard_on_seen_sets(self):
+        # VS20 keeps 35 TP and 10 FP clusters: 45 fired, point precision 0.78 < 0.85.
+        res, g = self.gate3(c26_split(scenario(tp_clusters=60, fp_clusters=10, members=1), 25))
+        self.assertEqual(g["status_exploratory"], "fail")
+        self.assertEqual(g["exploratory"]["failed"], ["per_source_precision"])
+        self.assertEqual(set(g["exploratory"]["criteria"]["per_source_precision"]["value"]), {"vs20", "vs21"})
+
+    def test_small_c26_gate_cell_is_blanked(self):
+        res, g = self.gate3(c26_split(scenario(tp_clusters=40, fp_clusters=6, members=1), 3))
+        self.assertEqual(g["exploratory"]["criteria"]["n_clusters"]["value"], 3)
+        with tempfile.TemporaryDirectory() as d:
+            m.write_aggregates(d, res, "p3cs-20261127-abcdef1", [rule()], "")
+            doc = json.loads((Path(d) / "rules_precision.json").read_text(encoding="utf-8"))
+            crit = doc["rules"][0]["exploratory"]["criteria"]
+            self.assertEqual([crit[k]["value"] for k in ("n_clusters", "cluster_wilson_lo", "prior_stress", "decoy_fdr")],
+                             [None] * 4)
+            self.assertEqual(doc["rules"][0]["criteria"]["n_clusters"]["value"], 46)  # pooled kept
+
+    def test_combined_label_order(self):
+        cl = m.combined_label
+        self.assertEqual(cl("pass", "pass", "pass"), "pass_strict")
+        self.assertEqual(cl("fail", "pass", "pass"), "pass_provisional_only")
+        self.assertEqual(cl("fail", "incomplete", "pass"), "pass_exploratory_only")
+        self.assertEqual(cl("fail", "incomplete", "incomplete"), "incomplete_provisional")
+        self.assertEqual(cl("not_estimable", "fail", "incomplete"), "incomplete_exploratory")
+        self.assertEqual(cl("fail", "fail", "not_applicable"), "fail")
 
     def test_combined_label(self):
         self.assertEqual(m.combined_label("pass", "pass"), "pass_strict")
@@ -757,8 +999,9 @@ class OutputTests(unittest.TestCase):
         truth, by_rule, chim = scenario(fp_clusters=2)
         rules = [rule(), rule("r2", measure=False)]
         res = m.measure_core(rules, truth, by_rule, {}, ["vs20"], replicates=50, chimeric=chim)
-        doc = m.write_aggregates(d, res, "p3cs-20261123-abcdef1", rules, local)
-        m.write_report(d, doc, dict(prepared=dict(vs20=dict(provenance_unavailable=True)), p3_exclusions={}), local)
+        sfx = m.suffix("vs20", "vs21") if local else ""
+        doc = m.write_aggregates(d, res, "p3cs-20261123-abcdef1", rules, sfx)
+        m.write_report(d, doc, dict(prepared=dict(vs20=dict(provenance_unavailable=True)), p3_exclusions={}), sfx)
         return doc
 
     def test_outputs_are_deterministic_and_pass_the_audit(self):
@@ -791,52 +1034,94 @@ class OutputTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 m.audit_aggregates(d)
 
-    def test_vs21_outputs_named_local_and_suppressed(self):
+    def held_out_outputs(self, d):
+        """Three sources: VS21 holds 3 fired clusters (6 fired records), C26 12 fired clusters with 2 FP clusters, VS20
+        the rest, with one fired VS20 record in its own (Orbitrap) instrument stratum."""
+        truth, by_rule, chim = scenario(fp_clusters=2)
+        for rec in truth.values():
+            c = rec["cluster"]
+            if c in ("tp0", "tp1", "tp2") or c.startswith("n") and int(c[1:]) % 3 == 1:
+                rec["source"] = "vs21"
+            elif c in ("fp0", "fp1") or c.startswith("tp") and 3 <= int(c[2:]) < 13 or c.startswith("n") and int(c[1:]) % 3 == 2:
+                rec["source"] = "c26"
+        truth[next(u for u in sorted(truth) if truth[u]["cluster"] == "tp20")]["instrument"] = "Orbitrap/FT"
+        rules = [rule(), rule("r2", measure=False)]
+        res = m.measure_core(rules, truth, by_rule, {}, ["vs20", "vs21", "c26"], replicates=20, chimeric=chim)
+        doc = m.write_aggregates(d, res, "p3cs-20261123-abcdef1", rules, m.suffix("vs20", "vs21", "c26"),
+                                 extra=dict(sources=["vs20", "vs21", "c26"]))
+        return res, doc
+
+    def test_held_out_outputs_named_local_and_suppressed_by_denominator(self):
         with tempfile.TemporaryDirectory() as d:
-            self.outputs(d, local=True)
+            self.held_out_outputs(d)
             names = sorted(p.name for p in Path(d).iterdir())
-            self.assertTrue(all(".local-vs21." in n for n in names), names)
-            rows = m.read_rows(Path(d) / "rules_precision.local-vs21.csv")
-            gate = next(r for r in rows if (r["pass_id"], r["instrument"], r["energy"]) == ("base", "all", "all"))
-            # 2 fired FP clusters: c_fp is small, and c_fires and c_tp go with it, or c_fires - c_tp gives it back.
-            self.assertEqual((gate["c_fp"], gate["c_fires"], gate["c_tp"], gate["c_precision"], gate["c_wilson_lo"]),
+            self.assertTrue(all(".local-vs21.local-c26." in n for n in names), names)
+            rows = m.read_rows(Path(d) / "rules_precision.local-vs21.local-c26.csv")
+            cell = {(r["source"], r["instrument"]): r for r in rows if (r["pass_id"], r["energy"]) == ("base", "all")}
+            vs21, c26 = cell[("vs21", "all")], cell[("c26", "all")]
+            # VS21: 3 fired clusters, a denominator below 5, so the cluster set goes; 6 fired records stay.
+            self.assertEqual((vs21["c_fires"], vs21["c_tp"], vs21["c_fp"], vs21["c_precision"], vs21["c_wilson_lo"]),
                              ("", "", "", "", ""))
-            self.assertEqual((gate["fp"], gate["fires"], gate["tp"], gate["precision"]), ("", "", "", ""))
-            self.assertEqual(gate["lr_plus"], "")
-            self.assertNotEqual(gate["n_universe"], "")
-            doc = json.loads((Path(d) / "rules_precision.local-vs21.json").read_text(encoding="utf-8"))
-            self.assertNotIn("value", doc["rules"][0]["criteria"]["cluster_wilson_lo"])
+            self.assertEqual((vs21["fires"], vs21["tp"], vs21["fp"], vs21["precision"]), ("6", "6", "0", "1.0"))
+            self.assertEqual(vs21["lr_plus"], "")
+            self.assertNotEqual(vs21["n_universe"], "")
+            # C26: 12 fired clusters; the 2 FP clusters are a numerator, not a denominator, and stay.
+            self.assertEqual((c26["c_fires"], c26["c_fp"]), ("12", "2"))
+            self.assertNotEqual(c26["c_precision"], "")
+            # Development and pooled cells are never blanked, however small.
+            for key in (("vs20", "all"), ("pooled", "all"), ("vs20", "Orbitrap/FT"), ("pooled", "Orbitrap/FT")):
+                self.assertNotIn("", (cell[key]["fires"], cell[key]["c_fires"], cell[key]["c_precision"]), key)
+            self.assertEqual(cell[("vs20", "Orbitrap/FT")]["fires"], "1")
+            doc = json.loads((Path(d) / "rules_precision.local-vs21.local-c26.json").read_text(encoding="utf-8"))
+            crit = doc["rules"][0]["criteria"]
+            self.assertIsNotNone(crit["cluster_wilson_lo"]["value"])
+            ps = crit["per_source_precision"]["value"]
+            self.assertEqual(ps["vs21"], dict(c_fires=None, c_precision=None))
+            self.assertEqual(ps["c26"]["c_fires"], 12)
+            self.assertGreater(ps["vs20"]["c_fires"], 100)
 
     def test_suppress(self):
-        row = dict(rule_id="r", version=1, fires=3, tp=3, fp=0, precision=1.0, n_positive=40, n_universe=900,
-                   coverage=0.5, lr_plus=4.0)
+        row = dict(rule_id="r", version=1, source="vs21", fires=3, tp=3, fp=0, precision=1.0, n_positive=40,
+                   n_universe=900, coverage=0.5, lr_plus=4.0)
         s = m.suppress(row)
         self.assertEqual((s["fires"], s["tp"], s["fp"], s["precision"], s["coverage"], s["lr_plus"]),
                          (None, None, None, None, 0.5, None))
         self.assertEqual((s["version"], s["n_universe"], s["n_positive"]), (1, 900, 40))
+        for source in ("vs20", "pooled", None):
+            self.assertEqual(m.suppress(dict(row, source=source)), dict(row, source=source), source)
+        self.assertIsNone(m.suppress(dict(row, source="c26"))["precision"])
+        self.assertIsNone(m.suppress({k: v for k, v in row.items() if k != "source"}, held_out=True)["fires"])
 
-    def test_suppress_complementary_sets(self):
-        """Regression: no blanked count can be recovered by subtracting the others of its set."""
-        row = dict(rule_id="r", version=1, fires=200, tp=197, fp=3, precision=0.985, c_fires=162, c_tp=160, c_fp=2,
-                   c_precision=0.99, c_wilson_lo=0.96, c_coverage=0.8, n_universe=900, n_positive=4, coverage=0.5,
+    def test_suppress_by_denominator_only(self):
+        """Regression: a held-out cell is blanked only where its own denominator is below 5; a small numerator
+        (fp = 3 of 200 fires) or a small count in another set does not blank the row."""
+        row = dict(rule_id="r", version=1, source="vs21", fires=200, tp=197, fp=3, precision=0.985, c_fires=162, c_tp=160,
+                   c_fp=2, c_precision=0.99, c_wilson_lo=0.96, c_coverage=0.8, n_universe=900, n_positive=4,
+                   coverage=0.5, recall_universe=0.2, lr_plus=9.0,
                    decoy_fires_plus_5=2, decoy_fires_plus_9=0, decoy_fires_minus_7=0, decoy_fdr=0.003,
                    c_decoy_fires_plus_5=0, c_decoy_fires_plus_9=0, c_decoy_fires_minus_7=0, c_decoy_fdr=0.0)
         s = m.suppress(row)
-        for k in ("fires", "tp", "fp", "precision", "c_fires", "c_tp", "c_fp", "c_precision", "c_wilson_lo",
-                  "c_coverage", "n_universe", "n_positive", "coverage", "decoy_fires_plus_5", "decoy_fires_plus_9",
-                  "decoy_fires_minus_7", "decoy_fdr", "c_decoy_fdr"):
+        for k in ("n_positive", "coverage", "recall_universe", "lr_plus"):
             self.assertIsNone(s[k], k)
-        self.assertEqual(s["c_decoy_fires_plus_5"], 0)
-        occ = m.suppress(dict(rule_id="r", n_positive=3, n_negative=897, n_negative_cond=40, record_occupancy=0.04,
-                              c_positive=60, c_negative=700, c_negative_cond=20, c_record_occupancy=0.03))
-        self.assertEqual((occ["n_positive"], occ["n_negative"], occ["record_occupancy"]), (None, None, None))
-        self.assertEqual((occ["c_negative"], occ["c_record_occupancy"]), (700, 0.03))
+        for k in ("fires", "tp", "fp", "precision", "c_fires", "c_tp", "c_fp", "c_precision", "c_wilson_lo",
+                  "c_coverage", "n_universe", "decoy_fires_plus_5", "decoy_fdr", "c_decoy_fdr"):
+            self.assertEqual(s[k], row[k], k)
+        # A small conditional population blanks the fired records it bounds, and their rates.
+        s = m.suppress(dict(source="c26", n_cond=4, n_cond_positive=4, fires=4, tp=4, fp=0, precision=1.0, recall_cond=1.0))
+        self.assertEqual(set(s.values()) - {"c26"}, {None})
+        occ = m.suppress(dict(rule_id="r", source="vs21", n_positive=3, n_negative=897, n_negative_cond=40,
+                              record_occupancy=0.04, c_positive=60, c_negative=4, c_negative_cond=1, c_record_occupancy=0.25))
+        self.assertEqual((occ["n_positive"], occ["n_negative"], occ["record_occupancy"]), (None, 897, 0.04))
+        self.assertEqual((occ["c_negative"], occ["c_negative_cond"], occ["c_record_occupancy"]), (None, None, None))
 
     def test_suppress_report_counts(self):
-        d = {"vs21:pos:input": 1000, "vs21:pos:nominal_mass": 3, "vs21:pos:no_peaks": 20, "vs21:x": 0}
+        d = {"vs21:pos:input": 1000, "vs21:pos:nominal_mass": 3, "vs21:pos:no_peaks": 20, "vs21:x": 0,
+             "vs20:pos:nominal_mass": 2, "c26:bucket:x": 4, "c26/representatives/base": 1}
         s = m.suppress_counts(d)
-        self.assertEqual(s, {"vs21:pos:input": 1000, "vs21:pos:nominal_mass": None, "vs21:pos:no_peaks": None, "vs21:x": 0})
-        self.assertEqual(m.suppress_counts({"a": 2, "b": 3, "c": 50}), {"a": None, "b": None, "c": 50})
+        self.assertEqual(s, {"vs21:pos:input": 1000, "vs21:pos:nominal_mass": None, "vs21:pos:no_peaks": 20, "vs21:x": 0,
+                             "vs20:pos:nominal_mass": 2, "c26:bucket:x": None, "c26/representatives/base": None})
+        self.assertEqual(m.suppress_counts({"a": 2, "b": 3, "c": 50}), {"a": 2, "b": 3, "c": 50})
+        self.assertEqual(m.suppress_counts({"a": 2, "b": 3, "c": 50}, held_out=True), {"a": None, "b": None, "c": 50})
 
     def test_vs21_report_suppresses_run_counts(self):
         with tempfile.TemporaryDirectory() as d:
@@ -847,11 +1132,11 @@ class OutputTests(unittest.TestCase):
                        instrument_classes={"QTOF-type -> QTOF-type": 900, "other -> unknown": 1},
                        chimeric={"vs21": dict(no_partner=4, no_base=0, records=3000)},
                        fire={"vs21/representatives/r-00": dict(counts={"base": dict(skipped=2, errors=0, skipped_by_reason={"skipped:profile": 2})})})
-            m.write_report(d, doc, run, True)
+            m.write_report(d, doc, run, ".local-vs21")
             text = (Path(d) / "report.local-vs21.md").read_text(encoding="utf-8")
             self.assertIn('"vs21:pos:nominal_mass": null', text)
             self.assertIn('"riken": null', text)
-            self.assertIn('"other -> unknown": null', text)
+            self.assertIn('"other -> unknown": 1', text)  # pooled over sources: never blanked
             self.assertIn('"no_partner": null', text)
             self.assertIn('"skipped": null', text)
             self.assertIn("in-silico detector counts suppressed", text)
@@ -865,8 +1150,81 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(sk["vs20/representatives/mz_only_curated"]["skipped"], 5)
         with tempfile.TemporaryDirectory() as d:
             doc = self.outputs(d)
-            m.write_report(d, doc, dict(fire=fire), False)
+            m.write_report(d, doc, dict(fire=fire), "")
             self.assertIn("vs20/representatives/mz_only_curated", (Path(d) / "report.md").read_text(encoding="utf-8"))
+
+
+def prepared_row(rid, source, cluster, motifs, mode="pos"):
+    return dict(record_id=rid, source=source, key=f"K{rid}", formula="C1", motifs=sorted(motifs), cluster_id=cluster,
+                mode=mode, adduct="[M+H]+", adduct_mapped=True, precursor=200.0, instrument="QTOF-type", energy="eV:<20",
+                instrument_type="", collision_energy="", bucket="x", spectrum_count=1, msp_file="a.msp", msp_index=0,
+                mz=[100.0], intensity=[1.0])
+
+
+class InventoryTests(unittest.TestCase):
+    def test_power_counts_by_truth_only(self):
+        truth, _, _ = scenario(tp_clusters=10, members=2, neg_clusters=20)
+        for uid in sorted(truth)[:6]:  # tp0..tp2, 6 motif records in 3 clusters
+            truth[uid]["source"] = "c26"
+        rules = [rule(), rule("r2", measure=False), rule("r3", source_checked=False), rule("r4", ion_mode="neg")]
+        rows = m.power_counts(rules, truth, ["vs20", "vs21", "c26"])
+        self.assertEqual({r["rule_id"] for r in rows}, {"r1", "r4"})
+        by = {(r["rule_id"], r["source"]): r for r in rows}
+        self.assertEqual({k: by[("r1", "c26")][k] for k in ("n_universe", "n_positive", "c_universe", "c_positive")},
+                         dict(n_universe=6, n_positive=6, c_universe=3, c_positive=3))
+        self.assertEqual((by[("r1", "pooled")]["n_positive"], by[("r1", "pooled")]["c_positive"]), (20 + 30, 10 + 30))
+        self.assertEqual((by[("r1", "vs21")]["n_universe"], by[("r4", "pooled")]["n_universe"]), (0, 0))  # no neg records
+        self.assertEqual(list(rows[0]), m.POWER_FIELDS)
+
+    @unittest.skipUnless(HAS_ARROW, "pyarrow is required")
+    def test_inventory_stage_needs_no_console_or_evidence(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "p3cs-20261127-abcdef1"
+            out.mkdir()
+            schema = m._schemas()[1]
+            data = {"vs20": [prepared_row(0, "vs20", "a", {"M"}), prepared_row(2, "vs20", "b", set())],
+                    "vs21": [prepared_row(1, "vs21", "c", {"M"})],
+                    "c26": [prepared_row(4, "c26", "d", {"M"}), prepared_row(6, "c26", "d", {"M"}),
+                            prepared_row(3, "c26", "e", set(), mode="neg")]}
+            for source, rows in data.items():
+                sink = p2.ParquetRows(m.row_path(out, "prepared", source), schema)
+                for r in rows:
+                    sink.add(r)
+                sink.close()
+            m.write_instrument_types(out, "c26", Counter({"LC-ESI-QTOF": 2, "Orbitrap Exploris": 1, "": 4}))
+            run = dict(prepared={s: dict(representatives=len(r)) for s, r in data.items()},
+                       exclusions={"vs20:pos:input": 9, "c26:pos:input": 7, "c26:vs21_overlap_records": 1},
+                       p3_exclusions={"c26:excluded_ingest_lib": 5}, p2_parity={"c26": dict(result="not_checked")})
+            args = SimpleNamespace(sources=["vs20", "vs21", "c26"], out=out, ruleset_dir=Path(d), console=None)
+            saved = m.load_rules, m.vs21_guard
+            m.load_rules = lambda d: ([rule(), rule("r2", measure=False)], None, {})
+            m.vs21_guard = lambda a: True
+            try:
+                quiet(m.inventory, args, run)
+            finally:
+                m.load_rules, m.vs21_guard = saved
+            names = sorted(p.name for p in out.iterdir() if p.name.startswith("inventory"))
+            self.assertEqual(names, ["inventory.local-vs21.local-c26.json", "inventory.local-vs21.local-c26.tsv"])
+            self.assertFalse((out / "fire").exists())
+            doc = json.loads((out / names[0]).read_text(encoding="utf-8"))
+            self.assertEqual(doc["prepare"]["c26"]["exclusions"], {"c26:pos:input": 7, "c26:vs21_overlap_records": 1})
+            self.assertEqual(doc["prepare"]["c26"]["p3_exclusions"], {"c26:excluded_ingest_lib": 5})
+            self.assertEqual(doc["prepare"]["vs20"]["stats"], dict(representatives=2))
+            self.assertEqual([(r["instrument_type"], r["records"], r["instrument_class"]) for r in doc["instrument_types"]["c26"]],
+                             [("", 4, "other"), ("LC-ESI-QTOF", 2, "QTOF-type"), ("Orbitrap Exploris", 1, "Orbitrap/FT")])
+            power = {r["source"]: r for r in m.read_rows(out / names[1])}
+            self.assertEqual([(power[s]["n_positive"], power[s]["c_positive"]) for s in ("pooled", "vs20", "vs21", "c26")],
+                             [("4", "3"), ("1", "1"), ("1", "1"), ("2", "1")])
+            self.assertEqual(power["c26"]["n_universe"], "2")  # the negative record is not in a positive-mode universe
+            self.assertFalse(any("precision" in k or "fires" in k for r in doc["power"] for k in r))
+            self.assertEqual((run["inventory"]["rules"], run["inventory"]["audit"]), (1, "pass"))
+
+    def test_cli_accepts_the_inventory_stage(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit):  # needs --ruleset-dir, like every other stage
+                quiet(m.main, ["inventory", "--out", str(Path(d) / "p3cs-20261127-abcdef1")])
+            with self.assertRaises(SystemExit):
+                quiet(m.main, ["inventry", "--ruleset-dir", d])
 
 
 def shard_dir(d, name="r-00", build="b1", engine="e1", errors=0, records=1, msp=None, local=False):
@@ -985,7 +1343,8 @@ class GuardTests(unittest.TestCase):
                                    seed=1, bootstrap=10)
             self.assertTrue(m.vs21_guard(args, d))
             for name, field, value in (("CRITERIA", "wilson_target", 0.94), ("CRITERIA_PROVISIONAL", "n_min", 25),
-                                       ("CRITERIA_PROVISIONAL", "prior_stress_gated", True)):
+                                       ("CRITERIA_PROVISIONAL", "prior_stress_gated", True),
+                                       ("CRITERIA_EXPLORATORY", "wilson_target", 0.79)):
                 saved = getattr(m, name)
                 setattr(m, name, dict(saved, **{field: value}))
                 try:
@@ -1026,6 +1385,36 @@ class GuardTests(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "console_identity"):
                 m.vs21_guard(args, d)
 
+
+    def test_freeze_pins_the_c26_parameters(self):
+        with tempfile.TemporaryDirectory() as d:
+            rs, console = self.files(d)
+            args = SimpleNamespace(vs21=True, freeze=self.freeze(d, rs, console), ruleset_dir=rs, console=console,
+                                   seed=1, bootstrap=10)
+            self.assertTrue(m.vs21_guard(args, d))
+            frozen = json.loads(args.freeze.read_text(encoding="utf-8"))["c26"]
+            self.assertEqual((frozen["train_sha256"], frozen["ppm_max"], frozen["excluded_ingest_libs"]),
+                             (m.C26_SHA256, 10, ["enveda-180"]))
+            for name, value in (("C26_PPM_MAX", 20), ("C26_EXCLUDED_LIBS", ()), ("C26_SHA256", "0" * 64)):
+                saved = getattr(m, name)
+                setattr(m, name, value)
+                try:
+                    with self.assertRaisesRegex(PermissionError, "c26", msg=name):
+                        m.vs21_guard(args, d)
+                finally:
+                    setattr(m, name, saved)
+            self.assertTrue(m.vs21_guard(args, d))
+
+    def test_cli_source_lists(self):
+        with tempfile.TemporaryDirectory() as d:
+            rs, _ = self.files(d)
+            out = Path(d) / "p3cs-20261123-abcdef1"
+            for sources in ("vs20,c26", "vs21,c26", "c26", "vs20,c26,vs21"):
+                with self.assertRaises(SystemExit, msg=sources):
+                    quiet(m.main, ["prepare", "--sources", sources, "--vs21", "--ruleset-dir", str(rs), "--out", str(out)])
+            with self.assertRaises(SystemExit):  # the full list still needs --vs21 and a matching freeze
+                quiet(m.main, ["prepare", "--sources", "vs20,vs21,c26", "--ruleset-dir", str(rs), "--out", str(out)])
+            self.assertFalse(out.exists())
 
     def test_cli_refuses_vs21_before_touching_anything(self):
         with tempfile.TemporaryDirectory() as d:

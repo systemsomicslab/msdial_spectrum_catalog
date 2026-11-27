@@ -285,10 +285,11 @@ vector that a fresh load reproduces, and the other sections recomputed).
 
 # WS8 P3: rule-level measurement (`p3_measure.py`)
 
-`p3_measure.py` measures every diagnostic-ion rule of the pinned rule set 0.1.0
-(`af4a7ebf2732b30b9610c7e410ba34f50f176b3fc0155d5a4f9a28fb413ab2eb`) on library spectra with known structures,
-by running the C# console's `diagrules` subcommand and joining its evidence to structure-derived truth. This
-phase runs VS20 only. It reuses P2's pure helpers by import (`p2_diagnostics.py` is not modified) and the
+`p3_measure.py` measures every diagnostic-ion rule of the pinned rule set 0.2.0
+(`ecf7988dea90992eb7233fc856ce2cb19a8afe4f1f5683628a4b35a459c93569`) on library spectra with known structures,
+by running the C# console's `diagrules` subcommand and joining its evidence to structure-derived truth. The frozen
+VS20+VS21 pass of 2026-11-24 ran rule set 0.1.0 (`af4a7ebf...b2eb`). Sources: VS20 (development), and the held-out
+VS21 and C26 (the compound-disjoint part of CASMI26 `train.parquet`, handback section 22). It reuses P2's pure helpers by import (`p2_diagnostics.py` is not modified) and the
 Python rule-format reference (`rule_format.py`) for rule metadata and hypothesis masses.
 
 Stages (positional), all writing into one run directory:
@@ -296,12 +297,14 @@ Stages (positional), all writing into one run directory:
 | Stage | Needs | Does |
 |---|---|---|
 | `prepare` | `--ruleset-dir` | P2's record filters and counters, P1 standardisation, truth motif sets from the shipped 106 motif SMARTS (`tables/motifs.json`), record units, within-source clusters, `prepared.parquet`, and the allowlisted MSP shards `msp/vs20/representatives-NN.msp` with `representatives-index.tsv` |
+| `inventory` | `--ruleset-dir` | truth only, after prepare, never the console: `inventory<suffix>.json` and `.tsv` with the prepare counters, exclusions, stats and P2 parity per source, the distinct C26 `instrument_type` strings with their record counts and P2's instrument class, and the power count (for every rule with `measure: true` and `source_checked: true`, per source and pooled in the rule's ion mode, the representatives and clusters of the universe and those whose truth motif set holds the rule's motif); no evidence, no precision |
 | `fire` | `--console`, `--ruleset-dir` | the synthetic chimeric set (`msp/vs20/chimeric-NN.msp`, `chimeric-index.tsv`) and the in-source recast set (`insource-NN.msp`, `insource-index.tsv`), then one console run per shard (all 13 passes) at BelowNormal, at most `--workers` at once, into `fire/vs20/<set>/<shard>/`; every manifest is checked (pinned rule set, input sha256 and record count, the 13 passes); all shards must report the same `build_identity` and `engine_semantics` (and, for VS21, the frozen ones) and no record errors in any pass, or `fire` stops; an existing shard is reused only when its manifest validates |
 | `measure` | `--ruleset-dir` | joins evidence to truth, counts, intervals, the gate, `fires.parquet` and the aggregates; marks the run complete |
 | `all` | both | prepare, fire, measure |
 | `freeze` | both, `--freeze` | writes the freeze file the VS21 pass must match |
 
-Options: `--out` (run directory), `--sources vs20` (or `vs20,vs21`, see VS21), `--workers` 1..8 (default 8:
+Options: `--out` (run directory), `--sources vs20` (or `vs20,vs21` or `vs20,vs21,c26`, see VS21 and C26),
+`--c26-train` (CASMI26 `train.parquet`; default `<annotation-root>\external\casmi26\...\train.parquet`), `--workers` 1..8 (default 8:
 chemistry processes, MSP shards and concurrent console processes), `--limit` (deterministic per-file fraction,
 the 1 % smoke), `--seed` (default 20261118; chimeric partners and bootstrap), `--bootstrap` (default 1000),
 `--detach` (P2's WMI launch, log in `run.log`), `--vs21`, `--freeze`.
@@ -319,7 +322,16 @@ $py = '<annotation-py312>\Scripts\python.exe'   # the RDKit environment P2 uses
   --console <MsdialWorkbench>\src\MSFINDER\MsfinderConsoleAppCore\bin\Release\net472\MsfinderConsoleApp.exe `
   --out <annotation-root>\ws8-p3\p3cssmoke-<yyyymmdd>-<shortsha> --detach
 # full VS20 pass: the same without --limit, into p3cs-<yyyymmdd>-<shortsha>
+# held-out pass with C26: freeze first, then prepare, inventory (truth only), fire and measure
+& $py -B tools/ws8_p3/p3_measure.py prepare --sources vs20,vs21,c26 --vs21 `
+  --freeze <annotation-root>\ws8-p3\freeze-<yyyymmdd>-<sha>.json --ruleset-dir <RuleSet> `
+  --console <MsfinderConsoleApp.exe> --c26-train <CASMI26>\train.parquet `
+  --out <annotation-root>\ws8-p3\p3cs-<yyyymmdd>-<shortsha>
+& $py -B tools/ws8_p3/p3_measure.py inventory --sources vs20,vs21,c26 --vs21 --freeze <the same> `
+  --ruleset-dir <RuleSet> --console <MsfinderConsoleApp.exe> --out <the same run directory>
 ```
+
+`inventory` needs `--console` only to check the freeze (it hashes the bin folder and never runs the console).
 
 ## Outputs
 
@@ -333,14 +345,23 @@ $py = '<annotation-py312>\Scripts\python.exe'   # the RDKit environment P2 uses
 | `rules_synthetic.csv` | per rule and synthetic set (`set`): each chimeric level, and each in-source transformation row (`transform`, `change`, `product_adduct`) plus their pool (`transform` = `all`, gated): records not evaluated by the console, fires, TP/FP, precision and Wilson in records (report only) and clusters (gated) |
 | `rules_occupancy.csv` | per rule and precondition mode: both occupancy definitions and `non_conditional` |
 | `rules_precision.json` | label `ws8-p3-class-rules`, criteria, per rule: parameters, status, every criterion with its value, the pooled row of every pass, synthetic, occupancy, competitors, provenance breakdown |
-| `review_proposal-<run-id>.json` | `passed_strict` (tier-1 numbers) and `passed_provisional_only` (tier-2 numbers) as separate lists, both empty in a VS20-only run, and the `incomplete_strict` and `incomplete_provisional` rules; the author chooses which tier to accept |
+| `review_proposal-<run-id>.json` | `passed_strict` (tier-1 numbers), `passed_provisional_only` (tier-2 numbers) and `passed_exploratory_only` (tier-3 numbers) as separate lists, all empty in a VS20-only run, and the `incomplete_strict`, `incomplete_provisional` and `incomplete_exploratory` rules; the author chooses which tier to accept |
 | `report.md`, `run.json` | summary; code commit, pin path, inputs and sha256, rule-set files (raw and canonical sha256), console path and sha256, parameters, exclusions, P2 parity, file hashes |
 
-Aggregates carry ids only (`rule_id`, `motif_id`); `measure` scans them as P2 does (`audit_aggregates`).
+Aggregates carry ids only (`rule_id`, `motif_id`); `measure` and `inventory` scan them as P2 does
+(`audit_aggregates`).
+
+**Naming.** One rule (`suffix()`): every file derived from VS21 carries `.local-vs21`, every file derived from C26
+carries `.local-vs21.local-c26` (C26 records are filtered against the VS21 keys of the same run), and the pooled
+outputs of a run carry the tags of all its sources, so a `vs20,vs21,c26` run writes
+`rules_precision.local-vs21.local-c26.csv`, `fires.local-vs21.local-c26.parquet`,
+`inventory.local-vs21.local-c26.json` and so on; VS20 files have no tag. The console tags its own files only with
+`.local-vs21` (it does so when "vs21" is in the input path, as it is in the C26 shard names); C26 shard folders
+under `fire/c26/` carry `.local-c26` in their names.
 
 ## Criteria
 
-Each rule is gated twice, on the same primary-mode pooled cell, counting clusters. Tier 1 is the table registered
+Each rule is gated by tiers 1 and 2 on the same primary-mode pooled cell, counting clusters. Tier 1 is the table registered
 in MsdialWorkbench PR #908 (`CRITERIA`). Tier 2 (`CRITERIA_PROVISIONAL`) was registered by the author on
 2026-11-24, before any VS21 pass, after the VS20 development pass had been seen. Counting unit, primary pass,
 eligibility and the pending logic are the same in both tiers.
@@ -356,19 +377,38 @@ eligibility and the pending logic are the same in both tiers.
 | Synthetic chimeric and in-source cluster precision | >= 0.95 | >= 0.90 |
 | `tuned_vs20` rules | the tier's Wilson bound and prior stress on VS21 alone | the tier's Wilson bound on VS21 alone |
 | `tuned_pooled` rules | never pass (external set) | never pass (external set) |
-| `as_published` rules | gated on VS20 and VS21 pooled | gated on VS20 and VS21 pooled |
+| `as_published` rules | gated on the run's sources pooled (VS20 + VS21, or VS20 + VS21 + C26) | the same |
 
 Both tiers are written to `run.json` and the freeze file; the VS21 pass refuses a change in either.
 
+**Tier 3 (`CRITERIA_EXPLORATORY`, "exploratory").** Registered by the author on 2026-11-27, after the truth-only C26
+inventory and before any rule fired on C26. VS20 and VS21 results had been seen, so tier 3 is judged on C26 alone and
+applies only to a run with C26 among its sources (otherwise its status is `not_applicable`).
+
+| Criterion | Tier 3 (exploratory) |
+|---|---|
+| Gate cell | the primary pass, source C26, all instruments and energies |
+| Fired C26 clusters | >= 20 |
+| C26 cluster Wilson lower bound | >= 0.80 |
+| Guard on the seen sets | point precision >= 0.85 on VS20 and on VS21, each where it has >= 30 fired clusters |
+| C26 cluster decoy FDR, occupancy | <= 0.05, <= 5 % |
+| Synthetic chimeric and in-source cluster precision | >= 0.85 |
+| Prior stress | report-only |
+| Rule origin | every origin is eligible (C26 is external to the tuning sets) |
+
+A tier-3 rule is exploratory L3-SI evidence. It is never claim-eligible, and the MS-FINDER ranking weight stays 0. In
+shared outputs a C26 gate value is blanked when its own fired-cluster count is 1 to 4.
+
 ## Status
 
-Per tier: `not_measured` (outside `measure: true` and `source_checked: true`, or refused by the console);
+Per tier: `not_applicable` (tier 3 without C26); `not_measured` (outside `measure: true` and `source_checked: true`, or refused by the console);
 `not_estimable` (fewer fired clusters than the tier's minimum in the primary pass); `fail` (a gated criterion
 failed); `incomplete` (every gated criterion this run can measure is met, others pending); `pass` (every gated
-criterion met). The combined label is `pass_strict` when tier 1 passes, `pass_provisional_only` when only tier 2
-passes, `incomplete_provisional` when tier 2 is `incomplete` while tier 1 failed or was not estimable, and
-otherwise the tier-1 status. `rules_precision.json`, the gate row of `rules_precision.csv` and `report.md` give
-both statuses with their failed and pending lists. The held-out criterion is met only with VS21 in the run, so a
+criterion met). The combined label is, in order: `pass_strict` when tier 1 passes, `pass_provisional_only` when
+tier 2 passes, `pass_exploratory_only` when tier 3 passes, `incomplete_provisional` when tier 2 is `incomplete` while
+tier 1 failed or was not estimable, `incomplete_exploratory` when tier 3 is `incomplete` while tiers 1 and 2 failed or
+were not estimable, and otherwise the tier-1 status. `rules_precision.json`, the gate row of `rules_precision.csv`
+and `report.md` give every tier's status with its failed and pending lists. The held-out criterion is met only with VS21 in the run, so a
 VS20-only run has no `pass` in either tier.
 
 ## Decisions where the specification was silent
@@ -389,7 +429,7 @@ VS20-only run has no `pass` in either tier.
   `origin=<source DB>`; the patterns give massbank 31,765, gnps 14,830 and riken 9,078 records in positive mode and
   massbank 13,714, gnps 3,669 and riken 7,602 in negative mode; the large origins MassSpecGym, BMDMS-NP and the
   Fiehn libraries fall into `other`; `unknown` is 0; no origin looked in-silico.
-- **Per-source criterion.** It uses the library sources (VS20, VS21), as P2 does. Provenance buckets are reported
+- **Per-source criterion.** It uses the library sources (VS20, VS21 and, in a three-source run, C26), as P2 does. Provenance buckets are reported
   per rule (`by_provenance`, `provenance_flag` when a bucket with >= 30 fired clusters is below 0.95), not gated.
 - **Primary pass.** A rule's declared `primary_precondition_mode` picks the pass that decides its status:
   `adduct_ambiguous` is `base`, `mz_only` is `mz_only_curated`. Decoy FDR always comes from the base-pass
@@ -452,16 +492,30 @@ VS20-only run has no `pass` in either tier.
   `provenance-p3.tsv`), of `insource-p3.tsv`, and the parameters `seed`, `bootstrap` and the console INI text. `freeze` also runs the
   console once on a synthetic record and stores its `build_identity` and `engine_semantics`, which every VS21
   shard must match. VS21 needs VS20 in the same run (deduplication by first block). Its row files and every
-  aggregate are named `*.local-vs21.*`.
-- **VS21 small cells.** A count of 1-4 blanks its whole complementary set, so no member can be recovered by
-  subtraction: {fires, tp, fp, precision and its intervals, recalls}; {c_fires, c_tp, c_fp, every `c_*` rate};
-  {n_universe, n_positive, coverage}; {n_cond, n_cond_positive}; the cluster universe and conditional pairs;
-  {decoy fires, decoy FDR} and its cluster twin; the occupancy negatives with their positives. Sets sharing a count
-  are blanked together. Every rate whose denominator is below 5 is blanked, and so are the likelihood-ratio and
-  stress values of a row with any blanked count; criterion values are dropped from the JSON. The count tables of
-  `report.md` (exclusions, provenance buckets, instrument classes, chimeric counts, console skips) blank counts of
-  1-4 and, when only one is blanked, the next smallest too. Suppression is per row: a value published in another
-  row (for example `n_universe`, the same for every rule of a mode) is not withheld there.
+  aggregate are named `*.local-vs21.*`. The freeze also pins the C26 parameters (below).
+- **C26.** `--sources vs20,vs21,c26` runs behind the same `--vs21` flag and freeze. CASMI26 `train.parquet` is
+  identified by its sha256 (`9423f90e...bcd98`); it is CC BY-NC 4.0 with a no-redistribution rule, so no row, key,
+  SMILES or spectrum leaves the `*.local-c26.*` files, and tests use synthetic parquet files. `iter_c26` reads
+  batches of a column subset and yields the tuples `iter_msp_p3` yields, once per ion mode (rows whose
+  `ionization_mode` is neither positive nor negative come with the positive input and fail P2's mode check);
+  `record_id` is the parquet row ordinal x 2 (+1 in negative mode). Before P2's checks, and counted in
+  `p3_exclusions`: `c26:excluded_ingest_lib` (enveda-180), `c26:missing_structure` (no `normalized_smiles` or
+  `inchikey14`), `c26:precursor_error_ppm_missing` and `c26:precursor_error_ppm_above_limit` (|ppm| > 10). Spectra
+  merged from several collision energies are kept, counted (`c26:merged_collision_energy_records`) and form the
+  energy stratum `merged`. Records whose structure key (the same standardisation as VS20/VS21) is among the VS20 or
+  VS21 keys of the run are excluded (`c26:vs20_overlap_records`, `c26:vs21_overlap_records`). `ingest_lib` is the
+  provenance bucket (report only, `c26:<lib>` in `by_provenance`). Instrument strings are classified by P2's
+  `instrument_bin`; prepare writes them with counts to `instrument_types.local-vs21.local-c26.tsv` (never to
+  `run.json`) for `inventory`. P2 parity is `not_checked` (there is no P2 run). The freeze pins the train sha256,
+  the ppm limit, the excluded libraries and the classifier.
+- **Held-out small cells.** Only cells of a held-out source (VS21, C26) are suppressed, and only where their own
+  denominator is below 5: a denominator of 1-4 (fires, fired clusters, the conditional population, the universe,
+  positives, the occupancy negatives) is blanked with the counts it bounds and every rate over it, and the
+  likelihood-ratio and stress values of that row go with it. VS20 cells, pooled cells, and the competitor,
+  synthetic and occupancy rows (pooled over sources) are never blanked; pooled criterion values stay in the JSON,
+  and per-source criterion values of a held-out source with 1-4 fired clusters are blanked. The count tables of
+  `report.md` blank held-out counts of 1-4 only (instrument classes are pooled and kept). A pooled value minus the
+  VS20 value can give a held-out value back; the rule accepts that.
 
 ## Not done in this phase
 

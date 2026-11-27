@@ -1,8 +1,9 @@
-"""WS8 P3 rule-level measurement of the MS-FINDER diagnostic-ion rules (VS20 development pass).
+"""WS8 P3 rule-level measurement of the MS-FINDER diagnostic-ion rules (VS20 development set; VS21, C26 held out).
 
-Stages: prepare (record units, truth, clusters, allowlisted MSP), fire (the C# console's diagrules on the
-representatives and on the synthetic chimeric set), measure (join, counts, intervals, gate, aggregates), all,
-and freeze (the hashes the VS21 pass must match). Optional chemistry (RDKit, pyarrow) stays outside src/.
+Stages: prepare (record units, truth, clusters, allowlisted MSP), inventory (truth-only counters and power count,
+no console), fire (the C# console's diagrules on the representatives and on the synthetic chimeric set), measure
+(join, counts, intervals, gate, aggregates), all (prepare, fire, measure), and freeze (the hashes the held-out
+VS21 and C26 passes must match). Optional chemistry (RDKit, pyarrow) stays outside src/.
 """
 import argparse
 from fractions import Fraction
@@ -35,11 +36,31 @@ OUT_ROOT = p2.OUT_ROOT.parent / "ws8-p3"
 P2_RUN = p2.OUT_ROOT / "p2-20261113-c1d5dc3" / "run.json"
 RUN_NAME = r"p3cs(smoke)?-(\d{8})-([a-f0-9]{7,40})"
 FREEZE_NAME = r"freeze-\d{8}-[a-f0-9]{7,40}\.json"
-EXPECTED_RULESET_SHA256 = "af4a7ebf2732b30b9610c7e410ba34f50f176b3fc0155d5a4f9a28fb413ab2eb"
-EXPECTED_RULESET_VERSION = "0.1.0"
+# Rule set 0.2.0 (Stop B, 2026-11-24), measured as published on C26N (§22.8). The frozen VS20+VS21 pass of 2026-11-24
+# (freeze-20261124-5a8fc37) ran 0.1.0, af4a7ebf2732b30b9610c7e410ba34f50f176b3fc0155d5a4f9a28fb413ab2eb.
+EXPECTED_RULESET_SHA256 = "ecf7988dea90992eb7233fc856ce2cb19a8afe4f1f5683628a4b35a459c93569"
+EXPECTED_RULESET_VERSION = "0.2.0"
 # VS21 is identified by name and sha256 only (AGENTS.md); its files are opened only behind vs21_guard.
 VS21 = [("pos", "MSMS-Private-pos-VS21.msp", "0fa0a96bdf1ebbd86349883cb96bb1ff9e327eb6ba7650ee3434056aacb4804f"),
         ("neg", "MSMS-Private-neg-VS21.msp", "7e2581ab31461b5a9102158a6eaf73d0a1702b8564dd75a9281c9b86dc4d132f")]
+# Held-out sources: only their small cells are suppressed; the development set (vs20) and pooled cells never are.
+HELD_OUT = ("vs21", "c26")
+SOURCE_LISTS = (["vs20"], ["vs20", "vs21"], ["vs20", "vs21", "c26"])
+# The held-out tags each source's outputs carry. C26 records are filtered against the VS21 keys of the same run, so
+# every C26-derived file is tagged with both; an output reading several sources carries every tag they carry.
+LOCAL_TAGS = {"vs20": (), "vs21": ("vs21",), "c26": ("vs21", "c26")}
+# Records of a source whose structure key is among the accepted keys of these earlier sources are excluded.
+OVERLAP_SOURCES = {"vs21": ("vs20",), "c26": ("vs20", "vs21")}
+# CASMI26 train.parquet (C26N, handback section 22): CC BY-NC 4.0 with a no-redistribution rule. Identified by name and
+# sha256; no row, key, SMILES or spectrum may reach a file that is not named *.local-c26.*.
+C26_SHA256 = "9423f90ec08b941a9646b535bf0606183e86ff0c5a297978f5a70693d41bcd98"
+C26_TRAIN = OUT_ROOT.parent / "external" / "casmi26" / "enveda-CASMI26-molecule-id-mass-spectra" / "train.parquet"
+C26_PPM_MAX = 10
+C26_EXCLUDED_LIBS = ("enveda-180",)
+C26_COLUMNS = ["ingest_lib", "normalized_smiles", "inchikey14", "ionization_mode", "instrument_type", "adduct",
+               "precursor_mz", "precursor_error_ppm", "ms2_mzs", "ms2_normalized_intensities", "collision_energy_ev",
+               "collision_energy_orig"]
+MERGED_CE = "merged"  # energy stratum of spectra merged from more than one collision energy
 PROVENANCE_TABLE = HERE / "provenance-p3.tsv"
 INSOURCE_TABLE = HERE / "insource-p3.tsv"
 INSOURCE_MARGIN_DA = 0.01
@@ -81,6 +102,12 @@ CRITERIA = dict(counting_unit="cluster", n_min=100, wilson_target=0.95, source_n
 CRITERIA_PROVISIONAL = dict(CRITERIA, n_min=30, wilson_target=0.90, source_precision=0.90, synthetic_precision=0.90,
                             prior_stress_gated=False, registered="2026-11-24")
 TIERS = (("strict", CRITERIA), ("provisional", CRITERIA_PROVISIONAL))
+# Tier 3 ("exploratory"), registered by the author on 2026-11-27 after the truth-only C26 inventory and before any
+# C26 firing (P3 handback §24). It is judged on C26 alone: the gate cell, the decoy FDR and the Wilson bound are C26's;
+# VS20 and VS21, already seen, only guard (point precision where a source has source_n_min fired clusters). Every
+# rule origin is eligible, because C26 is external to the VS20 and VS21 tuning. Never claim-eligible.
+CRITERIA_EXPLORATORY = dict(CRITERIA, n_min=20, wilson_target=0.80, source_precision=0.85, synthetic_precision=0.85,
+                            prior_stress_gated=False, judged_on="c26", registered="2026-11-27")
 CONSOLE_INI = "MassToleranceType=Da\r\nMs2Tolerance=0.01\r\nIsTmsMeoxDerivative=False\r\n"
 BELOW_NORMAL, NO_WINDOW = 0x4000, 0x08000000
 FORBIDDEN_COLUMN = r"(^|_)(key|first.?block|smiles|name)($|_)"
@@ -115,12 +142,25 @@ def read_rows(path):
         return list(csv.DictReader(f, delimiter="\t" if str(path).endswith(".tsv") else ","))
 
 
-def suffix(source):
-    return ".local-vs21" if source == "vs21" else ""
+def suffix(*sources):
+    """The one naming rule: `.local-vs21`, `.local-c26` or `.local-vs21.local-c26` for an output derived from these
+    sources (one source for its own files, every source of the run for pooled outputs); empty for VS20 alone."""
+    tags = {t for s in sources for t in LOCAL_TAGS[s]}
+    return "".join(".local-" + t for t in HELD_OUT if t in tags)
 
 
 def any_vs21(sources):
     return "vs21" in sources
+
+
+def local_vs21(source):
+    """The console marks its output local-vs21 when "vs21" is in the input path, as it is in this source's names."""
+    return ".local-vs21" in suffix(source)
+
+
+def row_path(out, stem, source):
+    """P2's row-file naming, with every held-out tag of the source."""
+    return Path(out) / (stem + suffix(source) + ".parquet")
 
 
 def git(*args):
@@ -182,6 +222,63 @@ def iter_msp_p3(path, table):
                     in_peaks = True
         if meta:
             yield meta, peaks, decimals, provenance_of(extra, table)
+
+
+def msp_reader(path, mode, table):
+    return iter_msp_p3(path, table)
+
+
+def text(value):
+    """A parquet text value on one line ('' for null), so it cannot break an MSP record."""
+    return "" if value is None else " ".join(str(value).split())
+
+
+def decimals_of(x):
+    """Decimal places of a float's shortest repr, as the MSP reader counts them in the peak text."""
+    mantissa = repr(float(x)).lower().split("e")[0]
+    return len(mantissa.split(".")[1]) if "." in mantissa else 0
+
+
+def iter_c26(path, mode, table=None, batch_size=4096):
+    """CASMI26 train.parquet rows of one ion mode as the (meta, peaks, decimals, provenance) of iter_msp_p3, so
+    prepare_source applies P2's checks unchanged. Read in batches of a column subset. Rows whose ionization_mode is
+    neither positive nor negative come with the positive input, where P2's mode check counts them once.
+
+    The provenance carries the parquet row ordinal, the ingest_lib bucket (report only), in_silico False, the C26
+    exclusion that applies before P2's checks (excluded ingest_lib, missing structure, precursor ppm missing or above
+    C26_PPM_MAX) and whether the spectrum was merged from several collision energies (kept, its own stratum)."""
+    import pyarrow.parquet as pq
+    ordinal = 0
+    for batch in pq.ParquetFile(path).iter_batches(batch_size=batch_size, columns=C26_COLUMNS):
+        modes = [p2.ion_mode(text(v), None) for v in batch.column("ionization_mode").to_pylist()]
+        keep = [i for i, x in enumerate(modes) if x == mode or (mode == "pos" and x is None)]
+        for i, r in zip(keep, batch.take(keep).to_pylist() if keep else []):
+            yield c26_record(r, ordinal + i)
+        ordinal += batch.num_rows
+
+
+def c26_record(r, ordinal):
+    peaks, decimals = [], []
+    for mz, intensity in zip(r["ms2_mzs"] or [], r["ms2_normalized_intensities"] or []):
+        if mz is not None and intensity is not None and math.isfinite(mz) and math.isfinite(intensity) \
+                and mz > 0 and intensity > 0:
+            peaks.append((float(mz), float(intensity)))
+            decimals.append(decimals_of(mz))
+    meta = dict(precursormz="" if r["precursor_mz"] is None else repr(float(r["precursor_mz"])),
+                precursortype=text(r["adduct"]), ionmode=text(r["ionization_mode"]) or "missing",
+                instrumenttype=text(r["instrument_type"]), collisionenergy=text(r["collision_energy_orig"]),
+                smiles=text(r["normalized_smiles"]))
+    ppm = r["precursor_error_ppm"]
+    exclude = ("excluded_ingest_lib" if r["ingest_lib"] in C26_EXCLUDED_LIBS else
+               "missing_structure" if not meta["smiles"] or not text(r["inchikey14"]) else
+               "precursor_error_ppm_missing" if ppm is None or not math.isfinite(ppm) else
+               "precursor_error_ppm_above_limit" if abs(ppm) > C26_PPM_MAX else None)
+    bucket = re.sub(r"[^A-Za-z0-9_.+-]", "_", text(r["ingest_lib"])) or "unknown"
+    return meta, peaks, decimals, dict(bucket=bucket, in_silico=False, ordinal=ordinal, exclude=exclude,
+                                       merged_ce=len(r["collision_energy_ev"] or []) > 1)
+
+
+READERS = {"c26": iter_c26}
 
 
 # ------------------------------------------------------------------------------------------- rule-set tables
@@ -256,15 +353,19 @@ def _schemas():
     return raw, prepared
 
 
-def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, table, shards, public_keys=None):
-    """One library source. inputs: [(mode, path, expected sha256 or None)].
+def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, table, shards, overlap_keys=None,
+                   reader=msp_reader):
+    """One library source. inputs: [(mode, path, expected sha256 or None)]; reader(path, mode, table) yields
+    iter_msp_p3's (meta, peaks, decimals, provenance). overlap_keys: {earlier source: its accepted structure keys};
+    a record whose key is among them is excluded as `<source>:<earlier>_overlap_records`.
 
     The P2 counters (same names, same order of checks) go to `counts`; P3's own exclusions go to `extra`.
-    Returns (counts, extra, stats, public keys, input hashes)."""
+    Returns (counts, extra, stats, this source's accepted structure keys, input hashes); stats["instrument_types"]
+    counts the instrument text of the kept records (local only; prepare never writes it to run.json)."""
     raw_schema, prepared_schema = _schemas()
     out = Path(out)
-    counts, extra, hashes = Counter(), Counter(), []
-    raw_path = p2.row_path(out, "p3raw", source)
+    counts, extra, hashes, itypes = Counter(), Counter(), [], Counter()
+    raw_path = row_path(out, "p3raw", source)
     sink = p2.ParquetRows(raw_path, raw_schema)
     raw_smiles = set()
     for mode, path, expected in inputs:
@@ -272,9 +373,13 @@ def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, tab
         if expected and digest != expected:
             raise RuntimeError("Input checksum mismatch")
         hashes.append(dict(name=Path(path).name, sha256=digest))
-        for ordinal, (meta, peaks, decimals, prov) in enumerate(iter_msp_p3(path, table)):
+        for i, (meta, peaks, decimals, prov) in enumerate(reader(path, mode, table)):
+            ordinal = prov.get("ordinal", i)
             prefix = source + ":" + mode + ":"
             counts[prefix + "input"] += 1
+            if prov.get("exclude"):  # source-specific exclusions (C26), before P2's checks
+                extra[source + ":" + prov["exclude"]] += 1
+                continue
             raw_smiles.add(meta.get("smiles", ""))
             if limit and ordinal % max(1, round(1 / limit)) != 0:
                 counts[prefix + "smoke_unsampled"] += 1
@@ -301,7 +406,7 @@ def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, tab
                 continue
             sink.add(dict(record_id=ordinal * 2 + (mode == "neg"), raw_smiles=meta.get("smiles", ""), mode=mode,
                           adduct=adduct, precursor=precursor, instrument=p2.instrument_bin(meta.get("instrumenttype", "")),
-                          energy=p2.energy_bin(meta.get("collisionenergy", "")),
+                          energy=MERGED_CE if prov.get("merged_ce") else p2.energy_bin(meta.get("collisionenergy", "")),
                           instrument_type=meta.get("instrumenttype", ""), collision_energy=meta.get("collisionenergy", ""),
                           bucket=prov["bucket"], in_silico=prov["in_silico"],
                           mz=[p[0] for p in peaks], intensity=[p[1] for p in peaks]))
@@ -310,8 +415,7 @@ def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, tab
     for result in chem.values():
         if "rejected" in result:
             counts[source + ":unique_smiles:" + result["rejected"]] += 1
-    if source == "vs20":
-        public_keys = {r["key"] for r in chem.values() if "key" in r}
+    keys = {r["key"] for r in chem.values() if "key" in r}
     reps, ns = {}, Counter()
 
     def unit_of(row, c):
@@ -323,8 +427,9 @@ def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, tab
         if "rejected" in c:
             counts[source + ":structure_rejected_records"] += 1
             continue
-        if source == "vs21" and c["key"] in public_keys:
-            counts[source + ":vs20_overlap_records"] += 1
+        earlier = next((s for s, k in (overlap_keys or {}).items() if c["key"] in k), None)
+        if earlier:
+            counts[source + ":" + earlier + "_overlap_records"] += 1
             continue
         unit, mapped = unit_of(row, c)
         if adduct_charge(row["adduct"], mapped) >= 2:
@@ -336,6 +441,9 @@ def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, tab
         if not mapped:
             extra[source + ":adduct_unmapped_records"] += 1
         extra[source + ":bucket:" + row["bucket"]] += 1
+        if row["energy"] == MERGED_CE:
+            extra[source + ":merged_collision_energy_records"] += 1
+        itypes[row["instrument_type"]] += 1
         ns[unit] += 1
         candidate = (len(row["mz"]), -row["record_id"])
         if unit not in reps or candidate > reps[unit]:
@@ -369,13 +477,13 @@ def prepare_source(source, inputs, out, limit, workers, motif_rows, aliases, tab
             index.append(dict(file_name=name, record_index=i, record_id=r["record_id"]))
         write_msp(msp_dir / name, rows[lo:hi])
     write_rows(msp_dir / f"representatives-index{suffix(source)}.tsv", index, ["file_name", "record_index", "record_id"])
-    sink = p2.ParquetRows(p2.row_path(out, "prepared", source), prepared_schema)
+    sink = p2.ParquetRows(row_path(out, "prepared", source), prepared_schema)
     for r in rows:
         sink.add(r)
     sink.close()
     stats = dict(representatives=len(rows), compounds=len({r["key"] for r in rows}), clusters=len(cluster_ids),
-                 spectra=sum(ns.values()), shards=len(blocks))
-    return counts, extra, stats, public_keys, hashes
+                 spectra=sum(ns.values()), shards=len(blocks), instrument_types=itypes)
+    return counts, extra, stats, keys, hashes
 
 
 def shard_blocks(n, shards):
@@ -412,10 +520,22 @@ def p2_parity(counts, p2_exclusions, source):
     return dict(result="match", keys=len(theirs))
 
 
-def library_inputs(source):
+def library_inputs(source, args=None):
     if source == "vs20":
         return [(mode, p2.LIB_ROOT / rel, sha) for mode, (rel, sha) in zip(("pos", "neg"), p2.PUBLIC)]
+    if source == "c26":  # one file, read once per ion mode
+        path = Path(getattr(args, "c26_train", None) or C26_TRAIN)
+        return [("pos", path, C26_SHA256), ("neg", path, C26_SHA256)]
     return [(mode, next(p2.LIB_ROOT.rglob(name)), sha) for mode, name, sha in VS21]
+
+
+INSTRUMENT_FIELDS = ["instrument_type", "records", "instrument_class"]
+
+
+def write_instrument_types(out, source, counter):
+    """The distinct instrument text of a source's kept records with P2's instrument class (local, for review)."""
+    rows = [dict(instrument_type=k, records=v, instrument_class=p2.instrument_bin(k)) for k, v in sorted(counter.items())]
+    write_rows(Path(out) / f"instrument_types{suffix(source)}.tsv", rows, INSTRUMENT_FIELDS)
 
 
 def prepare(args, run, inputs=None, p2_run=P2_RUN):
@@ -425,19 +545,24 @@ def prepare(args, run, inputs=None, p2_run=P2_RUN):
     run["inputs"] += [dict(name="RuleSet/" + rel, sha256=h) for rel, h in ruleset_file_hashes(args.ruleset_dir).items()
                       if rel in ("tables/motifs.json", "tables/adducts.json")]
     run["prepared"], run["exclusions"], run["p3_exclusions"], run["p2_parity"] = {}, {}, {}, {}
-    public_keys = None
+    keys = {}
     for source in args.sources:
-        if source == "vs21":
+        if source in HELD_OUT:
             vs21_guard(args)
-        src_inputs = (inputs or {}).get(source) or library_inputs(source)
-        counts, extra, stats, public_keys, hashes = prepare_source(
-            source, src_inputs, args.out, args.limit, args.workers, motif_rows, aliases, table, args.workers, public_keys)
+        src_inputs = (inputs or {}).get(source) or library_inputs(source, args)
+        counts, extra, stats, keys[source], hashes = prepare_source(
+            source, src_inputs, args.out, args.limit, args.workers, motif_rows, aliases, table, args.workers,
+            {s: keys[s] for s in OVERLAP_SOURCES.get(source, ())}, READERS.get(source, msp_reader))
+        itypes = stats.pop("instrument_types")
+        if source == "c26":  # instrument text stays out of run.json; the inventory reads this file
+            write_instrument_types(args.out, source, itypes)
         run["inputs"] += hashes
         run["exclusions"].update(dict(sorted(counts.items())))
         run["p3_exclusions"].update(dict(sorted(extra.items())))
         run["prepared"][source] = stats
-        if args.limit or p2_run is None:
-            run["p2_parity"][source] = dict(result="not_checked", reason="smoke sample" if args.limit else "no P2 run")
+        if args.limit or p2_run is None or source == "c26":
+            run["p2_parity"][source] = dict(result="not_checked", reason="smoke sample" if args.limit else
+                                            "no P2 run for c26" if source == "c26" else "no P2 run")
         else:
             p2_doc = json.loads(Path(p2_run).read_text(encoding="utf-8"))
             run["inputs"].append(dict(name="P2 run.json", sha256=p2.sha256(p2_run)))
@@ -658,7 +783,7 @@ def validate_shard(outdir, msp, n_records, local_vs21):
     m = json.loads(manifests[0].read_text(encoding="utf-8"))
     rs = m["rule_set"]
     if rs["sha256"] != EXPECTED_RULESET_SHA256 or not rs["pinned"] or rs["version"] != EXPECTED_RULESET_VERSION:
-        raise RuntimeError("Console rule set is not the pinned 0.1.0 set")
+        raise RuntimeError(f"Console rule set is not the pinned {EXPECTED_RULESET_VERSION} set")
     if bool(m["local_vs21"]) != local_vs21:
         raise RuntimeError("Console local_vs21 marking disagrees with the source")
     if len(m["inputs"]) != 1 or m["inputs"][0]["sha256"] != p2.sha256(msp) or             (n_records is not None and m["inputs"][0]["records"] != n_records):
@@ -720,9 +845,9 @@ def fire(args, run):
         [dict(name=INSOURCE_TABLE.name, sha256=p2.sha256(INSOURCE_TABLE))]
     jobs = []
     for source in args.sources:
-        if source == "vs21":
+        if source in HELD_OUT:
             vs21_guard(args)
-        reps = list(p2.parquet_rows(p2.row_path(args.out, "prepared", source)))
+        reps = list(p2.parquet_rows(row_path(args.out, "prepared", source)))
         rows, stats = build_chimeric(reps, args.seed, source=source)
         write_chimeric(args.out, source, rows, args.workers)
         run["chimeric"][source] = stats
@@ -733,11 +858,11 @@ def fire(args, run):
             jobs += [(source, kind, *j) for j in shard_jobs(args.out, source, kind)]
     results = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futures = {ex.submit(run_console, console, msp, ini, outdir, n, source == "vs21"): (source, kind, msp, outdir, n)
+        futures = {ex.submit(run_console, console, msp, ini, outdir, n, local_vs21(source)): (source, kind, msp, outdir, n)
                    for source, kind, msp, outdir, n in jobs}
         for fut, (source, kind, msp, outdir, n) in futures.items():
             state = fut.result()
-            results[f"{source}/{kind}/{outdir.name}"] = dict(state=state, **validate_shard(outdir, msp, n, source == "vs21"))
+            results[f"{source}/{kind}/{outdir.name}"] = dict(state=state, **validate_shard(outdir, msp, n, local_vs21(source)))
     run["fire"] = results
     frozen = None
     if any_vs21(args.sources):
@@ -754,7 +879,9 @@ def read_evidence(shard_dir, msp_name, index_ids, passes=PASSES):
     out = {}
     for p in passes:
         files = sorted(shard_dir.glob(f"Diagrules evidence-{p}-*.jsonl"))
-        files = [f for f in files if re.fullmatch(rf"Diagrules evidence-{re.escape(p)}-\d+(\.local-vs21)?\.jsonl", f.name)]
+        # The console tags only VS21 (C26 inputs carry "vs21" in their names too); C26 shard folders carry .local-c26.
+        files = [f for f in files
+                 if re.fullmatch(rf"Diagrules evidence-{re.escape(p)}-\d+(\.local-vs21)?(\.local-c26)?\.jsonl", f.name)]
         if len(files) != 1:
             raise RuntimeError(f"Expected one evidence file for pass {p} in {shard_dir.name}")
         recs = []
@@ -972,7 +1099,8 @@ def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BO
         eligible = rule["measure"] and rule["source_checked"] and rid not in refused
         if not eligible:
             reason = "refused" if rid in refused else "measure_false" if not rule["measure"] else "source_unchecked"
-            gates[rid] = dict(ids, status="not_measured", status_provisional="not_measured", label="not_measured",
+            gates[rid] = dict(ids, status="not_measured", status_provisional="not_measured",
+                              status_exploratory="not_measured", label="not_measured",
                               reason=reason, origin=rule["origin"])
             continue
         if (mode, motif) not in cache:
@@ -1072,7 +1200,7 @@ def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BO
             synthetic_rows.append(ins_all)
         by_source = {s: cells[(primary, s, "all", "all")] for s in sources} if multi else {sources[0]: gate_row}
         by_prov = {}
-        prov_c = conditional(entries, truth, motif, multi, cell_fn=lambda rec: [rec["bucket"]])
+        prov_c = conditional(entries, truth, motif, multi, cell_fn=lambda rec: [provenance_key(rec)])
         for b in sorted(prov_c):
             c = prov_c[b]
             c_tp = sum(1 for k in c["fired"] if truth_cluster_positive(k, U))
@@ -1082,14 +1210,29 @@ def measure_core(rules, truth, by_rule, notev, sources, seed=SEED, replicates=BO
         tiers = {name: decide(gate_row, decoy_row, by_source, occ[rule["primary_mode"]], synth, rule["origin"], ins_all, K)
                  for name, K in TIERS}
         prov_tier = {k: tiers["provisional"][k] for k in ("status", "failed", "pending", "criteria")}
+        judged = CRITERIA_EXPLORATORY["judged_on"]
+        if multi and judged in sources:
+            expl = decide(cells[(primary, judged, "all", "all")], cells[("base", judged, "all", "all")],
+                          {s: r for s, r in by_source.items() if s != judged}, occ[rule["primary_mode"]], synth,
+                          rule["origin"], ins_all, CRITERIA_EXPLORATORY)
+            expl_tier = {k: expl[k] for k in ("status", "failed", "pending", "criteria")}
+        else:
+            expl_tier = dict(status="not_applicable", failed=[], pending=[], criteria={},
+                             reason=judged + " is not among the sources")
         gates[rid] = dict(ids, origin=rule["origin"], primary_precondition_mode=rule["primary_mode"], gate_pass=primary,
                           **tiers["strict"], status_provisional=prov_tier["status"], provisional=prov_tier,
-                          label=combined_label(tiers["strict"]["status"], prov_tier["status"]),
+                          status_exploratory=expl_tier["status"], exploratory=expl_tier,
+                          label=combined_label(tiers["strict"]["status"], prov_tier["status"], expl_tier["status"]),
                           by_provenance=by_prov,
                           provenance_flag=any(v["c_fires"] >= CRITERIA["source_n_min"] and v["c_precision"] < CRITERIA["source_precision"]
                                               for v in by_prov.values()))
     return dict(precision=precision_rows, competitors=competitor_rows, synthetic=synthetic_rows,
                 occupancy=occupancy_rows, gates=gates)
+
+
+def provenance_key(rec):
+    """VS20 and VS21 share provenance-p3.tsv's buckets; C26 buckets are its ingest_lib values, kept apart."""
+    return rec["bucket"] if rec["source"] in ("vs20", "vs21") else rec["source"] + ":" + rec["bucket"]
 
 
 def truth_cluster_positive(cluster, U):
@@ -1119,7 +1262,7 @@ def decide(gate_row, decoy_row, by_source, occ, synth, origin, insource=None, K=
                              ok=at_least(gate_row["c_prior_stress"], K["prior_target"]),
                              report_only=not K.get("prior_stress_gated", True)),
         "decoy_fdr": dict(value=decoy_row["c_decoy_fdr"], unit="cluster", record_level=decoy_row["decoy_fdr"],
-                          threshold=K["decoy_fdr_max"],
+                          fired_clusters=decoy_row["c_fires"], threshold=K["decoy_fdr_max"],
                           ok=None if decoy_row["c_decoy_fdr"] is None else decoy_fdr_within(
                               [decoy_row["c_decoy_fires_" + d[6:]] for d in DECOY_PASSES], decoy_row["c_fires"],
                               K["decoy_fdr_max"])),
@@ -1135,7 +1278,10 @@ def decide(gate_row, decoy_row, by_source, occ, synth, origin, insource=None, K=
             insource["c_precision"] is None or insource["c_precision"] >= K["synthetic_precision"]),
     }
     vs21 = by_source.get("vs21")
-    if origin == "tuned_pooled":
+    if K.get("judged_on"):
+        crit["heldout"] = dict(ok=True, note=f"judged on {K['judged_on'].upper()} alone, external to the tuning sets; "
+                                             "every origin is eligible")
+    elif origin == "tuned_pooled":
         crit["heldout"] = dict(ok=None, pending="tuned_pooled: can pass only on an external set")
     elif vs21 is None:
         crit["heldout"] = dict(ok=None, pending="tuned_vs20: must also pass on VS21 alone" if origin == "tuned_vs20"
@@ -1151,7 +1297,7 @@ def decide(gate_row, decoy_row, by_source, occ, synth, origin, insource=None, K=
         if ok is None:
             crit["heldout"]["pending"] = "tuned_vs20: no fires on VS21 alone"
     else:
-        crit["heldout"] = dict(ok=True, note="as_published: gated on VS20 and VS21 pooled")
+        crit["heldout"] = dict(ok=True, note="as_published: gated on " + " + ".join(s.upper() for s in by_source) + " pooled")
     if crit["synthetic_chimeric"]["ok"] is None:
         crit["synthetic_chimeric"]["pending"] = "chimeric set not measured"
     if crit["synthetic_insource"]["ok"] is None:
@@ -1171,15 +1317,21 @@ def decide(gate_row, decoy_row, by_source, occ, synth, origin, insource=None, K=
                 pending=[k for k, c in gated.items() if c["ok"] is None])
 
 
-def combined_label(strict, provisional):
-    """pass_strict; pass_provisional_only; incomplete_provisional when tier 1 did not reach incomplete but tier 2
-    did (every tier-2 criterion this run measures is met, others pending); otherwise tier 1's status."""
+def combined_label(strict, provisional, exploratory="not_applicable"):
+    """pass_strict; pass_provisional_only; pass_exploratory_only; incomplete_provisional when tier 1 did not reach
+    incomplete but tier 2 did (every tier-2 criterion this run measures is met, others pending);
+    incomplete_exploratory when neither tier 1 nor tier 2 reached incomplete but tier 3 did; otherwise tier 1's
+    status."""
     if strict == "pass":
         return "pass_strict"
     if provisional == "pass":
         return "pass_provisional_only"
+    if exploratory == "pass":
+        return "pass_exploratory_only"
     if provisional == "incomplete" and strict in ("fail", "not_estimable"):
         return "incomplete_provisional"
+    if exploratory == "incomplete" and strict in ("fail", "not_estimable") and provisional in ("fail", "not_estimable"):
+        return "incomplete_exploratory"
     return strict
 
 
@@ -1197,7 +1349,8 @@ PRECISION_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "pr
                     "decoy_fires_plus_5", "decoy_fires_plus_9", "decoy_fires_minus_7", "decoy_fdr",
                     "c_decoy_fires_plus_5", "c_decoy_fires_plus_9", "c_decoy_fires_minus_7", "c_decoy_fdr",
                     "gate_row", "label", "status_strict", "failed_strict", "pending_strict", "status_provisional",
-                    "failed_provisional", "pending_provisional"]
+                    "failed_provisional", "pending_provisional", "status_exploratory", "failed_exploratory",
+                    "pending_exploratory"]
 COMPETITOR_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "competitor_motif_id",
                      "n_universe_competitor", "n_cond", "fires", "fpr", "fpr_wilson_hi", "c_cond", "c_fires", "c_fpr"]
 SYNTHETIC_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "set", "level", "transform", "change",
@@ -1207,7 +1360,7 @@ SYNTHETIC_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "pass_id", "se
 OCCUPANCY_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "precondition_mode", "axis_occupancy", "axis_lo_da",
                     "axis_hi_da", "n_hypotheses", "n_positive", "n_negative", "n_negative_cond", "record_occupancy",
                     "c_positive", "c_negative", "c_negative_cond", "c_record_occupancy", "non_conditional"]
-# Rates and the count that is their denominator, for VS21 small-cell suppression.
+# Rates and the count that is their denominator, for held-out small-cell suppression.
 RATE_DENOMINATOR = {"precision": "fires", "wilson_lo": "fires", "wilson_hi": "fires", "boot_lo": "fires",
                     "boot_hi": "fires", "decoy_fdr": "fires", "recall_cond": "n_cond_positive",
                     "recall_universe": "n_positive", "coverage": "n_positive", "c_precision": "c_fires",
@@ -1220,23 +1373,17 @@ ID_FIELDS = {"rule_id", "version", "ion_mode", "motif_id", "pass_id", "precondit
              "non_conditional"}
 
 
-C_RATES = "every c_* value that is not a count"
 DECOYS = ("plus_5", "plus_9", "minus_7")
-# Complementary sets (counts, rates): one small count blanks the whole set, so no member can be recovered by
-# subtraction from the others (for example c_fp = c_fires - c_tp). A count shared by two sets links them.
-SUPPRESSION_GROUPS = [
-    (("fires", "tp", "fp"), ("precision", "wilson_lo", "wilson_hi", "boot_lo", "boot_hi", "recall_cond",
-                             "recall_universe", "fpr", "fpr_wilson_hi")),
-    (("c_fires", "c_tp", "c_fp"), C_RATES),
-    (("n_universe", "n_positive"), ("coverage", "recall_universe")),
-    (("n_cond", "n_cond_positive"), ("recall_cond", "fpr", "fpr_wilson_hi")),
-    (("c_universe", "c_positive"), C_RATES),
-    (("c_cond", "c_cond_positive"), C_RATES),
-    (tuple("decoy_fires_" + d for d in DECOYS), ("decoy_fdr",)),
-    (tuple("c_decoy_fires_" + d for d in DECOYS), ("c_decoy_fdr",)),
-    (("n_positive", "n_negative", "n_negative_cond"), ("record_occupancy",)),
-    (("c_positive", "c_negative", "c_negative_cond"), C_RATES),
-]
+# Each denominator count and the counts it bounds. A held-out denominator of 1..4 blanks itself, these counts (and,
+# through them, their own sets) and every rate over it.
+DENOMINATOR_MEMBERS = {
+    "fires": ("tp", "fp") + tuple("decoy_fires_" + d for d in DECOYS),
+    "c_fires": ("c_tp", "c_fp") + tuple("c_decoy_fires_" + d for d in DECOYS),
+    "n_cond": ("n_cond_positive", "fires"), "c_cond": ("c_cond_positive", "c_fires"),
+    "n_universe": ("n_positive",), "c_universe": ("c_positive",),
+    "n_positive": (), "c_positive": (), "n_cond_positive": (), "c_cond_positive": (),
+    "n_negative": ("n_negative_cond",), "c_negative": ("c_negative_cond",),
+}
 WHOLE_TABLE = ("lr_", "c_lr_", "prior_stress", "c_prior_stress", "stress_", "c_cond_lr", "c_prevalence", "c_cond_prevalence")
 
 
@@ -1244,55 +1391,76 @@ def is_count(k, v):
     return k not in ID_FIELDS and isinstance(v, int) and not isinstance(v, bool)
 
 
-def suppress(row, n_min=CRITERIA["vs21_min_cell"]):
-    """VS21 small cells: a count in 1..n_min-1 is blanked with every count and rate of its complementary sets
-    (closed over shared counts), every rate whose denominator is below n_min is blanked, and likelihood ratios and
-    stress values (whole-table functions) are blanked when any count of the row is."""
+def held_out_key(label):
+    """A count label of a held-out source: `vs21:...`, `c26:...`, `vs21/...` or `c26/...`."""
+    return re.split(r"[:/]", label, maxsplit=1)[0] in HELD_OUT
+
+
+def suppress(row, n_min=CRITERIA["vs21_min_cell"], held_out=None):
+    """Held-out small cells (§22.5 of the P3 handback): only a row of a held-out source (`source` vs21 or c26, or
+    held_out=True) is touched, and only where its own denominator is below n_min: a denominator of 1..n_min-1 is
+    blanked with the counts it bounds, every rate whose denominator is below n_min is blanked, and the likelihood
+    ratios and stress values of the row are blanked when any of its counts is. Development (vs20) and pooled rows
+    are never blanked."""
+    if not (row.get("source") in HELD_OUT if held_out is None else held_out):
+        return dict(row)
     out = dict(row)
-    blank = {k for k, v in row.items() if is_count(k, v) and 0 < v < n_min}
-    changed = True
-    while changed:
-        changed = False
-        for counts, rates in SUPPRESSION_GROUPS:
-            present = [k for k in counts if k in row]
-            if present and blank & set(present):
-                members = set(present) | ({k for k in row if k.startswith("c_") and not is_count(k, row[k])}
-                                          if rates is C_RATES else {k for k in rates if k in row})
-                if not members <= blank:
-                    blank |= members
-                    changed = True
+    todo = [d for d in DENOMINATOR_MEMBERS if is_count(d, row.get(d)) and 0 < row[d] < n_min]
+    blank = set()
+    while todo:
+        d = todo.pop()
+        if d not in blank:
+            blank.add(d)
+            todo += [k for k in DENOMINATOR_MEMBERS.get(d, ()) if k in row]
     for k in blank:
         out[k] = None
     for k, d in RATE_DENOMINATOR.items():
-        if k in out and isinstance(row.get(d), int) and row[d] < n_min:
+        if k in out and (d in blank or (is_count(d, row.get(d)) and row[d] < n_min)):
             out[k] = None
-    if any(is_count(k, row[k]) for k in blank):
+    if blank:
         for k in out:
             if k.startswith(WHOLE_TABLE):
                 out[k] = None
     return out
 
 
-def suppress_counts(d, n_min=CRITERIA["vs21_min_cell"]):
-    """A flat {label: count} for a VS21 report: counts in 1..n_min-1 are blanked; when exactly one is, the next
-    smallest positive count is blanked too, so a total elsewhere cannot give the blanked one back."""
-    out = dict(d)
-    small = [k for k, v in d.items() if is_count(k, v) and 0 < v < n_min]
-    for k in small:
-        out[k] = None
-    if len(small) == 1:
-        rest = sorted((v, k) for k, v in d.items() if is_count(k, v) and v > 0 and k not in small)
-        if rest:
-            out[rest[0][1]] = None
+def suppress_counts(d, n_min=CRITERIA["vs21_min_cell"], held_out=None):
+    """A flat {label: count} of a report: a held-out count (a label of a held-out source, or every count with
+    held_out=True) of 1..n_min-1 is blanked. Development and pooled counts are never blanked."""
+    return {k: None if is_count(k, v) and 0 < v < n_min and (held_out_key(k) if held_out is None else held_out)
+            else v for k, v in d.items()}
+
+
+def suppress_criteria(crit, n_min=CRITERIA["vs21_min_cell"], held_out_gate=False):
+    """Criterion values of rules_precision.json: the per-source values of a held-out source with 1..n_min-1 fired
+    clusters, and the VS21-alone held-out values below n_min, are blanked; pooled values are kept. held_out_gate:
+    the gate cell itself is a held-out source's (tier 3 on C26), so its fired-cluster count, Wilson bound and prior
+    stress are blanked when that count is 1..n_min-1, and its decoy FDR when the base pass's count is."""
+    out = {}
+
+    def small(n):
+        return isinstance(n, int) and 0 < n < n_min
+    for k, c in crit.items():
+        c, v = dict(c), c.get("value")
+        if held_out_gate and k in ("n_clusters", "cluster_wilson_lo", "prior_stress") and \
+                small(crit["n_clusters"]["value"]):
+            c["value"] = None
+        elif held_out_gate and k == "decoy_fdr" and small(c.get("fired_clusters")):
+            c.update(value=None, record_level=None, fired_clusters=None)
+        elif k == "per_source_precision":
+            c["value"] = {s: dict(c_fires=None, c_precision=None) if s in HELD_OUT and 0 < r["c_fires"] < n_min else r
+                          for s, r in v.items()}
+        elif k == "heldout" and isinstance(v, dict) and 0 < v["c_fires"] < n_min:
+            c["value"] = {kk: None for kk in v}
+        out[k] = c
     return out
 
 
-def write_aggregates(out, result, run_id, rules, local_vs21, extra=None):
+def write_aggregates(out, result, run_id, rules, sfx, extra=None):
+    """sfx: suffix() of every source of the run."""
     out = Path(out)
-    sfx = ".local-vs21" if local_vs21 else ""
-    tr = suppress if local_vs21 else (lambda r: r)
-    rows = {k: [tr(r) for r in result[k]] for k in ("precision", "competitors", "synthetic", "occupancy")}
-    # Both tiers' statuses side by side on each rule's gate row (primary pass, pooled, all strata).
+    rows = {k: [suppress(r) for r in result[k]] for k in ("precision", "competitors", "synthetic", "occupancy")}
+    # The three tiers' statuses side by side on each rule's gate row (primary pass, pooled, all strata).
     csv_rows = []
     for r in rows["precision"]:
         g = result["gates"][r["rule_id"]]
@@ -1300,7 +1468,9 @@ def write_aggregates(out, result, run_id, rules, local_vs21, extra=None):
             r = dict(r, gate_row=True, label=g["label"], status_strict=g["status"], failed_strict=";".join(g["failed"]),
                      pending_strict=";".join(g["pending"]), status_provisional=g["provisional"]["status"],
                      failed_provisional=";".join(g["provisional"]["failed"]),
-                     pending_provisional=";".join(g["provisional"]["pending"]))
+                     pending_provisional=";".join(g["provisional"]["pending"]),
+                     status_exploratory=g["exploratory"]["status"], failed_exploratory=";".join(g["exploratory"]["failed"]),
+                     pending_exploratory=";".join(g["exploratory"]["pending"]))
         csv_rows.append(r)
     write_rows(out / f"rules_precision{sfx}.csv", csv_rows, PRECISION_FIELDS)
     write_rows(out / f"rules_competitors{sfx}.csv", rows["competitors"], COMPETITOR_FIELDS)
@@ -1318,18 +1488,20 @@ def write_aggregates(out, result, run_id, rules, local_vs21, extra=None):
             entry["synthetic"] = [r for r in rows["synthetic"] if r["rule_id"] == rule["rule_id"]]
             entry["occupancy"] = [r for r in rows["occupancy"] if r["rule_id"] == rule["rule_id"]]
             entry["competitors"] = [r for r in rows["competitors"] if r["rule_id"] == rule["rule_id"]]
-            if local_vs21:
-                entry["criteria"] = {k: {kk: vv for kk, vv in v.items() if kk != "value"} for k, v in entry["criteria"].items()}
-                entry["provisional"] = dict(entry["provisional"], criteria={
-                    k: {kk: vv for kk, vv in v.items() if kk != "value"} for k, v in entry["provisional"]["criteria"].items()})
-                entry["by_provenance"] = {b: suppress(v) for b, v in entry["by_provenance"].items()}
+            entry["criteria"] = suppress_criteria(entry["criteria"])
+            entry["provisional"] = dict(entry["provisional"], criteria=suppress_criteria(entry["provisional"]["criteria"]))
+            entry["exploratory"] = dict(entry["exploratory"],
+                                        criteria=suppress_criteria(entry["exploratory"]["criteria"], held_out_gate=True))
+            entry["by_provenance"] = {b: suppress(v, held_out=held_out_key(b)) for b, v in entry["by_provenance"].items()}
         by_rule.append(entry)
     gates = result["gates"].values()
     doc = dict(label="ws8-p3-class-rules", run_id=run_id, criteria=CRITERIA, criteria_provisional=CRITERIA_PROVISIONAL,
+               criteria_exploratory=CRITERIA_EXPLORATORY,
                ruleset_sha256=EXPECTED_RULESET_SHA256, ruleset_version=EXPECTED_RULESET_VERSION, rules=by_rule,
                as_applied=dict(status="not_done", reason="needs the passing rules and their joint application"),
                status_counts=dict(sorted(Counter(g["status"] for g in gates).items())),
                status_counts_provisional=dict(sorted(Counter(g["status_provisional"] for g in gates).items())),
+               status_counts_exploratory=dict(sorted(Counter(g["status_exploratory"] for g in gates).items())),
                label_counts=dict(sorted(Counter(g["label"] for g in gates).items())),
                not_done=NOT_DONE, **(extra or {}))
     p2.write_json(out / f"rules_precision{sfx}.json", doc)
@@ -1337,22 +1509,27 @@ def write_aggregates(out, result, run_id, rules, local_vs21, extra=None):
         return {k: {kk: v.get(kk) for kk in ("value", "threshold", "ok", "report_only") if kk in v} for k, v in crit.items()}
 
     def listed(g, tier):
-        t = g if tier == "strict" else g["provisional"]
+        t = g if tier == "strict" else g[tier]
         return dict(rule_id=g["rule_id"], version=g["version"], ion_mode=g["ion_mode"], tier=tier,
                     criteria=numbers(t["criteria"]))
 
     proposal = dict(
         label="ws8-p3-review-proposal", run_id=run_id,
-        criteria=dict(strict=CRITERIA, provisional=CRITERIA_PROVISIONAL),
+        criteria=dict(strict=CRITERIA, provisional=CRITERIA_PROVISIONAL, exploratory=CRITERIA_EXPLORATORY),
         passed_strict=[listed(g, "strict") for g in by_rule if g["label"] == "pass_strict"],
         passed_provisional_only=[listed(g, "provisional") for g in by_rule if g["label"] == "pass_provisional_only"],
+        passed_exploratory_only=[listed(g, "exploratory") for g in by_rule if g["label"] == "pass_exploratory_only"],
         incomplete_strict=[dict(rule_id=g["rule_id"], version=g["version"], ion_mode=g["ion_mode"], pending=g["pending"])
                            for g in by_rule if g["status"] == "incomplete"],
         incomplete_provisional=[dict(rule_id=g["rule_id"], version=g["version"], ion_mode=g["ion_mode"],
                                      pending=g["provisional"]["pending"]) for g in by_rule if g["label"] == "incomplete_provisional"],
+        incomplete_exploratory=[dict(rule_id=g["rule_id"], version=g["version"], ion_mode=g["ion_mode"],
+                                     pending=g["exploratory"]["pending"]) for g in by_rule if g["label"] == "incomplete_exploratory"],
         note="`passed_strict` met every tier-1 (strict) criterion, with tier-1 numbers. `passed_provisional_only` met every "
-             "tier-2 (provisional, registered 2026-11-24) criterion but not tier 1, with tier-2 numbers. The author "
-             "chooses which tier to accept. `incomplete_*` rules met every criterion of their tier that this run measures "
+             "tier-2 (provisional, registered 2026-11-24) criterion but not tier 1, with tier-2 numbers. "
+             "`passed_exploratory_only` met every tier-3 (exploratory, registered 2026-11-27, judged on C26 alone) "
+             "criterion but neither tier 1 nor tier 2, with tier-3 numbers; such a rule is exploratory L3-SI evidence "
+             "and never claim-eligible. The author chooses which tier to accept. `incomplete_*` rules met every criterion of their tier that this run measures "
              "and are NOT eligible for author_reviewed until the pending criteria are measured.")
     p2.write_json(out / f"review_proposal-{run_id}{sfx}.json", proposal)
     return doc
@@ -1389,13 +1566,13 @@ def skip_counts(fire_results):
     return {k: dict(sorted(v.items())) for k, v in out.items()}
 
 
-def write_report(out, doc, run, local_vs21):
-    sfx = ".local-vs21" if local_vs21 else ""
-    sc = suppress_counts if local_vs21 else (lambda d: dict(d))
+def write_report(out, doc, run, sfx):
+    sc = suppress_counts
+    sources = doc.get("sources") or list(run.get("prepared", {})) or ["vs20"]
 
     def fmt(v):
         return "NA" if v is None else f"{v:.4g}" if isinstance(v, float) else str(v)
-    lines = [f"# WS8 P3 rule-level measurement ({'VS20 + VS21' if local_vs21 else 'VS20 development pass'})", "",
+    lines = [f"# WS8 P3 rule-level measurement ({' + '.join(s.upper() for s in sources) if sfx else 'VS20 development pass'})", "",
              f"Run `{doc['run_id']}`. Rule set {EXPECTED_RULESET_VERSION} (`{EXPECTED_RULESET_SHA256}`). "
              "Library-only measurement; counts use clusters (truth Hill formula, curated precursor type, truth motif "
              "set within a source) unless a column says records.", "",
@@ -1403,20 +1580,26 @@ def write_report(out, doc, run, local_vs21):
              "lower >= 0.95, per-source precision >= 0.95, prior stress >= 0.90, decoy FDR <= 0.05, occupancy <= 5 %, "
              "synthetic cluster precision >= 0.95. Tier 2 (provisional, registered 2026-11-24 before any VS21 pass and "
              "after the VS20 development pass had been seen): >= 30 fired clusters, Wilson lower >= 0.90, per-source "
-             ">= 0.90, prior stress report-only, the same decoy FDR and occupancy, synthetic >= 0.90.", "",
+             ">= 0.90, prior stress report-only, the same decoy FDR and occupancy, synthetic >= 0.90. Tier 3 (exploratory, "
+             "registered 2026-11-27 before any C26 firing; applicable only when C26 is a source) is judged on C26 alone: "
+             ">= 20 fired C26 clusters, C26 Wilson lower >= 0.80, C26 decoy FDR <= 0.05, point precision >= 0.85 on "
+             "VS20 and on VS21 where each has >= 30 fired clusters, the same occupancy, synthetic >= 0.85, prior stress "
+             "report-only, every rule origin eligible; never claim-eligible.", "",
              "Status per tier: `pass` met every criterion of the tier; `fail` failed at least one measured criterion; "
              "`not_estimable` has fewer fired clusters than the tier's minimum; `incomplete` met every criterion this "
              "run measures while others are pending (the VS21 pass is not part of this phase); `not_measured` is "
              "outside measure:true and source_checked:true (or refused by the console). Label: `pass_strict`, "
-             "`pass_provisional_only`, `incomplete_provisional` (tier 2 incomplete while tier 1 failed or was not "
-             "estimable), otherwise the strict status.", "",
+             "`pass_provisional_only`, `pass_exploratory_only`, `incomplete_provisional` (tier 2 incomplete while tier 1 "
+             "failed or was not estimable), `incomplete_exploratory` (tier 3 incomplete while tiers 1 and 2 failed or "
+             "were not estimable), otherwise the strict status.", "",
              "Status counts, strict: " + json.dumps(doc["status_counts"], sort_keys=True) + "; provisional: "
-             + json.dumps(doc["status_counts_provisional"], sort_keys=True) + "; labels: "
+             + json.dumps(doc["status_counts_provisional"], sort_keys=True) + "; exploratory: "
+             + json.dumps(doc["status_counts_exploratory"], sort_keys=True) + "; labels: "
              + json.dumps(doc["label_counts"], sort_keys=True), "",
              "Decoy FDR and chimeric precision are cluster-level, as the gate reads them; the record-level values are "
              "in rules_precision.csv and rules_synthetic.csv (report only).", "",
-             "| Rule | v | Mode | Primary pass | Fired clusters | Cluster precision | Cluster Wilson lower | Prior stress | Decoy FDR | Occupancy axis / records | Chimeric precision 10/30/50 % | In-source precision | Strict | Strict failed | Strict pending | Provisional | Provisional failed | Provisional pending | Label |",
-             "|---|---:|---|---|---:|---:|---:|---:|---:|---|---|---:|---|---|---|---|---|---|---|"]
+             "| Rule | v | Mode | Primary pass | Fired clusters | Cluster precision | Cluster Wilson lower | Prior stress | Decoy FDR | Occupancy axis / records | Chimeric precision 10/30/50 % | In-source precision | Strict | Strict failed | Strict pending | Provisional | Provisional failed | Provisional pending | Exploratory | Exploratory failed | Exploratory pending | Label |",
+             "|---|---:|---|---|---:|---:|---:|---:|---:|---|---|---:|---|---|---|---|---|---|---|---|---|---|"]
     for g in doc["rules"]:
         if g["status"] == "not_measured":
             continue
@@ -1430,7 +1613,9 @@ def write_report(out, doc, run, local_vs21):
                                         fmt(decoy), fmt(occ.get("axis_occupancy")) + " / " + fmt(occ.get("record_occupancy")),
                                         chim, ins, g["status"], ",".join(g["failed"]) or "-", ",".join(g["pending"]) or "-",
                                         g["provisional"]["status"], ",".join(g["provisional"]["failed"]) or "-",
-                                        ",".join(g["provisional"]["pending"]) or "-", g["label"]]) + " |")
+                                        ",".join(g["provisional"]["pending"]) or "-", g["exploratory"]["status"],
+                                        ",".join(g["exploratory"]["failed"]) or "-",
+                                        ",".join(g["exploratory"]["pending"]) or "-", g["label"]]) + " |")
     not_measured = Counter(g["reason"] for g in doc["rules"] if g["status"] == "not_measured")
     lines += ["", "Not measured: " + json.dumps(dict(sorted(not_measured.items())), sort_keys=True), ""]
     prov = sc(run.get("p3_exclusions", {}))
@@ -1449,7 +1634,7 @@ def write_report(out, doc, run, local_vs21):
         insil = raw_prov.get(source + ":in_silico_records", 0)
         shown = prov.get(source + ":in_silico_records", 0)
         if shown is None or any(v is None for v in buckets.values()):
-            lines.append(f"- {source}: in-silico detector counts suppressed (VS21 cells below 5).")
+            lines.append(f"- {source}: in-silico detector counts suppressed (held-out counts below 5).")
         else:
             lines.append(f"- {source}: the declared in-silico detector removed {insil} records "
                          f"({insil / (insil + total):.4%} of the eligible records)." if insil + total else f"- {source}: no eligible records.")
@@ -1461,15 +1646,15 @@ def write_report(out, doc, run, local_vs21):
               "P2 parity: " + json.dumps(run.get("p2_parity", {}), sort_keys=True), "",
               "P3 exclusions and adduct mapping (records; adduct_unmapped records stay in the universe):", "",
               "```json", json.dumps(prov, indent=2, sort_keys=True), "```", "",
-              "Synthetic chimeric set: " + json.dumps({k: sc(v) for k, v in run.get("chimeric", {}).items()}, sort_keys=True), "",
+              "Synthetic chimeric set: " + json.dumps({k: sc(v, held_out=k in HELD_OUT) for k, v in run.get("chimeric", {}).items()}, sort_keys=True), "",
               "In-source and adduct recast set (records per transformation row of insource-p3.tsv; `atoms_missing` rows "
               "failed the atom check, `adduct_unmapped` records carry a product type the console's alias table lacks):", "",
-              "```json", json.dumps({k: dict(v, by_row={r: sc(c) for r, c in v.get("by_row", {}).items()})
+              "```json", json.dumps({k: dict(v, by_row={r: sc(c, held_out=k in HELD_OUT) for r, c in v.get("by_row", {}).items()})
                                      for k, v in run.get("insource", {}).items()}, indent=1, sort_keys=True), "```", "",
               "Instrument class, P2 bin -> console class, base pass (record counts): "
-              + json.dumps(sc(run.get("instrument_classes", {})), sort_keys=True), "",
+              + json.dumps(run.get("instrument_classes", {}), sort_keys=True), "",
               "Console skips and errors per source, set and pass (records, summed over shards; `fire` stops on any error):", "",
-              "```json", json.dumps({k: sc(v) for k, v in skip_counts(run.get("fire", {})).items()}, indent=1, sort_keys=True),
+              "```json", json.dumps({k: sc(v, held_out=held_out_key(k)) for k, v in skip_counts(run.get("fire", {})).items()}, indent=1, sort_keys=True),
               "```", "",
               "## Definitions", "",
               "- Universe: every representative of the ion mode; conditional population: representatives where the rule "
@@ -1483,7 +1668,8 @@ def write_report(out, doc, run, local_vs21):
               "whose precondition holds. Either above 5 % makes the rule `non_conditional`.",
               "- Prior stress: P2's statistics() on the cluster universe table (library-wide prevalence of the mode, halved, "
               "LR+ lower bound). The conditional stress grid is report-only.",
-              "- Per-source precision uses library sources (VS20, VS21); provenance buckets are reported only.",
+              "- Per-source precision uses the library sources (VS20, VS21, C26); provenance buckets (C26: ingest_lib) "
+              "are reported only. C26 spectra merged from several collision energies form the energy stratum `merged`.",
               f"- In-source recasts approximate the product's own MS/MS, which the library does not hold: the parent spectrum "
               f"cut at the product precursor m/z + {INSOURCE_MARGIN_DA} Da with a precursor peak added. Truth stays the parent's.",
               "", "## Not done in this phase", ""] + [f"- {x}" for x in NOT_DONE]
@@ -1496,7 +1682,7 @@ def load_rules(ruleset_dir):
     if not res.ok:
         raise RuntimeError("Rule set does not load: " + str(res.errors[:3]))
     if res.ruleset_sha256 != EXPECTED_RULESET_SHA256 or res.rule_set_version != EXPECTED_RULESET_VERSION:
-        raise RuntimeError("Rule set is not the pinned 0.1.0 set")
+        raise RuntimeError(f"Rule set is not the pinned {EXPECTED_RULESET_VERSION} set")
     raw = ruleset_file_hashes(ruleset_dir)
     rules = []
     for rid, info in sorted(res.rules.items()):
@@ -1519,7 +1705,7 @@ def load_rules(ruleset_dir):
 def load_truth(out, source):
     import pyarrow.parquet as pq
     cols = ["record_id", "source", "mode", "motifs", "cluster_id", "instrument", "energy", "bucket"]
-    t = pq.read_table(p2.row_path(Path(out), "prepared", source), columns=cols).to_pylist()
+    t = pq.read_table(row_path(out, "prepared", source), columns=cols).to_pylist()
     return {(source, r["record_id"]): dict(mode=r["mode"], motifs=frozenset(r["motifs"]), cluster=r["cluster_id"],
                                            instrument=r["instrument"], energy=r["energy"], bucket=r["bucket"], source=source)
             for r in t}
@@ -1564,7 +1750,7 @@ def measure(args, run):
     motif_rows, adducts = read_ruleset_tables(args.ruleset_dir)
     transforms = load_insource(INSOURCE_TABLE, {r["motif_id"] for r in motif_rows}, adducts, load_elements(args.ruleset_dir))
     for source in args.sources:
-        if source == "vs21":
+        if source in HELD_OUT:
             vs21_guard(args)
         truth.update(load_truth(args.out, source))
         ev, _ = load_set(args.out, source, "representatives")
@@ -1592,28 +1778,99 @@ def measure(args, run):
     result = measure_core(rules, truth, by_rule, notev, args.sources, args.seed, args.bootstrap,
                           dict(by_rule=chim_by_level, universe=chim_universe, notev=chim_notev), refused,
                           dict(by_rule=ins_by_row, universe=ins_universe, notev=ins_notev, rows=transforms))
-    local = any_vs21(args.sources)
+    sfx = suffix(*args.sources)
     schema = pa.schema([("set", pa.string()), ("level", pa.float64()), ("transform", pa.int64()), ("source", pa.string()),
                         ("record_id", pa.int64()),
                         ("pass_id", pa.string()), ("rule_id", pa.string()), ("n_hypotheses", pa.int64()),
                         ("fired", pa.bool_()), ("veto_blocked", pa.bool_()), ("adduct", pa.string()), ("motif_match", pa.bool_())])
-    sink = p2.ParquetRows(args.out / ("fires" + (".local-vs21" if local else "") + ".parquet"), schema)
+    sink = p2.ParquetRows(args.out / ("fires" + sfx + ".parquet"), schema)
     write_fires(sink, by_rule, truth, rules, "representatives")
     for level in CHIMERIC_LEVELS:
         write_fires(sink, chim_by_level[level], truth, rules, "chimeric", level)
     for t in transforms:
         write_fires(sink, ins_by_row[t["row"]], truth, rules, "insource", transform=t["row"])
     sink.close()
-    doc = write_aggregates(args.out, result, args.out.name, rules, local,
+    doc = write_aggregates(args.out, result, args.out.name, rules, sfx,
                            extra=dict(refused_rule_ids=refused, sources=args.sources))
-    write_report(args.out, doc, run, local)
+    write_report(args.out, doc, run, sfx)
     run["acceptance_artifact_audit"] = audit_aggregates(args.out)
     run["status_counts"] = doc["status_counts"]
 
 
+# ------------------------------------------------------------------------------------------- inventory stage
+POWER_FIELDS = ["rule_id", "version", "ion_mode", "motif_id", "source", "n_universe", "n_positive", "c_universe",
+                "c_positive"]
+
+
+def power_counts(rules, truth, sources):
+    """Truth only: per measured rule (measure and source_checked), in its ion mode, per source and pooled, the
+    representatives and clusters of the universe and those whose truth motif set holds the rule's motif (measure's
+    universe(), so n_positive and c_positive are the denominators measure reports). No evidence, no precision."""
+    truth_by_mode = defaultdict(list)
+    for uid in sorted(truth):
+        truth_by_mode[truth[uid]["mode"]].append((uid, truth[uid]))
+    rows, cache = [], {}
+    for rule in sorted(rules, key=lambda r: r["rule_id"]):
+        if not (rule["measure"] and rule["source_checked"]):
+            continue
+        key = (rule["ion_mode"], rule["motif_id"])
+        if key not in cache:
+            cache[key] = universe(truth_by_mode, *key, True, sources)
+        for s in ("pooled",) + tuple(sources):
+            u = cache[key][(s, "all", "all")]
+            rows.append(dict(rule_id=rule["rule_id"], version=rule["version"], ion_mode=rule["ion_mode"],
+                             motif_id=rule["motif_id"], source=s, n_universe=u["n"], n_positive=u["pos"],
+                             c_universe=len(u["cl"]), c_positive=len(u["pcl"])))
+    return rows
+
+
+def inventory(args, run):
+    """Truth-only inventory after prepare (handback 22.5): prepare counters and stats per source, the C26
+    instrument strings with P2's instrument class, and the power count. It never runs the console, reads no
+    evidence and computes no precision."""
+    rules, _, _ = load_rules(args.ruleset_dir)
+    truth = {}
+    for source in args.sources:
+        if source in HELD_OUT:
+            vs21_guard(args)
+        truth.update(load_truth(args.out, source))
+
+    def of(name, source):
+        return {k: v for k, v in sorted(run.get(name, {}).items()) if k.startswith(source + ":")}
+
+    prepared = {s: dict(stats=run.get("prepared", {}).get(s), exclusions=of("exclusions", s),
+                        p3_exclusions=of("p3_exclusions", s), p2_parity=run.get("p2_parity", {}).get(s))
+                for s in args.sources}
+    itypes = {}
+    for s in args.sources:
+        path = Path(args.out) / f"instrument_types{suffix(s)}.tsv"
+        if path.is_file():
+            itypes[s] = [dict(r, records=int(r["records"])) for r in read_rows(path)]
+    power = power_counts(rules, truth, args.sources)
+    sfx = suffix(*args.sources)
+    p2.write_json(Path(args.out) / f"inventory{sfx}.json", dict(
+        label="ws8-p3-inventory", run_id=Path(args.out).name, sources=args.sources,
+        ruleset_sha256=EXPECTED_RULESET_SHA256, ruleset_version=EXPECTED_RULESET_VERSION, prepare=prepared,
+        instrument_types=itypes, power=power,
+        note="Truth only: no console run, no evidence, no precision. Power: representatives (n_) and clusters (c_) of "
+             "the rule's ion mode (universe) and those whose truth motif set holds the rule's motif (positive), for "
+             "every rule with measure: true and source_checked: true. Instrument classes are P2's instrument_bin."))
+    write_rows(Path(args.out) / f"inventory{sfx}.tsv", power, POWER_FIELDS)
+    run["inventory"] = dict(rules=len({r["rule_id"] for r in power}), files=[f"inventory{sfx}.json", f"inventory{sfx}.tsv"],
+                            audit=audit_aggregates(args.out))
+    print("inventory", run["inventory"], flush=True)
+
+
 # ------------------------------------------------------------------------------------------- VS21 and runs
 FREEZE_KEYS = ("ruleset_sha256_expected", "ruleset_files", "console_sha256", "console_files", "code", "parameters",
-               "insource_table", "criteria")
+               "insource_table", "criteria", "c26")
+
+
+def c26_parameters():
+    """C26 pins of the freeze. Instrument strings are classified by P2's instrument_bin (covered by the code hashes);
+    no separate mapping table is used."""
+    return dict(train_sha256=C26_SHA256, ppm_max=C26_PPM_MAX, excluded_ingest_libs=list(C26_EXCLUDED_LIBS),
+                instrument_map="p2_diagnostics.instrument_bin")
 
 
 def freeze_hashes(ruleset_dir, console, seed, bootstrap):
@@ -1623,13 +1880,15 @@ def freeze_hashes(ruleset_dir, console, seed, bootstrap):
                 code={p.relative_to(ROOT).as_posix(): p2.sha256(p) for p in CODE_FILES},
                 parameters=dict(seed=seed, bootstrap=bootstrap, console_ini=CONSOLE_INI),
                 insource_table=p2.sha256(INSOURCE_TABLE),
-                criteria=json.loads(json.dumps(dict(strict=CRITERIA, provisional=CRITERIA_PROVISIONAL))))
+                criteria=json.loads(json.dumps(dict(strict=CRITERIA, provisional=CRITERIA_PROVISIONAL,
+                                                     exploratory=CRITERIA_EXPLORATORY))),
+                c26=c26_parameters())
 
 
 def vs21_guard(args, out_root=OUT_ROOT):
-    """The VS21 path runs only with --vs21 and a freeze file (named and placed as `freeze` writes it) whose hashes
+    """The held-out sources (VS21, C26) run only with --vs21 and a freeze file (named and placed as `freeze` writes it) whose hashes
     match the rule set, the console's bin folder, the measurement code and the parameters (seed, bootstrap, console
-    INI) now. It never opens a VS21 file."""
+    INI) and the C26 pins now. It never opens a VS21 or C26 file."""
     if not getattr(args, "vs21", False):
         raise PermissionError("VS21 needs the explicit --vs21 flag")
     freeze = getattr(args, "freeze", None)
@@ -1696,27 +1955,28 @@ def detach(argv, out):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("stage", choices=("prepare", "fire", "measure", "all", "freeze"))
+    parser.add_argument("stage", choices=("prepare", "inventory", "fire", "measure", "all", "freeze"))
     parser.add_argument("--out", type=Path, help="run directory p3cs[smoke]-<yyyymmdd>-<sha> under " + OUT_ROOT.as_posix())
-    parser.add_argument("--sources", default="vs20")
+    parser.add_argument("--sources", default="vs20", help="vs20, vs20,vs21 or vs20,vs21,c26")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--limit", type=float, help="deterministic per-file fraction (0,1]; 0.01 for the smoke")
-    parser.add_argument("--ruleset-dir", type=Path, help="the RuleSet folder of the console's source (0.1.0)")
+    parser.add_argument("--ruleset-dir", type=Path, help="the RuleSet folder of the console's source (" + EXPECTED_RULESET_VERSION + ")")
     parser.add_argument("--console", type=Path, help="MsfinderConsoleApp.exe")
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--bootstrap", type=int, default=BOOTSTRAP)
-    parser.add_argument("--vs21", action="store_true", help="allow the VS21 source (needs a matching --freeze)")
-    parser.add_argument("--freeze", type=Path, help="freeze file to write (stage freeze) or to check (VS21)")
+    parser.add_argument("--vs21", action="store_true", help="allow the held-out sources (needs a matching --freeze)")
+    parser.add_argument("--freeze", type=Path, help="freeze file to write (stage freeze) or to check (VS21, C26)")
+    parser.add_argument("--c26-train", type=Path, default=C26_TRAIN, help="CASMI26 train.parquet (source c26)")
     parser.add_argument("--detach", action="store_true", help="launch outside the caller's Windows job (WMI), log to run.log")
     parser.add_argument("--detached-child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     args.sources = args.sources.split(",")
-    if args.sources not in (["vs20"], ["vs20", "vs21"]) or not 1 <= args.workers <= 8:
-        # VS21 needs VS20 in the same run: its records are deduplicated against the VS20 first blocks.
-        parser.error("Use --sources vs20 or vs20,vs21 and 1..8 workers")
+    if args.sources not in SOURCE_LISTS or not 1 <= args.workers <= 8:
+        # VS21 needs VS20 in the same run, and C26 both: their records are deduplicated against the earlier keys.
+        parser.error("Use --sources vs20, vs20,vs21 or vs20,vs21,c26 and 1..8 workers")
     if args.limit is not None and not 0 < args.limit <= 1:
         parser.error("--limit must be a fraction in (0,1]")
-    if args.stage in ("prepare", "fire", "measure", "all", "freeze") and not args.ruleset_dir:
+    if args.stage in ("prepare", "inventory", "fire", "measure", "all", "freeze") and not args.ruleset_dir:
         parser.error("--ruleset-dir is required for " + args.stage)
     if args.stage in ("fire", "all", "freeze") and not args.console:
         parser.error("--console is required for " + args.stage)
@@ -1773,14 +2033,15 @@ def main(argv=None):
                code_sha256={p.relative_to(ROOT).as_posix(): p2.sha256(p) for p in CODE_FILES},
                parameters=dict(sources=args.sources, workers=args.workers, limit=args.limit, seed=args.seed,
                                bootstrap=args.bootstrap, priority=priority_name, criteria=CRITERIA,
-                               criteria_provisional=CRITERIA_PROVISIONAL,
+                               criteria_provisional=CRITERIA_PROVISIONAL, criteria_exploratory=CRITERIA_EXPLORATORY,
                                threads={v: os.environ[v] for v in p2.THREAD_VARS}, passes=list(PASSES),
                                primary_pass=PRIMARY_PASS, chimeric=dict(levels=list(CHIMERIC_LEVELS), window_da=CHIMERIC_WINDOW_DA,
                                                                         partner="same mode, other first block, seeded"),
                                console_ini=CONSOLE_INI, record_unit="one representative per first block, ion mode and "
                                "curated precursor type (alias-mapped when the adduct table maps it)",
                                cluster="(truth Hill formula, curated precursor type, truth motif set) within a source",
-                               expected_ruleset_sha256=EXPECTED_RULESET_SHA256),
+                               expected_ruleset_sha256=EXPECTED_RULESET_SHA256,
+                               **(dict(c26=c26_parameters()) if "c26" in args.sources else {})),
                process=dict(detached_child=args.detached_child, launch_method="WMI" if args.detached_child else "foreground", **context),
                status="running", not_done=NOT_DONE)
     run.setdefault("timings_seconds", {})
