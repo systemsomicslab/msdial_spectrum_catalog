@@ -345,7 +345,7 @@ $py = '<annotation-py312>\Scripts\python.exe'   # the RDKit environment P2 uses
 | `rules_synthetic.csv` | per rule and synthetic set (`set`): each chimeric level, and each in-source transformation row (`transform`, `change`, `product_adduct`) plus their pool (`transform` = `all`, gated): records not evaluated by the console, fires, TP/FP, precision and Wilson in records (report only) and clusters (gated) |
 | `rules_occupancy.csv` | per rule and precondition mode: both occupancy definitions and `non_conditional` |
 | `rules_precision.json` | label `ws8-p3-class-rules`, criteria, per rule: parameters, status, every criterion with its value, the pooled row of every pass, synthetic, occupancy, competitors, provenance breakdown |
-| `review_proposal-<run-id>.json` | `passed_strict` (tier-1 numbers) and `passed_provisional_only` (tier-2 numbers) as separate lists, both empty in a VS20-only run, and the `incomplete_strict` and `incomplete_provisional` rules; the author chooses which tier to accept |
+| `review_proposal-<run-id>.json` | `passed_strict` (tier-1 numbers), `passed_provisional_only` (tier-2 numbers) and `passed_exploratory_only` (tier-3 numbers) as separate lists, all empty in a VS20-only run, and the `incomplete_strict`, `incomplete_provisional` and `incomplete_exploratory` rules; the author chooses which tier to accept |
 | `report.md`, `run.json` | summary; code commit, pin path, inputs and sha256, rule-set files (raw and canonical sha256), console path and sha256, parameters, exclusions, P2 parity, file hashes |
 
 Aggregates carry ids only (`rule_id`, `motif_id`); `measure` and `inventory` scan them as P2 does
@@ -361,7 +361,7 @@ under `fire/c26/` carry `.local-c26` in their names.
 
 ## Criteria
 
-Each rule is gated twice, on the same primary-mode pooled cell, counting clusters. Tier 1 is the table registered
+Each rule is gated by tiers 1 and 2 on the same primary-mode pooled cell, counting clusters. Tier 1 is the table registered
 in MsdialWorkbench PR #908 (`CRITERIA`). Tier 2 (`CRITERIA_PROVISIONAL`) was registered by the author on
 2026-11-24, before any VS21 pass, after the VS20 development pass had been seen. Counting unit, primary pass,
 eligibility and the pending logic are the same in both tiers.
@@ -381,15 +381,34 @@ eligibility and the pending logic are the same in both tiers.
 
 Both tiers are written to `run.json` and the freeze file; the VS21 pass refuses a change in either.
 
+**Tier 3 (`CRITERIA_EXPLORATORY`, "exploratory").** Registered by the author on 2026-11-27, after the truth-only C26
+inventory and before any rule fired on C26. VS20 and VS21 results had been seen, so tier 3 is judged on C26 alone and
+applies only to a run with C26 among its sources (otherwise its status is `not_applicable`).
+
+| Criterion | Tier 3 (exploratory) |
+|---|---|
+| Gate cell | the primary pass, source C26, all instruments and energies |
+| Fired C26 clusters | >= 20 |
+| C26 cluster Wilson lower bound | >= 0.80 |
+| Guard on the seen sets | point precision >= 0.85 on VS20 and on VS21, each where it has >= 30 fired clusters |
+| C26 cluster decoy FDR, occupancy | <= 0.05, <= 5 % |
+| Synthetic chimeric and in-source cluster precision | >= 0.85 |
+| Prior stress | report-only |
+| Rule origin | every origin is eligible (C26 is external to the tuning sets) |
+
+A tier-3 rule is exploratory L3-SI evidence. It is never claim-eligible, and the MS-FINDER ranking weight stays 0. In
+shared outputs a C26 gate value is blanked when its own fired-cluster count is 1 to 4.
+
 ## Status
 
-Per tier: `not_measured` (outside `measure: true` and `source_checked: true`, or refused by the console);
+Per tier: `not_applicable` (tier 3 without C26); `not_measured` (outside `measure: true` and `source_checked: true`, or refused by the console);
 `not_estimable` (fewer fired clusters than the tier's minimum in the primary pass); `fail` (a gated criterion
 failed); `incomplete` (every gated criterion this run can measure is met, others pending); `pass` (every gated
-criterion met). The combined label is `pass_strict` when tier 1 passes, `pass_provisional_only` when only tier 2
-passes, `incomplete_provisional` when tier 2 is `incomplete` while tier 1 failed or was not estimable, and
-otherwise the tier-1 status. `rules_precision.json`, the gate row of `rules_precision.csv` and `report.md` give
-both statuses with their failed and pending lists. The held-out criterion is met only with VS21 in the run, so a
+criterion met). The combined label is, in order: `pass_strict` when tier 1 passes, `pass_provisional_only` when
+tier 2 passes, `pass_exploratory_only` when tier 3 passes, `incomplete_provisional` when tier 2 is `incomplete` while
+tier 1 failed or was not estimable, `incomplete_exploratory` when tier 3 is `incomplete` while tiers 1 and 2 failed or
+were not estimable, and otherwise the tier-1 status. `rules_precision.json`, the gate row of `rules_precision.csv`
+and `report.md` give every tier's status with its failed and pending lists. The held-out criterion is met only with VS21 in the run, so a
 VS20-only run has no `pass` in either tier.
 
 ## Decisions where the specification was silent

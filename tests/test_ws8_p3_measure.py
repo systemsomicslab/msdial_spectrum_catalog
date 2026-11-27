@@ -882,6 +882,76 @@ class TierTests(unittest.TestCase):
         self.assertIn("c26:gnps", g["by_provenance"])
         self.assertEqual({r["source"] for r in res["precision"]}, {"pooled", "vs20", "vs21", "c26"})
 
+
+def c26_split(sc, n_c26):
+    """The first n_c26 TP clusters move to C26; everything else stays VS20."""
+    truth, by_rule, chim = sc
+    for rec in truth.values():
+        c = rec["cluster"]
+        if c.startswith("tp") and int(c[2:]) < n_c26:
+            rec.update(source="c26", bucket="gnps")
+    return truth, by_rule, chim
+
+
+class ExploratoryTierTests(unittest.TestCase):
+    """Tier 3 (exploratory, registered 2026-11-27): judged on C26 alone, VS20 and VS21 only guard."""
+    gate = TierTests.gate
+
+    def gate3(self, sc, origin="as_published"):
+        return self.gate(sc, sources=("vs20", "vs21", "c26"), rules=[rule(origin=origin)])
+
+    def test_not_applicable_without_c26(self):
+        res, g = self.gate(scenario())
+        self.assertEqual((g["status_exploratory"], g["label"]), ("not_applicable", "pass_strict"))
+
+    def test_rule_passing_tier_3_only(self):
+        # 40 TP + 6 FP clusters pooled (precision 0.87) fails tier 2; C26 holds 25 TP clusters and no FP.
+        for origin in ("as_published", "tuned_pooled"):
+            res, g = self.gate3(c26_split(scenario(tp_clusters=40, fp_clusters=6, members=1), 25), origin)
+            self.assertEqual((g["status"], g["status_provisional"]), ("not_estimable", "fail"), origin)
+            self.assertEqual((g["status_exploratory"], g["exploratory"]["failed"]), ("pass", []), origin)
+            self.assertEqual(g["exploratory"]["criteria"]["n_clusters"]["value"], 25)
+            self.assertIn("C26 alone", g["exploratory"]["criteria"]["heldout"]["note"])
+            self.assertEqual(g["label"], "pass_exploratory_only", origin)
+        with tempfile.TemporaryDirectory() as d:
+            m.write_aggregates(d, res, "p3cs-20261127-abcdef1", [rule()], "")
+            prop = json.loads((Path(d) / "review_proposal-p3cs-20261127-abcdef1.json").read_text(encoding="utf-8"))
+            listed = prop["passed_exploratory_only"][0]
+            self.assertEqual((listed["tier"], listed["criteria"]["n_clusters"]["threshold"]), ("exploratory", 20))
+            row = next(r for r in m.read_rows(Path(d) / "rules_precision.csv") if r["gate_row"] == "True")
+            self.assertEqual((row["status_exploratory"], row["label"]), ("pass", "pass_exploratory_only"))
+
+    def test_tier_3_needs_20_c26_clusters(self):
+        res, g = self.gate3(c26_split(scenario(tp_clusters=40, fp_clusters=6, members=1), 15))
+        self.assertEqual((g["status_exploratory"], g["label"]), ("not_estimable", "not_estimable"))
+
+    def test_tier_3_guard_on_seen_sets(self):
+        # VS20 keeps 35 TP and 10 FP clusters: 45 fired, point precision 0.78 < 0.85.
+        res, g = self.gate3(c26_split(scenario(tp_clusters=60, fp_clusters=10, members=1), 25))
+        self.assertEqual(g["status_exploratory"], "fail")
+        self.assertEqual(g["exploratory"]["failed"], ["per_source_precision"])
+        self.assertEqual(set(g["exploratory"]["criteria"]["per_source_precision"]["value"]), {"vs20", "vs21"})
+
+    def test_small_c26_gate_cell_is_blanked(self):
+        res, g = self.gate3(c26_split(scenario(tp_clusters=40, fp_clusters=6, members=1), 3))
+        self.assertEqual(g["exploratory"]["criteria"]["n_clusters"]["value"], 3)
+        with tempfile.TemporaryDirectory() as d:
+            m.write_aggregates(d, res, "p3cs-20261127-abcdef1", [rule()], "")
+            doc = json.loads((Path(d) / "rules_precision.json").read_text(encoding="utf-8"))
+            crit = doc["rules"][0]["exploratory"]["criteria"]
+            self.assertEqual([crit[k]["value"] for k in ("n_clusters", "cluster_wilson_lo", "prior_stress", "decoy_fdr")],
+                             [None] * 4)
+            self.assertEqual(doc["rules"][0]["criteria"]["n_clusters"]["value"], 46)  # pooled kept
+
+    def test_combined_label_order(self):
+        cl = m.combined_label
+        self.assertEqual(cl("pass", "pass", "pass"), "pass_strict")
+        self.assertEqual(cl("fail", "pass", "pass"), "pass_provisional_only")
+        self.assertEqual(cl("fail", "incomplete", "pass"), "pass_exploratory_only")
+        self.assertEqual(cl("fail", "incomplete", "incomplete"), "incomplete_provisional")
+        self.assertEqual(cl("not_estimable", "fail", "incomplete"), "incomplete_exploratory")
+        self.assertEqual(cl("fail", "fail", "not_applicable"), "fail")
+
     def test_combined_label(self):
         self.assertEqual(m.combined_label("pass", "pass"), "pass_strict")
         self.assertEqual(m.combined_label("fail", "pass"), "pass_provisional_only")
@@ -1273,7 +1343,8 @@ class GuardTests(unittest.TestCase):
                                    seed=1, bootstrap=10)
             self.assertTrue(m.vs21_guard(args, d))
             for name, field, value in (("CRITERIA", "wilson_target", 0.94), ("CRITERIA_PROVISIONAL", "n_min", 25),
-                                       ("CRITERIA_PROVISIONAL", "prior_stress_gated", True)):
+                                       ("CRITERIA_PROVISIONAL", "prior_stress_gated", True),
+                                       ("CRITERIA_EXPLORATORY", "wilson_target", 0.79)):
                 saved = getattr(m, name)
                 setattr(m, name, dict(saved, **{field: value}))
                 try:
